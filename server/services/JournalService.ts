@@ -64,7 +64,7 @@ class JournalService {
         const parsed = JSON.parse(raw);
         this.entries = Array.isArray(parsed) ? parsed : [];
       } else {
-        this.entries = this.generateInitialSeedEntries();
+        this.entries = [];
         this.saveEntries();
       }
 
