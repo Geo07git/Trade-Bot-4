@@ -187,9 +187,31 @@ async function startServer() {
     try {
       journalService.clearAllEntries();
       botEngine.state.tradeHistory = [];
+      botEngine.savePersistedState(true);
       res.json({ success: true, message: 'Jurnalul de tranzacții a fost șters cu succes.', state: botEngine.state });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err?.message || 'Eroare la ștergerea jurnalului' });
+    }
+  });
+
+  app.post('/api/journal/delete-entry', (req, res) => {
+    try {
+      const { id, symbol, timestamp } = req.body || {};
+      if (id) {
+        journalService.deleteEntry(id);
+      }
+      if (botEngine?.state?.tradeHistory) {
+        botEngine.state.tradeHistory = botEngine.state.tradeHistory.filter((t: any, idx: number) => {
+          const tId = `store_trade_${idx}_${t.symbol}`;
+          if (id && (tId === id || t.id === id)) return false;
+          if (symbol && timestamp && t.symbol === symbol && t.timestamp === timestamp) return false;
+          return true;
+        });
+        botEngine.savePersistedState(true);
+      }
+      res.json({ success: true, message: 'Tranzacția a fost ștearsă cu succes.', state: botEngine.state });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Eroare la ștergerea tranzacției' });
     }
   });
 

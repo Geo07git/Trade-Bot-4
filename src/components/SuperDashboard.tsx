@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useTradingStore } from '../store';
+import { PositionTimer } from './PositionTimer';
 import { 
   Wallet, 
   TrendingUp, 
@@ -30,6 +31,7 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
   const {
     balance,
     positions,
+    maxHoldMinutes,
     initialBalance,
     logs,
     autoTradingActive,
@@ -252,18 +254,20 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
                   key={pos.symbol}
                   className="bg-black/60 border border-white/10 hover:border-white/20 rounded-xl p-3.5 space-y-2.5 transition-all"
                 >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 shrink-0">
                       <span className="font-bold text-sm text-white font-mono">{pos.symbol}</span>
                       <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                         BUY
                       </span>
                     </div>
 
+                    <PositionTimer pos={pos} maxHoldMinutes={maxHoldMinutes} />
+
                     <button
                       onClick={() => handleClosePosition(pos.symbol, pos.amount, currentPrice)}
                       disabled={isSelling}
-                      className="px-2.5 py-1 bg-rose-500/10 hover:bg-rose-500/20 active:bg-rose-500/30 text-rose-400 border border-rose-500/30 rounded-lg text-xs font-medium transition-all cursor-pointer"
+                      className="px-2.5 py-1 bg-rose-500/10 hover:bg-rose-500/20 active:bg-rose-500/30 text-rose-400 border border-rose-500/30 rounded-lg text-xs font-medium transition-all cursor-pointer shrink-0"
                     >
                       {isSelling ? 'Vânzare...' : 'Vinde Tot'}
                     </button>

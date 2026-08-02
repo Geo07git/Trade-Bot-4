@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
 import { useTradingStore } from '../store';
+import { PositionTimer } from './PositionTimer';
 import { fetchLivePrice, fetchChartData } from '../services/api';
 import { ArrowUpRight, ArrowDownRight, Wallet, TrendingUp, AlertTriangle, Trash2, Newspaper, ExternalLink, RefreshCw, ShoppingCart, ArrowUpCircle, ArrowDownCircle, Zap, CheckCircle2, Heart, Radio } from 'lucide-react';
 import { clsx } from 'clsx';
@@ -15,6 +16,7 @@ export function Dashboard() {
   const { 
     balance, 
     positions, 
+    maxHoldMinutes,
     watchlist, 
     marketOpportunities,
     symbolStats,
@@ -821,8 +823,14 @@ export function Dashboard() {
                   
                   return (
                     <div key={i} className="p-4 bg-zinc-800/40 rounded-xl border border-white/5 flex flex-col gap-3">
-                      <div className="flex justify-between items-start">
-                        <p className="text-[12px] font-bold text-zinc-200 tracking-wider">{pos.symbol}</p>
+                      <div className="flex justify-between items-center gap-2">
+                        <div className="flex items-center gap-2">
+                          <p className="text-[12px] font-bold text-zinc-200 tracking-wider font-mono">{pos.symbol}</p>
+                          <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                            BUY
+                          </span>
+                        </div>
+                        <PositionTimer pos={pos} maxHoldMinutes={maxHoldMinutes} />
                         <p className={cn("text-xs font-mono font-bold", pl >= 0 ? "text-emerald-400" : "text-rose-400")}>
                           {pl >= 0 ? '+' : ''}{plPercent.toFixed(2)}%
                         </p>

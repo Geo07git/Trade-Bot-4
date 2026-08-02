@@ -97,6 +97,16 @@ class JournalService {
     this.saveEntries();
   }
 
+  public deleteEntry(id: string): boolean {
+    const prevLen = this.entries.length;
+    this.entries = this.entries.filter((e) => e.id !== id);
+    if (this.entries.length !== prevLen) {
+      this.saveEntries();
+      return true;
+    }
+    return false;
+  }
+
   private saveEntries() {
     try {
       fs.writeFileSync(this.journalFilePath, JSON.stringify(this.entries, null, 2), 'utf-8');

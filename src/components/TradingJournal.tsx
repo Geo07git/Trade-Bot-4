@@ -331,6 +331,32 @@ export function TradingJournal() {
     }
   };
 
+  const handleDeleteSingleEntry = async (entry: JournalEntry) => {
+    if (!window.confirm(`Ștergi tranzacția ${entry.symbol} (${entry.action}) din ${formatInTimezone(entry.timestamp || new Date().toISOString(), timezone || 'Europe/Bucharest')}?`)) return;
+    try {
+      const res = await fetch('/api/journal/delete-entry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: entry.id, symbol: entry.symbol, timestamp: entry.timestamp })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setEntries((prev) => prev.filter((e) => e.id !== entry.id));
+        if (tradeHistory && Array.isArray(tradeHistory)) {
+          const updatedHistory = tradeHistory.filter((t, idx) => {
+            const tId = `store_trade_${idx}_${t.symbol}`;
+            if (entry.id && (tId === entry.id || t.id === entry.id)) return false;
+            if (entry.symbol && entry.timestamp && t.symbol === entry.symbol && t.timestamp === entry.timestamp) return false;
+            return true;
+          });
+          useTradingStore.setState({ tradeHistory: updatedHistory });
+        }
+      }
+    } catch (err) {
+      console.error('Eroare la ștergerea tranzacției:', err);
+    }
+  };
+
   // Merge server journal entries with tradeHistory from store so no trade is ever missed
   const allDisplayEntries = useMemo(() => {
     const existingKeys = new Set(entries.map(e => `${e.symbol}_${e.timestamp}`));
@@ -685,10 +711,19 @@ export function TradingJournal() {
           </button>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+          <button
+            onClick={handleClearEntries}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 rounded-xl text-xs font-medium transition-all cursor-pointer shadow-sm"
+            title="Șterge definitiv toate ordinele și tranzacțiile din jurnal"
+          >
+            <Trash2 size={13} />
+            Șterge Toate Tranzacțiile
+          </button>
+
           <button
             onClick={handleClearSnapshots}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 rounded-xl text-xs font-medium transition-all cursor-pointer shadow-sm"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-xl text-xs font-medium transition-all cursor-pointer shadow-sm"
             title="Șterge definitiv rapoartele zilnice și graficul equity"
           >
             <Trash2 size={13} />
@@ -880,12 +915,13 @@ export function TradingJournal() {
                     <th className="px-5 py-3">Probabilitate ML</th>
                     <th className="px-5 py-3">Model ML</th>
                     <th className="px-5 py-3">Motiv Intrare / Strategie</th>
+                    <th className="px-5 py-3 text-center">Acțiuni</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5 text-zinc-300">
                   {filteredEntries.length === 0 ? (
                     <tr>
-                      <td colSpan={11} className="px-5 py-12 text-center text-zinc-500">
+                      <td colSpan={12} className="px-5 py-12 text-center text-zinc-500">
                         Nicio tranzacție găsită conform filtrelor selectate.
                       </td>
                     </tr>
@@ -959,6 +995,16 @@ export function TradingJournal() {
                         <td className="px-5 py-3.5 text-zinc-300 max-w-xs truncate" title={e.entryReason || ''}>
                           {e.entryReason || 'Semnal AI Strategy'}
                         </td>
+
+                        <td className="px-5 py-3.5 text-center whitespace-nowrap">
+                          <button
+                            onClick={() => handleDeleteSingleEntry(e)}
+                            className="p-1.5 text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer"
+                            title="Șterge tranzacția din jurnal"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </td>
                       </tr>
                     ))
                   )}
@@ -1026,8 +1072,15 @@ export function TradingJournal() {
                     <span className="text-emerald-400 font-mono font-semibold">{e.mlProbability || 75}% Prob</span>
                   </div>
 
-                  <div className="text-[11px] text-zinc-400 italic bg-zinc-900 p-2 rounded-lg">
-                    {e.entryReason || 'Semnal AI Strategy'}
+                  <div className="flex items-center justify-between text-[11px] text-zinc-400 italic bg-zinc-900 p-2 rounded-lg">
+                    <span className="truncate max-w-[200px]">{e.entryReason || 'Semnal AI Strategy'}</span>
+                    <button
+                      onClick={() => handleDeleteSingleEntry(e)}
+                      className="p-1.5 text-zinc-500 hover:text-rose-400 hover:bg-rose-500/15 rounded-lg transition-colors cursor-pointer shrink-0"
+                      title="Șterge tranzacția"
+                    >
+                      <Trash2 size={14} />
+                    </button>
                   </div>
                 </div>
               ))
