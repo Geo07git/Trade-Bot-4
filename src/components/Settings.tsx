@@ -80,6 +80,8 @@ export function Settings() {
     setPositionSizePercent,
     stopLossPercent,
     setStopLossPercent,
+    maxHoldMinutes,
+    setMaxHoldMinutes,
     positions,
     maxLogs,
     setMaxLogs,
@@ -259,7 +261,7 @@ export function Settings() {
               <div className="text-[11px] text-zinc-300 bg-zinc-900/80 p-2.5 rounded-lg border border-amber-500/10 space-y-1">
                 <div className="flex justify-between">
                   <span className="text-zinc-400">Ordin estimat pe Equity-ul curent (${(balance || 100).toFixed(2)}):</span>
-                  <span className="font-mono text-amber-400 font-bold">${Math.max(10, ((balance || 100) * ((positionSizePercent || 5) / 100))).toFixed(2)} USDT</span>
+                  <span className="font-mono text-amber-400 font-bold">${((balance || 100) * ((positionSizePercent || 5) / 100)).toFixed(2)} USDT</span>
                 </div>
                 <div className="flex justify-between text-[10px] text-zinc-400">
                   <span>Exemplu $1,000 USDT total ➔ <strong className="text-zinc-200">${1000 * ((positionSizePercent || 5) / 100)} USDT</strong> / ordin</span>
@@ -304,6 +306,46 @@ export function Settings() {
                 </div>
                 <p className="text-[10px] text-zinc-400 leading-tight">
                   💡 Notă: Pe lumânări extreme de volatilitate (slippage/gaps pe altcoins), prețul executat pe Binance poate fi primul preț de piață disponibil.
+                </p>
+              </div>
+            </div>
+
+            {/* Max Hold Time Limit (Minutes) */}
+            <div className="space-y-3 bg-zinc-950/60 p-4 rounded-xl border border-white/5">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-semibold text-white">Timp Maxim Deținere Poziție (Min)</label>
+                <span className="text-xs font-mono font-bold bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded border border-amber-500/30">
+                  {maxHoldMinutes && maxHoldMinutes > 0 ? `${maxHoldMinutes} minute` : 'Dezactivat (0 min)'}
+                </span>
+              </div>
+              <p className="text-xs text-zinc-400">
+                Regulă dinamică de timp: dacă poziția este pe <strong>profit (PnL &ge; 0)</strong>, timpul de deținere crește cu <strong>+50% (1/2)</strong> pentru maximizarea câștigurilor (ex: {maxHoldMinutes ?? 5} min &rarr; {( (maxHoldMinutes ?? 5) * 1.5 ).toFixed(1)} min). Dacă este pe <strong>minus (PnL &lt; 0)</strong> la expirarea celor {maxHoldMinutes ?? 5} min, se vinde imediat!
+              </p>
+
+              <div className="flex gap-2 flex-wrap">
+                {[3, 5, 10, 15, 30, 0].map(mins => (
+                  <button
+                    key={mins}
+                    onClick={() => setMaxHoldMinutes(mins)}
+                    className={cn(
+                      "px-3 py-1.5 rounded-lg text-xs font-medium transition-all border",
+                      (maxHoldMinutes ?? 5) === mins
+                        ? "bg-amber-500/20 text-amber-300 border-amber-500/40 font-semibold"
+                        : "bg-zinc-900/60 text-zinc-400 border-white/5 hover:bg-white/5"
+                    )}
+                  >
+                    {mins === 0 ? 'Fără limită (0m)' : `${mins} min`}
+                  </button>
+                ))}
+              </div>
+
+              <div className="text-[11px] text-zinc-300 bg-zinc-900/80 p-2.5 rounded-lg border border-amber-500/10 space-y-1">
+                <div className="flex justify-between">
+                  <span className="text-zinc-400">Strategie Scalping Timp Limitat:</span>
+                  <span className="font-mono text-amber-400 font-bold">{maxHoldMinutes && maxHoldMinutes > 0 ? `Închidere automată la ⏱️ ${maxHoldMinutes} min` : 'Fără expirare pe timp'}</span>
+                </div>
+                <p className="text-[10px] text-zinc-400 leading-tight">
+                  ⚡ Previne blocarea capitalului în poziții stagnante și forțează rotirea rapidă a capitalului pe micro-trenduri.
                 </p>
               </div>
             </div>

@@ -186,7 +186,8 @@ async function startServer() {
   app.post('/api/journal/clear-entries', (req, res) => {
     try {
       journalService.clearAllEntries();
-      res.json({ success: true, message: 'Jurnalul de tranzacții a fost șters cu succes.' });
+      botEngine.state.tradeHistory = [];
+      res.json({ success: true, message: 'Jurnalul de tranzacții a fost șters cu succes.', state: botEngine.state });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err?.message || 'Eroare la ștergerea jurnalului' });
     }

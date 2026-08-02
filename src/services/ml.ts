@@ -16,20 +16,20 @@ const symbolCooldownMap = new Map<string, CooldownEntry>();
 export function registerSymbolCooldown(symbol: string, pnlPercent: number, customReason?: string): number {
   const cleanSym = symbol.toUpperCase().replace('USDT', '') + 'USDT';
   // Standard post-trade cooldown (minimum 30 minutes) to prevent immediate whipsaw re-entries
-  let durationMinutes = 30;
+  let durationMinutes = 3;
 
   if (pnlPercent < 0) {
     // Stop Loss / Cut Loss: 30 minutes cooldown to allow market structure to reset
-    durationMinutes = 30;
+    durationMinutes = 3;
   } else if (pnlPercent < 3) {
     // Take Profit 0-3%: 25 minutes cooldown
-    durationMinutes = 25;
+    durationMinutes = 2.5;
   } else if (pnlPercent < 6) {
     // Take Profit 3-6%: 35 minutes cooldown
-    durationMinutes = 35;
+    durationMinutes = 3.5;
   } else {
     // Large Take Profit (>6%): 45 minutes cooldown
-    durationMinutes = 45;
+    durationMinutes = 4.5;
   }
 
   const cooldownUntil = Date.now() + (durationMinutes * 60 * 1000);
@@ -1812,7 +1812,7 @@ export async function runRealStrategyAnalysis(
   };
   
   // Real Walk-Forward Validation (Expanding Window with Purged Lookahead)
-  const nFolds = 4;
+  const nFolds = 2;
   const minTrainSize = Math.floor(dataset.length * 0.5); // 50% training set
   const testSize = Math.floor((dataset.length - minTrainSize) / nFolds);
 
@@ -1863,7 +1863,7 @@ export async function runRealStrategyAnalysis(
 
     // PASUL 1: Train Primary Random Forest
     const model = new RandomForest();
-    model.train(trainData, modelParams.nEstimators || 40, modelParams.maxDepth || 8, 3);
+    model.train(trainData, modelParams.nEstimators || 18, modelParams.maxDepth || 6, 3);
 
     if (fold === nFolds - 1) {
        finalModel = model;
@@ -2080,7 +2080,7 @@ export async function runRealStrategyAnalysis(
   // exclusiv pentru inferența live — fără să atingem metricile de validare/feature
   // importance, care rămân pe `finalModel` ca înainte.
   const productionModel = new RandomForest();
-  productionModel.train(dataset, modelParams.nEstimators || 40, modelParams.maxDepth || 8, 3);
+  productionModel.train(dataset, modelParams.nEstimators || 18, modelParams.maxDepth || 6, 3);
 
   if (onProgress) onProgress(75);
 

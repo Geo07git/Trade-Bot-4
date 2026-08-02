@@ -128,6 +128,7 @@ export default function App() {
           if (data.dynamicWatchlistSize) updates.dynamicWatchlistSize = data.dynamicWatchlistSize;
           if (data.positionSizePercent) updates.positionSizePercent = data.positionSizePercent;
           if (data.stopLossPercent) updates.stopLossPercent = data.stopLossPercent;
+          if (data.maxHoldMinutes !== undefined) updates.maxHoldMinutes = data.maxHoldMinutes;
 
           if (data.autoTradingActive !== undefined) updates.autoTradingActive = data.autoTradingActive;
           if (data.circuitBreakerTriggered !== undefined) updates.circuitBreakerTriggered = !!data.circuitBreakerTriggered;

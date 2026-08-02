@@ -58,6 +58,7 @@ interface TradingStore {
   analysisInterval: number;
   positionSizePercent: number;
   stopLossPercent: number;
+  maxHoldMinutes: number;
   apiKey: string;
   apiSecret: string;
   testnetApiKey: string;
@@ -96,6 +97,7 @@ interface TradingStore {
   setAnalysisInterval: (seconds: number) => void;
   setPositionSizePercent: (pct: number) => void;
   setStopLossPercent: (pct: number) => void;
+  setMaxHoldMinutes: (minutes: number) => void;
   setApiKey: (key: string) => void;
   setApiSecret: (secret: string) => void;
   setTestnetApiKey: (key: string) => void;
@@ -162,6 +164,7 @@ export const useTradingStore = create<TradingStore>()(
   analysisInterval: 60, // 1 minute
   positionSizePercent: 5, // 5% of equity per trade
   stopLossPercent: 2.0, // 2.0% stop loss
+  maxHoldMinutes: 5, // 5 min max position hold time
   apiKey: '',
   apiSecret: '',
   testnetApiKey: '',
@@ -359,23 +362,45 @@ export const useTradingStore = create<TradingStore>()(
   setMaxLogs: (limit) => {
     set((state) => ({
       maxLogs: limit,
-      logs: state.logs.slice(0, limit)
+      logs: state.logs.slice(0, limit),
+      signalJournal: (state.signalJournal || []).slice(0, limit)
     }));
     fetch('/api/bot/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ maxLogs: limit })
-    }).catch(() => {});
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data?.state) {
+          set({
+            maxLogs: data.state.maxLogs,
+            logs: data.state.logs || [],
+            signalJournal: data.state.signalJournal || []
+          });
+        }
+      })
+      .catch(() => {});
   },
 
   clearLogs: () => {
     set({ logs: [] });
-    fetch('/api/bot/clear-logs', { method: 'POST' }).catch(() => {});
+    fetch('/api/bot/clear-logs', { method: 'POST' })
+      .then(r => r.json())
+      .then(data => {
+        if (data?.state) set({ logs: data.state.logs || [] });
+      })
+      .catch(() => {});
   },
 
   clearSignalJournal: () => {
     set({ signalJournal: [] });
-    fetch('/api/bot/clear-signal-journal', { method: 'POST' }).catch(() => {});
+    fetch('/api/bot/clear-signal-journal', { method: 'POST' })
+      .then(r => r.json())
+      .then(data => {
+        if (data?.state) set({ signalJournal: data.state.signalJournal || [] });
+      })
+      .catch(() => {});
   },
 
   setAutoTradingActive: (active) => {
@@ -423,6 +448,14 @@ export const useTradingStore = create<TradingStore>()(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ stopLossPercent: pct })
+    }).catch(() => {});
+  },
+  setMaxHoldMinutes: (minutes) => {
+    set({ maxHoldMinutes: minutes });
+    fetch('/api/bot/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ maxHoldMinutes: minutes })
     }).catch(() => {});
   },
   setApiKey: (key) => {
@@ -599,7 +632,10 @@ export const useTradingStore = create<TradingStore>()(
   }
     }),
     {
-      name: 'trading-store'
+      name: 'trading-store',
+      partialize: (state) => ({
+        currentView: state.currentView
+      })
     }
   )
 );

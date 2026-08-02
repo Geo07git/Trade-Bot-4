@@ -62,7 +62,9 @@ class JournalService {
       if (fs.existsSync(this.journalFilePath)) {
         const raw = fs.readFileSync(this.journalFilePath, 'utf-8');
         const parsed = JSON.parse(raw);
-        this.entries = Array.isArray(parsed) ? parsed : [];
+        // Clean out any legacy demo seed entries
+        this.entries = Array.isArray(parsed) ? parsed.filter((e: JournalEntry) => !e.id?.startsWith('seed_')) : [];
+        this.saveEntries();
       } else {
         this.entries = [];
         this.saveEntries();
@@ -288,89 +290,6 @@ class JournalService {
     };
   }
 
-  private generateInitialSeedEntries(): JournalEntry[] {
-    const today = new Date();
-    const entries: JournalEntry[] = [];
-
-    const symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'LINKUSDT'];
-    const models = [
-      'XGBoost Classifier',
-      'Random Forest Ensemble',
-      'LightGBM Trend',
-      'Transformer Neural Net'
-    ];
-    const reasons = [
-      'RSI Oversold (<35) + EMA20 Bullish Crossover',
-      'AI Strategy Lab: High Confidence Mean Reversion',
-      'Momentum Breakout + Volume Spike (2.4x)',
-      'Take Profit Automates (+2.8% target hit)',
-      'Stop Loss Triggered (-1.5% protection)',
-      'EMA 20/50 Golden Cross Signal'
-    ];
-
-    let currentPriceMap: Record<string, number> = {
-      BTCUSDT: 67200,
-      ETHUSDT: 3480,
-      SOLUSDT: 178,
-      BNBUSDT: 585,
-      XRPUSDT: 0.58,
-      LINKUSDT: 16.5
-    };
-
-    // Generate 12 past days of realistic trading history
-    for (let dayOffset = 10; dayOffset >= 0; dayOffset--) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - dayOffset);
-      const dateStr = d.toISOString().split('T')[0];
-
-      const tradesPerDay = 2 + (dayOffset % 3);
-
-      for (let t = 0; t < tradesPerDay; t++) {
-        const symbol = symbols[(dayOffset + t) % symbols.length];
-        const basePrice = currentPriceMap[symbol];
-        const isSell = (dayOffset + t) % 2 === 1;
-        const action = isSell ? 'SELL' : 'BUY';
-        
-        const price = parseFloat((basePrice * (1 + ((t % 2 === 0 ? 1 : -1) * 0.008))).toFixed(2));
-        const amount = parseFloat((symbol === 'BTCUSDT' ? 0.05 : symbol === 'ETHUSDT' ? 0.8 : 8).toFixed(2));
-        const fee = parseFloat((price * amount * 0.00075).toFixed(4));
-        
-        const pnl = isSell ? parseFloat(((t % 3 === 0 ? -1 : 1) * (price * amount * 0.024)).toFixed(2)) : 0;
-        const pnlPercent = isSell ? parseFloat(((t % 3 === 0 ? -1 : 1) * 2.4).toFixed(2)) : 0;
-        const mlProbability = 68 + ((dayOffset * 7 + t * 5) % 25);
-        const modelName = models[(dayOffset + t) % models.length];
-        const entryReason = reasons[(dayOffset * 2 + t) % reasons.length];
-
-        const hour = 9 + ((t * 4) % 12);
-        const min = (t * 17) % 60;
-        const timestamp = new Date(d.getFullYear(), d.getMonth(), d.getDate(), hour, min).toISOString();
-
-        entries.push({
-          id: `seed_${dayOffset}_${t}_${symbol}`,
-          symbol,
-          action,
-          price,
-          amount,
-          fee,
-          pnl,
-          pnlPercent,
-          mlProbability,
-          modelName,
-          entryReason,
-          mode: 'paper',
-          timestamp,
-          date: dateStr,
-          notes: isSell ? `Ordin închis automat conform algoritmului ${modelName}` : `Ordin deschis automat pe semnal ML ${mlProbability}%`
-        });
-      }
-    }
-
-    return entries.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-  }
-
-  private generateInitialSeedSnapshots(): DailySnapshot[] {
-    return [];
-  }
 }
 
 export const journalService = new JournalService();

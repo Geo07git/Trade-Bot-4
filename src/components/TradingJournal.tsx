@@ -324,6 +324,7 @@ export function TradingJournal() {
       const data = await res.json();
       if (data.success) {
         setEntries([]);
+        useTradingStore.setState({ tradeHistory: [] });
       }
     } catch (err) {
       console.error('Eroare la ștergerea jurnalului:', err);

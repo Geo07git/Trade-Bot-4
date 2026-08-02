@@ -181,6 +181,7 @@ export interface BotState {
   initialBalance: number;
   positionSizePercent?: number; // % of equity per position (e.g. 5%)
   stopLossPercent?: number; // % hard safety stop loss limit (e.g. 2.0%)
+  maxHoldMinutes?: number; // Timp maxim de deținere o poziție în minute (ex: 5 sau 10 minute). Ieșire automată după depășire.
   watchlist: WatchlistItem[];
   marketOpportunities: MarketOpportunity[];
   symbolStats: Record<string, SymbolPerformanceStat>;
@@ -387,12 +388,12 @@ const realStrategyCache = new Map<string, { res: any; timestamp: number }>();
 async function getCachedRealStrategyAnalysis(symbol: string): Promise<any> {
   const cleanSymbol = symbol.trim().toUpperCase();
   const cached = realStrategyCache.get(cleanSymbol);
-  if (cached && (Date.now() - cached.timestamp < 180000)) { // 3-minute cache
+  if (cached && (Date.now() - cached.timestamp < 240000)) { // 4-minute cache
     return cached.res;
   }
 
   try {
-    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('ML Strategy Timeout')), 25000));
+    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('ML Strategy Timeout')), 35000));
     const res = await Promise.race([runRealStrategyAnalysis(cleanSymbol, 'rf'), timeoutPromise]);
     if (res) {
       realStrategyCache.set(cleanSymbol, { res, timestamp: Date.now() });
@@ -574,6 +575,7 @@ class ServerBotEngine {
       dynamicWatchlistSize: 25,
       positionSizePercent: 5,
       stopLossPercent: 2.0,
+      maxHoldMinutes: 5,
       lastScanAt: null,
       positions: [],
       logs: [
@@ -615,38 +617,65 @@ class ServerBotEngine {
     this.startBackgroundLoop();
   }
 
+  private getPersistedConfigOnly() {
+    return {
+      autoTradingActive: this.state.autoTradingActive,
+      binanceMode: this.state.binanceMode,
+      dataInterval: this.state.dataInterval,
+      analysisInterval: this.state.analysisInterval,
+      positionSizePercent: this.state.positionSizePercent,
+      stopLossPercent: this.state.stopLossPercent,
+      maxHoldMinutes: this.state.maxHoldMinutes,
+      notificationProvider: this.state.notificationProvider,
+      discordWebhookUrl: this.state.discordWebhookUrl,
+      telegramBotToken: this.state.telegramBotToken,
+      telegramChatId: this.state.telegramChatId,
+      timezone: this.state.timezone,
+      reportConfig: this.state.reportConfig,
+      apiKey: this.state.apiKey,
+      apiSecret: this.state.apiSecret,
+      testnetApiKey: this.state.testnetApiKey,
+      testnetApiSecret: this.state.testnetApiSecret,
+      dynamicWatchlistSize: this.state.dynamicWatchlistSize,
+      maxLogs: this.state.maxLogs,
+    };
+  }
+
   private loadPersistedState() {
     try {
       if (fs.existsSync(this.stateFilePath)) {
         const raw = fs.readFileSync(this.stateFilePath, 'utf-8');
         const parsed = JSON.parse(raw);
-        const defaultWatchlist = JSON.parse(JSON.stringify(this.state.watchlist));
-        this.state = { ...this.state, ...parsed };
         
-        if (!Array.isArray(this.state.marketOpportunities)) this.state.marketOpportunities = [];
-        if (!this.state.symbolStats || typeof this.state.symbolStats !== 'object') this.state.symbolStats = {};
-        if (!this.state.dynamicWatchlistSize) this.state.dynamicWatchlistSize = 25;
-        if (!this.state.positionSizePercent) this.state.positionSizePercent = 5;
-        if (!this.state.stopLossPercent) this.state.stopLossPercent = 2.0;
-
-        // Ensure autoTradingActive defaults to false if not explicitly set
-        if (this.state.autoTradingActive === undefined) {
-          this.state.autoTradingActive = false;
+        // Extract configuration settings
+        if (typeof parsed === 'object' && parsed !== null) {
+          if (parsed.autoTradingActive !== undefined) this.state.autoTradingActive = parsed.autoTradingActive;
+          if (parsed.binanceMode !== undefined) this.state.binanceMode = parsed.binanceMode;
+          if (parsed.dataInterval !== undefined) this.state.dataInterval = parsed.dataInterval;
+          if (parsed.analysisInterval !== undefined) this.state.analysisInterval = parsed.analysisInterval;
+          if (parsed.positionSizePercent !== undefined) this.state.positionSizePercent = parsed.positionSizePercent;
+          if (parsed.stopLossPercent !== undefined) this.state.stopLossPercent = parsed.stopLossPercent;
+          if (parsed.maxHoldMinutes !== undefined) this.state.maxHoldMinutes = parsed.maxHoldMinutes;
+          if (parsed.notificationProvider !== undefined) this.state.notificationProvider = parsed.notificationProvider;
+          if (parsed.discordWebhookUrl !== undefined) this.state.discordWebhookUrl = parsed.discordWebhookUrl;
+          if (parsed.telegramBotToken !== undefined) this.state.telegramBotToken = parsed.telegramBotToken;
+          if (parsed.telegramChatId !== undefined) this.state.telegramChatId = parsed.telegramChatId;
+          if (parsed.timezone !== undefined) this.state.timezone = parsed.timezone;
+          if (parsed.reportConfig !== undefined) this.state.reportConfig = { ...this.state.reportConfig, ...parsed.reportConfig };
+          if (parsed.apiKey !== undefined) this.state.apiKey = parsed.apiKey;
+          if (parsed.apiSecret !== undefined) this.state.apiSecret = parsed.apiSecret;
+          if (parsed.testnetApiKey !== undefined) this.state.testnetApiKey = parsed.testnetApiKey;
+          if (parsed.testnetApiSecret !== undefined) this.state.testnetApiSecret = parsed.testnetApiSecret;
+          if (parsed.dynamicWatchlistSize !== undefined) this.state.dynamicWatchlistSize = parsed.dynamicWatchlistSize;
+          if (parsed.maxLogs !== undefined) this.state.maxLogs = parsed.maxLogs;
         }
 
-        // Default balance initialization if missing
-        if (!this.state.balance && this.state.balance !== 0) {
-          this.state.balance = 100;
-        }
-        if (!this.state.initialBalance && this.state.initialBalance !== 0) {
-          this.state.initialBalance = this.state.balance || 100;
-        }
-
-        // Ensure arrays exist
-        if (!Array.isArray(this.state.logs)) this.state.logs = [];
-        if (!Array.isArray(this.state.signalJournal)) this.state.signalJournal = [];
-        if (!Array.isArray(this.state.positions)) this.state.positions = [];
-        if (!Array.isArray(this.state.tradeHistory)) this.state.tradeHistory = [];
+        // Operational state arrays remain clean runtime instances
+        this.state.tradeHistory = [];
+        this.state.signalJournal = [];
+        this.state.marketOpportunities = [];
+        this.state.positions = [];
+        this.state.symbolStats = {};
 
         if (this.state.logs.length === 0) {
           const time = new Intl.DateTimeFormat('en-US', {
@@ -660,16 +689,7 @@ class ServerBotEngine {
           });
         }
 
-        // Merge missing symbols from default watchlist and ensure they are active
-        for (const defaultItem of defaultWatchlist) {
-          const existing = this.state.watchlist.find(item => item.symbol === defaultItem.symbol);
-          if (!existing) {
-            this.state.watchlist.push(defaultItem);
-          } else {
-            existing.active = true;
-          }
-        }
-        console.log('[AI.TRADE Bot] State încărcat din bot_state.json pe server (AutoTrading:', this.state.autoTradingActive ? 'ACTIV' : 'OPRIT', ')');
+        console.log('[AI.TRADE Bot] Configurația a fost încărcată din bot_state.json (AutoTrading:', this.state.autoTradingActive ? 'ACTIV' : 'OPRIT', ')');
       }
     } catch (e) {
       console.error('[AI.TRADE Bot] Eroare la citirea bot_state.json:', e);
@@ -679,13 +699,14 @@ class ServerBotEngine {
   private saveTimer: NodeJS.Timeout | null = null;
 
   public savePersistedState(immediate = false) {
+    const configToSave = this.getPersistedConfigOnly();
     if (immediate) {
       if (this.saveTimer) {
         clearTimeout(this.saveTimer);
         this.saveTimer = null;
       }
       try {
-        fs.writeFileSync(this.stateFilePath, JSON.stringify(this.state));
+        fs.writeFileSync(this.stateFilePath, JSON.stringify(configToSave, null, 2));
       } catch (e) {
         console.error('[AI.TRADE Bot] Eroare la salvarea bot_state.json:', e);
       }
@@ -696,7 +717,7 @@ class ServerBotEngine {
       this.saveTimer = setTimeout(() => {
         this.saveTimer = null;
         try {
-          fs.writeFileSync(this.stateFilePath, JSON.stringify(this.state));
+          fs.writeFileSync(this.stateFilePath, JSON.stringify(configToSave, null, 2));
         } catch (e) {
           console.error('[AI.TRADE Bot] Eroare la salvarea bot_state.json:', e);
         }
@@ -720,15 +741,12 @@ class ServerBotEngine {
 
   public clearLogs() {
     this.state.logs = [];
-    this.addLog('Logurile au fost șterse de utilizator.', 'info');
-    this.savePersistedState();
+    this.savePersistedState(true);
   }
 
   public clearSignalJournal() {
-    if (!this.state.signalJournal) this.state.signalJournal = [];
     this.state.signalJournal = [];
-    this.addLog('Jurnalul de audit semnale a fost șters.', 'info');
-    this.savePersistedState();
+    this.savePersistedState(true);
   }
 
   public checkCircuitBreaker(): boolean {
@@ -806,6 +824,7 @@ class ServerBotEngine {
     if (newConfig.analysisInterval !== undefined) this.state.analysisInterval = newConfig.analysisInterval;
     if (newConfig.positionSizePercent !== undefined) this.state.positionSizePercent = Math.max(1, Math.min(50, Number(newConfig.positionSizePercent)));
     if (newConfig.stopLossPercent !== undefined) this.state.stopLossPercent = Math.max(0.5, Math.min(20, Number(newConfig.stopLossPercent)));
+    if (newConfig.maxHoldMinutes !== undefined) this.state.maxHoldMinutes = Math.max(0, Math.min(180, Number(newConfig.maxHoldMinutes)));
     if (newConfig.maxLogs !== undefined) {
       this.state.maxLogs = newConfig.maxLogs;
       if (this.state.logs.length > newConfig.maxLogs) {
@@ -2103,6 +2122,27 @@ class ServerBotEngine {
             await this.executeTrade(item.symbol, 'SELL', livePrice, amountToSell);
             this.sendNotification(`🛡️ **[Break-Even Protect]** Ieșire în siguranță ${item.symbol} la $${livePrice} (PNL +${pnlPercent.toFixed(2)}%)`);
           }
+          // Max Hold Time Expiry (e.g. >5 min for loss -> immediate sell, >7.5 min if in profit -> extended hold)
+          else {
+            const maxHold = this.state.maxHoldMinutes ?? 5;
+            const holdDurationMinutes = pos && (pos as any).openedAt ? (Date.now() - (pos as any).openedAt) / 60000 : 0;
+            if (maxHold > 0) {
+              const isProfit = pnlPercent >= 0;
+              const effectiveMaxHold = isProfit ? maxHold * 1.5 : maxHold;
+              if (holdDurationMinutes >= effectiveMaxHold) {
+                const reasonTag = isProfit
+                  ? `Timp Maxim Extins pe Profit Expirat (${Math.round(holdDurationMinutes)}m >= ${effectiveMaxHold.toFixed(1)}m [+50% bonus])`
+                  : `Timp Maxim Deținere pe Pierdere Expirat (${Math.round(holdDurationMinutes)}m >= ${maxHold}m)`;
+                this.addLog(`[Limita Timp Deținere ⏱️] Poziție ${item.symbol} a depășit limita de deținere (${isProfit ? `Profit +50% Bonus: ${effectiveMaxHold.toFixed(1)}m` : `Pierdere: ${maxHold}m`}). Deținută: ${Math.round(holdDurationMinutes)}m. Vânzare automată (PNL: ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% | ${pnlValueStr})`, 'warning');
+                await this.executeTrade(item.symbol, 'SELL', livePrice, amountToSell, {
+                  mlProbability: (pos as any)?.entryMlProb || 50,
+                  modelName: 'Max Hold Time Engine',
+                  entryReason: reasonTag
+                });
+                this.sendNotification(`⏱️ **[Max Hold Expirat]** Vândut automat ${item.symbol} la $${livePrice} după ${Math.round(holdDurationMinutes)} min (${reasonTag} | PNL ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% | ${pnlValueStr})`);
+              }
+            }
+          }
         }
       }
       this.checkCircuitBreaker();
@@ -2141,8 +2181,8 @@ class ServerBotEngine {
 
       const batchMap = await fetchBatchPricesServer();
 
-      // Phase 1: Batched Signal Generation & Price Fetching (batches of 8 items to optimize network & CPU load)
-      const BATCH_SIZE_ML = 8;
+      // Phase 1: Batched Signal Generation & Price Fetching (batches of 3 items to optimize network & CPU load)
+      const BATCH_SIZE_ML = 3;
       const itemsWithSignals: Array<{ item: WatchlistItem; currentPrice: number; signal: any; mlRes: any; oppScore: number; oppInfo: any }> = [];
 
       for (let i = 0; i < activeItems.length; i += BATCH_SIZE_ML) {
@@ -2262,19 +2302,20 @@ class ServerBotEngine {
           } else if (oppScore < 43) {
             // Filter out low opportunity score assets in AI.TRADE Bot 2.0
             this.addLog(`[Filtru Oportunitate AI 2.0] ${item.symbol} are semnal BUY (${signal.prob}%), dar OppScore (${oppScore}/100) este scăzut. Căutăm cele mai bune oportunități din piață.`, 'warning');
-          } else if (this.state.balance < 9.5) {
-            this.addLog(`[Signal AI BUY] ${item.symbol} (Scor AI: ${signal.prob}% | OppScore: ${oppScore}/100): Fonduri disponibile ($${this.state.balance.toFixed(2)} USDT) din cele ${this.state.positions.length} poziții deschise. Așteptăm eliberarea de capital (TP/SL) pentru noi intrări.`, 'warning');
+          } else if (this.state.balance < 0.5) {
+            this.addLog(`[Signal AI BUY] ${item.symbol} (Scor AI: ${signal.prob}% | OppScore: ${oppScore}/100): Fonduri disponibile ($${this.state.balance.toFixed(2)} USDT) insuficiente din cele ${this.state.positions.length} poziții deschise. Așteptăm eliberarea de capital (TP/SL) pentru noi intrări.`, 'warning');
           } else {
             const equity = this.calculateEquity();
             const pct = (this.state.positionSizePercent || 5) / 100;
-            const targetAllocation = Math.max(10, parseFloat((equity * pct).toFixed(2)));
+            const targetAllocation = parseFloat((equity * pct).toFixed(2));
             const allocation = Math.min(this.state.balance, targetAllocation);
 
-            if (allocation >= 9.5) {
+            const minRequired = this.state.binanceMode === 'paper' ? 0.10 : 5.0;
+            if (allocation >= minRequired) {
               const actualAlloc = Math.min(this.state.balance, allocation);
               const amountToBuy = parseFloat((actualAlloc / currentPrice).toFixed(6));
               if (amountToBuy > 0) {
-                this.addLog(`[Signal AI.TRADE 2.0] ${item.symbol}: BUY (AI Prob: ${signal.prob}% | OppScore: ${oppScore}/100 | Rank #${oppInfo?.rank || 1}). Alocare $${actualAlloc.toFixed(2)} USDT (${(pct * 100).toFixed(0)}% din Equity $${equity.toFixed(2)}). Executăm cumpărare scalping.`, 'info');
+                this.addLog(`[Signal AI.TRADE 2.0] ${item.symbol}: BUY (AI Prob: ${signal.prob}% | OppScore: ${oppScore}/100 | Rank #${oppInfo?.rank || 1}). Alocare $${actualAlloc.toFixed(2)} USDT (${(pct * 100).toFixed(1)}% din Equity $${equity.toFixed(2)}). Executăm cumpărare scalping.`, 'info');
                 await this.executeTrade(item.symbol, 'BUY', currentPrice, amountToBuy, {
                   mlProbability: signal.prob,
                   modelName: signal.modelName,
@@ -2282,7 +2323,7 @@ class ServerBotEngine {
                 });
               }
             } else {
-              this.addLog(`[Signal AI BUY] ${item.symbol} (Scor: ${signal.prob}%): Alocarea rămasă ($${allocation.toFixed(2)} USDT) este sub minimul de $10 USDT per ordin.`, 'warning');
+              this.addLog(`[Signal AI BUY] ${item.symbol} (Scor: ${signal.prob}%): Alocarea calculată ($${allocation.toFixed(2)} USDT) este sub minimul de $${minRequired} USDT.`, 'warning');
             }
           }
         } else if (isHolding) {
@@ -2356,6 +2397,19 @@ class ServerBotEngine {
             else if (pnlPercent <= -1.5 && holdDurationMinutes >= 45 && exitScore >= 45) {
               shouldExecuteSell = true;
               sellReasonCategory = `Rotire Stagnare pe Pierdere (${pnlPercent.toFixed(2)}%, >45m | ExitScore: ${exitScore}/100)`;
+            }
+          }
+
+          // C. OVERRIDE: Max Position Hold Time Limit (e.g. 5m for loss -> sell, +50% bonus [7.5m] if in profit)
+          const maxHold = this.state.maxHoldMinutes ?? 5;
+          if (maxHold > 0) {
+            const isProfit = pnlPercent >= 0;
+            const effectiveMaxHold = isProfit ? maxHold * 1.5 : maxHold;
+            if (holdDurationMinutes >= effectiveMaxHold) {
+              shouldExecuteSell = true;
+              sellReasonCategory = isProfit
+                ? `Timp Extins (+50% Bonus Profit) Depășit ⏱️ (${Math.round(holdDurationMinutes)}m >= ${effectiveMaxHold.toFixed(1)}m | PnL: +${pnlPercent.toFixed(2)}%)`
+                : `Timp Maxim Deținere pe Pierdere Depășit ⏱️ (${Math.round(holdDurationMinutes)}m >= ${maxHold}m | PnL: ${pnlPercent.toFixed(2)}%)`;
             }
           }
 
