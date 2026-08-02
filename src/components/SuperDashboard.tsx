@@ -273,14 +273,14 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
                     <div>
                       <span className="text-[10px] text-zinc-500 uppercase block">Cantitate / Valoare</span>
                       <span className="text-zinc-200 font-medium">
-                        {pos.amount.toFixed(4)} ({`$${posValue.toFixed(2)}`})
+                        {pos.amount.toFixed(3)} ({`$${posValue.toFixed(2)}`})
                       </span>
                     </div>
 
                     <div className="text-right">
                       <span className="text-[10px] text-zinc-500 uppercase block">Entry / Curent</span>
                       <span className="text-zinc-300">
-                        ${pos.entryPrice.toFixed(2)} ➔ ${currentPrice.toFixed(2)}
+                        ${pos.entryPrice.toFixed(3)} ➔ ${currentPrice.toFixed(3)}
                       </span>
                     </div>
                   </div>

@@ -1694,8 +1694,8 @@ export async function runRealStrategyAnalysis(
 ): Promise<StrategyResult> {
   if (onProgress) onProgress(10);
   
-  // PASUL 2: Fetch 3000 candles history for robust training
-  const klines = await fetchHistoricalKlines(symbol, 3000);
+  // PASUL 2: Fetch 1000 candles history for robust training
+  const klines = await fetchHistoricalKlines(symbol, 1000);
   
   if (onProgress) onProgress(25);
 
@@ -2476,7 +2476,7 @@ export async function runRealStrategyAnalysis(
   const metaSign = metaAdjustment >= 0 ? `+${metaAdjustment}%` : `${metaAdjustment}%`;
 
   const detailedExplanation: string[] = [
-    `1. Triple Barrier Labeling & Purged Walk-Forward CV: Antrenat pe 3000 lumânări cu aliniere trend.`,
+    `1. Triple Barrier Labeling & Purged Walk-Forward CV: Antrenat pe 1000 lumânări cu aliniere trend.`,
     `2. Probability Calibration (Platt Scaling): Probabilitate brută ${rawProb}% recalibrată la ${calibratedProb}%.`,
     `3. Reversal & Regime Detector: ${reversalSignal.isBullishReversal ? `⚡ CAPITULATION REBOUND BUY DETECTAT (${reversalSignal.reasons.join(', ')})` : reversalSignal.isBearishReversal ? `⚡ EUPHORIA REVERSAL SELL DETECTAT (${reversalSignal.reasons.join(', ')})` : `Reversal Inactiv | ADX=${lastAdx.toFixed(1)} (${adxSign}), VolRatio=${lastVolRatio.toFixed(2)} (${volSign})`}.`,
     `4. Contribuții Defalcate Scor Unificat:
