@@ -196,6 +196,8 @@ export interface JournalEntry {
   tradeQualityScore?: number;
   stars?: number;
   oppScore?: number;
+  isFeeUnknown?: boolean;
+  accountingStatus?: 'SETTLED' | 'ACCOUNTING_INCOMPLETE';
   minuteProfitLogs?: MinuteProfitLog[];
 }
 
@@ -247,6 +249,8 @@ export interface Position {
   entryPatternName?: string;
   leverage?: number;
   margin?: number;
+  entryFee?: number;
+  isUntracked?: boolean;
 }
 
 export interface TradeLog {

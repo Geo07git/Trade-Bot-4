@@ -136,6 +136,13 @@ export interface Position {
   leverage?: number;
   margin?: number;
   entryPatternName?: string;
+  entryFee?: number;
+  openedAt?: number;
+  highestPrice?: number;
+  lowestPrice?: number;
+  isUntracked?: boolean;
+  isFeeUnknown?: boolean;
+  accountingStatus?: 'SETTLED' | 'ACCOUNTING_INCOMPLETE';
 }
 
 export interface LogItem {
@@ -153,6 +160,8 @@ export interface CompletedTrade {
   pnl: number;
   pnlPercent: number;
   timestamp: string;
+  isFeeUnknown?: boolean;
+  accountingStatus?: 'SETTLED' | 'ACCOUNTING_INCOMPLETE';
 }
 
 export interface ReportConfig {
@@ -837,6 +846,8 @@ class ServerBotEngine {
   private lastHourlyReportHour = '';
   private lastNotifiedRegime = '';
   private lastScanTimestamp = 0;
+  private executingSymbols = new Set<string>();
+  private consecutiveApiErrors = 0;
 
   constructor() {
     this.state = {
@@ -1018,6 +1029,7 @@ class ServerBotEngine {
       accumulationTargetPercent: this.state.accumulationTargetPercent || 3.0,
       sessionCycleCount: this.state.sessionCycleCount || 1,
       accumulationTargetEnabled: this.state.accumulationTargetEnabled !== false,
+      positions: this.state.positions || [],
     };
   }
 
@@ -1075,7 +1087,11 @@ class ServerBotEngine {
         this.state.tradeHistory = [];
         this.state.signalJournal = [];
         this.state.marketOpportunities = [];
-        this.state.positions = [];
+        if (typeof parsed === 'object' && parsed !== null && Array.isArray(parsed.positions)) {
+          this.state.positions = parsed.positions;
+        } else {
+          this.state.positions = [];
+        }
         this.state.symbolStats = {};
 
         if (this.state.logs.length === 0) {
@@ -1440,6 +1456,113 @@ class ServerBotEngine {
     }
   }
 
+  private async reconcilePositionsWithBinance(balances: any[]) {
+    if (!Array.isArray(balances) || this.state.binanceMode === 'paper') return;
+
+    // Build map of active holding assets on Binance (excluding USDT)
+    const activeAssetsOnExchange = new Map<string, number>();
+    for (const b of balances) {
+      if (!b || b.asset === 'USDT') continue;
+      const totalVal = (parseFloat(b.free) || 0) + (parseFloat(b.locked) || 0);
+      if (totalVal > 0.000001) {
+        activeAssetsOnExchange.set(`${b.asset}USDT`, totalVal);
+      }
+    }
+
+    const currentPositions = [...(this.state.positions || [])];
+    const updatedPositions: Position[] = [];
+
+    // 1. Reconcile existing local positions
+    for (const pos of currentPositions) {
+      const exchangeQty = activeAssetsOnExchange.get(pos.symbol);
+      if (exchangeQty !== undefined && exchangeQty > 0) {
+        // Position exists on Binance: update amount if changed, preserve openedAt timestamp!
+        if (Math.abs(pos.amount - exchangeQty) > 0.000001) {
+          this.addLog(`[RECONCILIERE 🔄] Cantitate ajustată pentru ${pos.symbol}: local ${pos.amount} -> exchange ${exchangeQty}`, 'info');
+          pos.amount = exchangeQty;
+        }
+        updatedPositions.push(pos);
+        activeAssetsOnExchange.delete(pos.symbol);
+      } else {
+        // Position exists locally but closed/absent on Binance
+        this.addLog(`[RECONCILIERE 🔄] Poziția ${pos.symbol} nu mai există pe Binance (închisă pe exchange). Eliminată din starea locală.`, 'warning');
+      }
+    }
+
+    // 2. Add positions existing on Binance but absent locally
+    const apiKey = (this.state.binanceMode === 'testnet'
+      ? (this.state.testnetApiKey || this.state.apiKey)
+      : this.state.apiKey)?.trim();
+    const apiSecret = (this.state.binanceMode === 'testnet'
+      ? (this.state.testnetApiSecret || this.state.apiSecret)
+      : this.state.apiSecret)?.trim();
+
+    for (const [symbol, qty] of activeAssetsOnExchange.entries()) {
+      const item = this.state.watchlist.find(w => w.symbol === symbol);
+      const currentMarketPrice = item?.price || 1;
+      
+      // Calculate estimated USDT value: if value >= minNotional ($5), add
+      if (currentMarketPrice * qty >= 5.0) {
+        let realEntryPrice: number | null = null;
+        let realOpenedAt: number | null = null;
+        let isUntracked = false;
+
+        if (apiKey && apiSecret) {
+          try {
+            const client = createBinanceClient({
+              apiKey,
+              apiSecret,
+              httpBase: this.state.binanceMode === 'testnet' ? 'https://testnet.binance.vision' : 'https://api.binance.com'
+            });
+            const trades = await client.myTrades({ symbol, limit: 10 });
+            if (Array.isArray(trades) && trades.length > 0) {
+              const buyTrades = trades.filter((t: any) => t.isBuyer);
+              if (buyTrades.length > 0) {
+                let totalQty = 0;
+                let totalCost = 0;
+                // Weighted avg price of recent buys
+                buyTrades.slice(-5).forEach((bt: any) => {
+                  const bQty = parseFloat(bt.qty) || 0;
+                  const bPrice = parseFloat(bt.price) || 0;
+                  totalQty += bQty;
+                  totalCost += bQty * bPrice;
+                });
+                const lastBuy = buyTrades[buyTrades.length - 1];
+                realEntryPrice = totalQty > 0 ? (totalCost / totalQty) : (parseFloat(lastBuy.price) || null);
+                realOpenedAt = lastBuy.time ? Number(lastBuy.time) : null;
+              }
+            }
+          } catch (err: any) {
+            console.warn(`[RECONCILIERE] Nu s-au putut obține istoricul myTrades pentru ${symbol}: ${err?.message || err}`);
+          }
+        }
+
+        if (!realEntryPrice || !realOpenedAt) {
+          isUntracked = true;
+          this.addLog(`[RECONCILIERE ⚠️] Poziție descoperită pe Binance pentru ${symbol} (${qty} unități). Istoricul de achiziție nu a putut fi determinat — marcată ca UNTRACKED.`, 'warning');
+        } else {
+          this.addLog(`[RECONCILIERE 🔄] Poziție descoperită pe Binance pentru ${symbol} (${qty} unități @ $${realEntryPrice.toFixed(4)} din ${formatInTimezone(new Date(realOpenedAt).toISOString())}).`, 'info');
+        }
+
+        updatedPositions.push({
+          symbol,
+          amount: qty,
+          entryPrice: realEntryPrice || currentMarketPrice,
+          currentPrice: currentMarketPrice,
+          highestPrice: Math.max(currentMarketPrice, realEntryPrice || currentMarketPrice),
+          openedAt: realOpenedAt || Date.now(),
+          entryFee: parseFloat(((realEntryPrice || currentMarketPrice) * qty * 0.00075).toFixed(4)),
+          strategy: 'scalping',
+          leverage: 1,
+          margin: (realEntryPrice || currentMarketPrice) * qty,
+          isUntracked
+        } as Position);
+      }
+    }
+
+    this.state.positions = updatedPositions;
+  }
+
   public async syncBinanceBalance() {
     if (this.state.binanceMode === 'paper') {
       return { success: true, mode: 'paper', balance: this.state.balance };
@@ -1461,6 +1584,9 @@ class ServerBotEngine {
     try {
       const account = await getAccountInfo({ apiKey, apiSecret, mode });
       if (account && account.balances) {
+        this.consecutiveApiErrors = 0; // Reset error counter on successful API sync
+        await this.reconcilePositionsWithBinance(account.balances);
+
         const usdtAsset = account.balances.find((b: any) => b.asset === 'USDT');
         if (usdtAsset) {
           const freeUsdt = parseFloat(usdtAsset.free) || 0;
@@ -1468,7 +1594,6 @@ class ServerBotEngine {
           const totalUsdt = freeUsdt + lockedUsdt;
 
           if (mode === 'testnet' && freeUsdt < 10) {
-            // Testnet account on Binance has negligible funds (< $10 USDT, e.g. 0.009 USDT)
             const fallbackBalance = (this.state.balance && this.state.balance >= 100) 
               ? this.state.balance 
               : 10000;
@@ -1512,6 +1637,15 @@ class ServerBotEngine {
       const errMsg = err?.message || String(err);
       console.warn(`[BINANCE ${mode.toUpperCase()}] Could not sync balance: ${errMsg}`);
       this.addLog(`[BINANCE ${mode.toUpperCase()}] Eroare la sincronizarea balanței: ${errMsg}`, 'warning');
+
+      if (mode === 'live') {
+        this.consecutiveApiErrors += 1;
+        if (this.consecutiveApiErrors >= 3) {
+          this.state.autoTradingActive = false;
+          this.addLog(`[SAFE STOP 🛑] Sincronizarea cu Binance pe modul Live a eșuat de 3 ori consecutiv (${errMsg}). Oprit tradingul automat de siguranță.`, 'warning');
+          this.sendNotification(`🛑 **[SAFE STOP LIVE]**\nSincronizarea cu Binance Live a eșuat de 3 ori consecutiv (${errMsg}). Tradingul automat a fost OPRIT de siguranță.`);
+        }
+      }
       
       if (mode === 'testnet') {
         const fallbackBalance = (this.state.balance && this.state.balance >= 100) 
@@ -1919,31 +2053,43 @@ class ServerBotEngine {
       return;
     }
 
-    // Consistency sanity check: price anomaly check (> 20% jump)
-    const item = this.state.watchlist.find(w => w.symbol === symbol);
-    const pos = this.state.positions.find(p => p.symbol === symbol);
-    const lastPrice = item?.price || pos?.currentPrice || pos?.entryPrice;
+    // 1. EXECUTION LOCK: Prevent concurrent execution for the same symbol
+    if (this.executingSymbols.has(symbol)) {
+      this.addLog(`[EXECUTION LOCK 🔒] Ordin concurent pentru ${symbol} în curs de procesare. Se previne duplicarea.`, 'warning');
+      return;
+    }
+    this.executingSymbols.add(symbol);
 
-    if (lastPrice && lastPrice > 0) {
-      const diff = Math.abs(price - lastPrice) / lastPrice;
-      if (diff > 0.20) {
-        if (diff > 0.40) {
-          // Auto-recalibrate corrupt price from old fallback or state
-          console.warn(`[SAFETY RE-SYNC] Re-calibrare preț stocat pentru ${symbol}: $${lastPrice} -> $${price}`);
-          if (item) item.price = price;
-          if (pos) pos.currentPrice = price;
-        } else {
-          this.addLog(`[SAFETY] Preț anormal ignorat pentru ${symbol}: $${lastPrice} -> $${price} (variație ${(diff * 100).toFixed(1)}%). Ordin anulat.`, 'warning');
-          console.warn(`Preț anormal pentru ${symbol}: ${lastPrice} -> ${price}`);
-          return;
+    try {
+      // Consistency sanity check: price anomaly check (> 20% jump)
+      const item = this.state.watchlist.find(w => w.symbol === symbol);
+      const pos = this.state.positions.find(p => p.symbol === symbol);
+      const lastPrice = item?.price || pos?.currentPrice || pos?.entryPrice;
+
+      if (lastPrice && lastPrice > 0) {
+        const diff = Math.abs(price - lastPrice) / lastPrice;
+        if (diff > 0.20) {
+          if (diff > 0.40) {
+            console.warn(`[SAFETY RE-SYNC] Re-calibrare preț stocat pentru ${symbol}: $${lastPrice} -> $${price}`);
+            if (item) item.price = price;
+            if (pos) pos.currentPrice = price;
+          } else {
+            this.addLog(`[SAFETY] Preț anormal ignorat pentru ${symbol}: $${lastPrice} -> $${price} (variație ${(diff * 100).toFixed(1)}%). Ordin anulat.`, 'warning');
+            console.warn(`Preț anormal pentru ${symbol}: ${lastPrice} -> ${price}`);
+            return;
+          }
         }
       }
-    }
 
-    let orderSuccess = true;
-    
-    if (this.state.binanceMode === 'testnet' || this.state.binanceMode === 'live') {
-      try {
+      let orderSuccess = false;
+      let actualExecutedQty = amount;
+      let actualEntryPrice = price;
+      let actualFee = parseFloat((price * amount * 0.00075).toFixed(4));
+      let feeUnknown = false;
+
+      if (this.state.binanceMode === 'paper') {
+        orderSuccess = true;
+      } else if (this.state.binanceMode === 'testnet' || this.state.binanceMode === 'live') {
         const apiKey = (this.state.binanceMode === 'testnet'
           ? (this.state.testnetApiKey || this.state.apiKey)
           : this.state.apiKey)?.trim();
@@ -1952,14 +2098,9 @@ class ServerBotEngine {
           : this.state.apiSecret)?.trim();
 
         if (!apiKey || !apiSecret) {
-          if (this.state.binanceMode === 'testnet') {
-            this.addLog(`[BINANCE TESTNET -> PAPER] Cheile API de Testnet nu sunt configurate. Ordinul ${action} ${symbol} este executat în modul Simulat (Paper Trading).`, 'info');
-            orderSuccess = true;
-          } else {
-            this.addLog(`[BINANCE LIVE] Execuție anulată: Cheile API pentru modul Live nu sunt configurate în Setări.`, 'warning');
-            return;
-          }
-        } else {
+          this.addLog(`[BINANCE ${this.state.binanceMode.toUpperCase()}] Execuție anulată: Cheile API nu sunt configurate în Setări.`, 'warning');
+          return;
+        }
 
         const client = createBinanceClient({
           apiKey,
@@ -1969,7 +2110,7 @@ class ServerBotEngine {
 
         const filters = await getSymbolFilters(client, symbol);
 
-        // Pre-check real Binance balance to prevent -2010 insufficient balance errors
+        // Pre-check real Binance balance
         let realFreeUSDT: number | null = null;
         let realFreeAsset: number | null = null;
         try {
@@ -1998,109 +2139,224 @@ class ServerBotEngine {
             ? realFreeUSDT
             : this.state.balance;
 
+          // SKIPPED_MIN_NOTIONAL Check for BUY
           if (availableUSDT < filters.minNotional) {
-            this.addLog(`[BINANCE ${this.state.binanceMode.toUpperCase()}] Ordin CUMPĂRARE ${symbol} anulat: Balanță USDT disponibilă ($${availableUSDT.toFixed(2)}) sub minimul necesar de $${filters.minNotional} USDT.`, 'warning');
-            if (realFreeUSDT !== null && (this.state.binanceMode !== 'testnet' || realFreeUSDT >= filters.minNotional)) {
-              this.state.balance = realFreeUSDT;
-              this.savePersistedState();
-            }
+            this.addLog(`[BINANCE ${this.state.binanceMode.toUpperCase()}] Ordin CUMPĂRARE ${symbol} anulat (SKIPPED_MIN_NOTIONAL): Balanță USDT disponibilă ($${availableUSDT.toFixed(2)}) sub minimul necesar de $${filters.minNotional} USDT.`, 'warning');
             return;
           }
 
-          // Cap quote order size to available USDT (leaving 0.5% margin for fees/slippage)
           const safeCostInUSDT = Math.min(requestedCost, availableUSDT * 0.995);
-          if (safeCostInUSDT >= filters.minNotional) {
-            orderParams.quoteOrderQty = safeCostInUSDT.toFixed(2);
-          } else {
-            const formattedQtyStr = formatQuantityByStepSize(safeCostInUSDT / price, filters.stepSize);
-            orderParams.quantity = formattedQtyStr;
+          if (safeCostInUSDT < filters.minNotional) {
+            this.addLog(`[BINANCE ${this.state.binanceMode.toUpperCase()}] Ordin CUMPĂRARE ${symbol} anulat (SKIPPED_MIN_NOTIONAL): Valoarea ordinului ($${safeCostInUSDT.toFixed(2)}) este sub minimul de $${filters.minNotional} USDT.`, 'warning');
+            return;
           }
+
+          orderParams.quoteOrderQty = safeCostInUSDT.toFixed(2);
         } else { // SELL
           const availableAsset = realFreeAsset !== null ? realFreeAsset : amount;
           const qtyToSell = Math.min(amount, availableAsset);
           const formattedSellQtyStr = formatQuantityByStepSize(qtyToSell, filters.stepSize);
           const formattedSellQtyNum = parseFloat(formattedSellQtyStr);
+          const estimatedSellVal = formattedSellQtyNum * price;
 
           if (formattedSellQtyNum < filters.minQty) {
             this.addLog(`[BINANCE ${this.state.binanceMode.toUpperCase()}] Ordin VÂNZARE ${symbol} anulat: Cantitatea disponibilă (${formattedSellQtyStr}) este sub minimul de lot (${filters.minQty}).`, 'warning');
             return;
           }
+
+          // SKIPPED_MIN_NOTIONAL Check for SELL
+          if (estimatedSellVal < filters.minNotional) {
+            this.addLog(`[BINANCE ${this.state.binanceMode.toUpperCase()}] Ordin VÂNZARE ${symbol} anulat (SKIPPED_MIN_NOTIONAL): Valoarea estimată ($${estimatedSellVal.toFixed(2)}) este sub minimul de $${filters.minNotional} USDT.`, 'warning');
+            return;
+          }
+
           orderParams.quantity = formattedSellQtyStr;
         }
 
-        const order = await client.order(orderParams);
-        
-        // If order successful, update real balance (only for live or testnet with adequate balance)
-        if (order && (order.status === 'FILLED' || order.status === 'NEW')) {
-          console.log(`[Binance Executed] ${action} ${symbol} order filled successfully on ${this.state.binanceMode}`);
-          if (realFreeUSDT !== null && (this.state.binanceMode === 'live' || (this.state.binanceMode === 'testnet' && realFreeUSDT >= 10))) {
-            this.state.balance = realFreeUSDT;
-          }
-        }
-        }
-      } catch (err: any) {
-        const errMsg = err?.message || String(err);
-        console.warn(`[Binance Order Warning] ${errMsg}`);
+        try {
+          const order = await client.order(orderParams);
+          
+          if (order && (order.status === 'FILLED' || order.status === 'PARTIALLY_FILLED')) {
+            const execQty = parseFloat(order.executedQty || '0');
+            const cummulativeQuote = parseFloat(order.cummulativeQuoteQty || '0');
 
-        const isInsufficient = errMsg.includes('insufficient balance') || errMsg.includes('-2010') || errMsg.includes('2010');
-        const isInvalidKeyOrConn = errMsg.includes('Invalid API-key') || errMsg.includes('-2015') || errMsg.includes('socket') || errMsg.includes('TLS') || errMsg.includes('disconnected');
+            if (execQty > 0) {
+              actualExecutedQty = execQty;
+              actualEntryPrice = cummulativeQuote > 0 ? (cummulativeQuote / execQty) : price;
 
-        if (isInsufficient) {
-          if (this.state.binanceMode === 'testnet') {
-            this.addLog(
-              `[BINANCE TESTNET] Ordinul transmis pe testnet.binance.vision a fost respins (Eroare -2010: Balanță USDT insuficientă pe serverul Binance Testnet). Executăm ordinul în modul Paper (Simulat).`,
-              'warning',
-              this.calculateEquity()
-            );
-            orderSuccess = true;
+              // Parse actual commission fee from order fills (Fail-Safe)
+              let fillComm = 0;
+
+              if (Array.isArray(order.fills) && order.fills.length > 0) {
+                const baseAsset = symbol.replace(/USDT$/i, '').toUpperCase();
+                const bnbItem = this.state.watchlist.find(w => w.symbol === 'BNBUSDT');
+
+                for (const f of order.fills) {
+                  const c = parseFloat(f.commission || 0);
+                  if (!c || c <= 0) continue;
+                  const commAsset = (f.commissionAsset || '').toUpperCase();
+                  const fillPx = parseFloat(f.price) || actualEntryPrice || price;
+
+                  if (commAsset === 'USDT') {
+                    fillComm += c;
+                  } else if (commAsset === baseAsset) {
+                    fillComm += c * fillPx;
+                  } else if (commAsset === 'BNB') {
+                    if (bnbItem?.price && bnbItem.price > 0) {
+                      fillComm += c * bnbItem.price;
+                    } else {
+                      feeUnknown = true;
+                      this.addLog(`[FEE ERROR ⚠️] Imposibil de determinat comisionul BNB (prețul BNBUSDT nu este disponibil în watchlist).`, 'warning');
+                      break;
+                    }
+                  } else {
+                    const altItem = this.state.watchlist.find(w => w.symbol === `${commAsset}USDT`);
+                    if (altItem?.price && altItem.price > 0) {
+                      fillComm += c * altItem.price;
+                    } else {
+                      feeUnknown = true;
+                      this.addLog(`[FEE ERROR ⚠️] Imposibil de determinat comisionul pentru ${commAsset} (prețul ${commAsset}USDT nu este disponibil).`, 'warning');
+                      break;
+                    }
+                  }
+                }
+              } else {
+                feeUnknown = true;
+                this.addLog(`[FEE ERROR ⚠️] Imposibil de determinat comisionul real (răspunsul exchange-ului nu conține detaliile order.fills).`, 'warning');
+              }
+
+              // Recovery via Binance API if initial parse failed
+              if (feeUnknown && client && (this.state.binanceMode as string) !== 'paper') {
+                try {
+                  const recentTrades = await client.myTrades({ symbol, limit: 5 });
+                  if (Array.isArray(recentTrades) && recentTrades.length > 0) {
+                    let recoveredComm = 0;
+                    let recoveryFailed = false;
+                    const bnbItem = this.state.watchlist.find(w => w.symbol === 'BNBUSDT');
+
+                    const targetTrades = recentTrades.filter((t: any) => 
+                      t.orderId === order.orderId || (t.time && Math.abs(Date.now() - Number(t.time)) < 30000)
+                    );
+                    const tradesToProcess = targetTrades.length > 0 ? targetTrades : [recentTrades[recentTrades.length - 1]];
+
+                    for (const t of tradesToProcess) {
+                      const c = parseFloat(t.commission || 0);
+                      if (!c || c <= 0) continue;
+                      const commAsset = (t.commissionAsset || '').toUpperCase();
+                      const tradePx = parseFloat(t.price) || actualEntryPrice || price;
+                      const baseAsset = symbol.replace(/USDT$/i, '').toUpperCase();
+
+                      if (commAsset === 'USDT') {
+                        recoveredComm += c;
+                      } else if (commAsset === baseAsset) {
+                        recoveredComm += c * tradePx;
+                      } else if (commAsset === 'BNB') {
+                        if (bnbItem?.price && bnbItem.price > 0) {
+                          recoveredComm += c * bnbItem.price;
+                        } else {
+                          recoveryFailed = true;
+                          break;
+                        }
+                      } else {
+                        const altItem = this.state.watchlist.find(w => w.symbol === `${commAsset}USDT`);
+                        if (altItem?.price && altItem.price > 0) {
+                          recoveredComm += c * altItem.price;
+                        } else {
+                          recoveryFailed = true;
+                          break;
+                        }
+                      }
+                    }
+
+                    if (!recoveryFailed) {
+                      fillComm = recoveredComm;
+                      feeUnknown = false;
+                      this.addLog(`[FEE RECOVERY 🔄] Comisionul real a fost recuperat cu succes prin myTrades API: $${fillComm.toFixed(4)}`, 'info');
+                    }
+                  }
+                } catch (recErr: any) {
+                  console.warn(`[FEE RECOVERY] Recuperarea prin myTrades a eșuat: ${recErr?.message || recErr}`);
+                }
+              }
+
+              if (feeUnknown) {
+                this.addLog(`[ACCOUNTING_INCOMPLETE ⚠️] Comisionul real nu poate fi determinat în mod fiabil. Tranzacția este marcată ca ACCOUNTING_INCOMPLETE pentru reconciliere. PnL-ul net nu este considerat finalizat.`, 'warning');
+                actualFee = 0;
+              } else {
+                actualFee = parseFloat(fillComm.toFixed(4));
+              }
+              orderSuccess = true;
+              this.consecutiveApiErrors = 0; // Reset error counter
+
+              if (realFreeUSDT !== null) {
+                this.state.balance = realFreeUSDT;
+              }
+              console.log(`[Binance Executed ${order.status}] ${action} ${symbol}: ${actualExecutedQty} @ $${actualEntryPrice.toFixed(4)} (Fee: $${actualFee.toFixed(4)})`);
+            } else {
+              orderSuccess = false;
+              this.addLog(`[BINANCE] Ordinul ${symbol} a raportat status ${order.status}, dar cantitatea executată este 0. Nicio poziție locală creată.`, 'warning');
+            }
+          } else if (order && order.status === 'NEW') {
+            orderSuccess = false;
+            this.addLog(`[BINANCE] Ordinul ${symbol} a fost plasat și este în așteptare (NEW). Nicio poziție locală nu a fost creată încă.`, 'info');
           } else {
             orderSuccess = false;
-            this.addLog(`[BINANCE LIVE] Balanță insuficientă în contul Binance pentru ordinul ${action} ${symbol}. Re-sincronizăm balanța...`, 'warning', this.calculateEquity());
-            this.sendNotification(`⚠️ **[Binance Live] Balanță insuficientă**\nContul Binance nu dispune de fonduri suficiente pentru ${action} ${symbol}. S-a efectuat re-sincronizarea.`);
-            this.syncBinanceBalance().catch(() => {});
+            const st = order?.status || 'REJECTED/CANCELED';
+            this.addLog(`[BINANCE] Ordinul ${symbol} a fost ${st}. Nicio poziție locală creată.`, 'warning');
           }
-        } else if (isInvalidKeyOrConn && this.state.binanceMode === 'testnet') {
-          this.addLog(
-            `[BINANCE TESTNET -> SIMULARE PAPER] Conexiunea sau cheia Binance Testnet a raportat o eroare (${errMsg}). Ordinul ${action} ${symbol} a fost executat în modul Paper (Simulat).`,
-            'info',
-            this.calculateEquity()
-          );
-          orderSuccess = true;
-        } else {
+        } catch (err: any) {
           orderSuccess = false;
+          const errMsg = err?.message || String(err);
+          console.warn(`[Binance Order Error] ${errMsg}`);
           this.addLog(`Eroare Binance (${this.state.binanceMode}): ${errMsg}`, 'warning', this.calculateEquity());
-          this.sendNotification(`❌ **Eroare Binance [${this.state.binanceMode}]**\nActiv: ${symbol}\nAcțiune: ${action}\nEroare: ${errMsg}`);
+
+          if (this.state.binanceMode === 'live') {
+            this.consecutiveApiErrors += 1;
+            if (this.consecutiveApiErrors >= 3) {
+              this.state.autoTradingActive = false;
+              this.addLog(`[SAFE STOP 🛑] Oprire de urgență: 3 erori API consecutive pe modul Live. Tradingul automat a fost dezactivat.`, 'warning');
+              this.sendNotification(`🛑 **[SAFE STOP LIVE]**\nAu intervenit 3 erori API consecutive pe Binance Live. Tradingul automat a fost OPRIT de siguranță.`);
+            }
+          }
         }
       }
-    }
 
-    if (!orderSuccess) return;
+      if (!orderSuccess) return;
 
-    const cost = price * amount;
-    const fee = parseFloat((cost * 0.00075).toFixed(4)); // 0.075% standard fee
+      const finalAmount = actualExecutedQty;
+      const finalPrice = actualEntryPrice;
+      const finalFee = actualFee;
+      const cost = finalPrice * finalAmount;
 
-    if (action === 'BUY') {
-      const detectedStrategy = meta?.strategy || (meta?.entryReason?.includes('Grid') ? 'grid' : (meta?.entryReason?.includes('Manual') ? 'manual' : 'scalping'));
-      const lev = detectedStrategy === 'scalping' ? Math.max(1, Math.min(50, Number(meta?.leverage || this.state.scalpingConfig?.leverage || 1))) : 1;
-      const marginCost = cost / lev;
-      const actualDeductCost = Math.min(marginCost, this.state.balance);
-      if (this.state.balance >= actualDeductCost - 0.0001) {
+      if (action === 'BUY') {
+        const detectedStrategy = meta?.strategy || (meta?.entryReason?.includes('Grid') ? 'grid' : (meta?.entryReason?.includes('Manual') ? 'manual' : 'scalping'));
+        // On SPOT markets, leverage is capped at 1x
+        const lev = 1;
+        const marginCost = cost;
+        const actualDeductCost = Math.min(marginCost, this.state.balance);
+
         const existing = this.state.positions.find(p => p.symbol === symbol);
         if (existing) {
-          existing.amount += amount;
-          existing.currentPrice = price;
+          existing.amount += finalAmount;
+          existing.currentPrice = finalPrice;
+          existing.entryFee = (existing.entryFee || 0) + finalFee;
+          if (feeUnknown) {
+            (existing as any).isFeeUnknown = true;
+            (existing as any).accountingStatus = 'ACCOUNTING_INCOMPLETE';
+          }
           if ((existing as any).margin) (existing as any).margin += actualDeductCost;
-          if (!(existing as any).highestPrice || price > (existing as any).highestPrice) {
-            (existing as any).highestPrice = price;
+          if (!(existing as any).highestPrice || finalPrice > (existing as any).highestPrice) {
+            (existing as any).highestPrice = finalPrice;
           }
         } else {
           this.state.positions.push({
             symbol,
-            amount,
-            entryPrice: price,
-            currentPrice: price,
-            highestPrice: price,
+            amount: finalAmount,
+            entryPrice: finalPrice,
+            currentPrice: finalPrice,
+            highestPrice: finalPrice,
             openedAt: Date.now(),
+            entryFee: finalFee,
             entryMlProb: meta?.mlProbability || 75,
             entryOppScore: meta?.entryReason?.includes('OppScore:') ? parseFloat(meta.entryReason.split('OppScore:')[1]) || 70 : 70,
             entryPatternName: meta?.entryPatternName || (meta as any)?.candlestickPatternName || undefined,
@@ -2108,74 +2364,98 @@ class ServerBotEngine {
             targetTP: meta?.targetTP || 0.8,
             metaTradeScore: meta?.metaTradeScore || 75,
             leverage: lev,
-            margin: actualDeductCost
+            margin: actualDeductCost,
+            isFeeUnknown: feeUnknown,
+            accountingStatus: feeUnknown ? 'ACCOUNTING_INCOMPLETE' : 'SETTLED'
           } as any);
         }
-        this.state.balance = Math.max(0, this.state.balance - actualDeductCost);
-      this.state.totalTradesExecuted += 1;
 
-      // Calculate Trade Quality Rating & Grade (A+ / A / B / C / F)
-      const oppScoreVal = meta?.entryReason?.includes('OppScore:')
-        ? (parseFloat(meta.entryReason.split('OppScore:')[1]) || 70)
-        : 70;
+        if (this.state.binanceMode === 'paper') {
+          this.state.balance = Math.max(0, this.state.balance - actualDeductCost - finalFee);
+        }
+        this.state.totalTradesExecuted += 1;
 
-      const qualityRes = calculateTradeQualityScore({
-        action: 'BUY',
-        mlProbability: meta?.mlProbability || 75,
-        oppScore: oppScoreVal,
-        pnlPercent: 0
-      });
+        const oppScoreVal = meta?.entryReason?.includes('OppScore:')
+          ? (parseFloat(meta.entryReason.split('OppScore:')[1]) || 70)
+          : 70;
 
-      // Automatically add BUY trade to Trading Journal database
-      journalService.addJournalEntry({
-        symbol,
-        action: 'BUY',
-        price,
-        amount,
-        fee,
-        pnl: 0,
-        pnlPercent: 0,
-        mlProbability: meta?.mlProbability || 75,
-        modelName: meta?.modelName || 'XGBoost Classifier',
-        entryReason: meta?.entryReason || 'Semnal Cumpărare Algoritm AI',
-        mode: this.state.binanceMode,
-        timestamp: new Date().toISOString(),
-        notes: meta?.notes || `Deschis pe modul ${this.state.binanceMode} | Trade Grade: ${qualityRes.grade} (${qualityRes.score}/100)`,
-        tradeGrade: qualityRes.grade,
-        tradeQualityScore: qualityRes.score,
-        stars: qualityRes.stars,
-        oppScore: oppScoreVal
-      });
+        const qualityRes = calculateTradeQualityScore({
+          action: 'BUY',
+          mlProbability: meta?.mlProbability || 75,
+          oppScore: oppScoreVal,
+          pnlPercent: 0
+        });
 
-      const currentEquity = this.calculateEquity();
-      this.addLog(`[SERVER BOT] Cumpărat ${amount} ${symbol} @ $${price} | Trade Quality: Grade ${qualityRes.grade} ('${'★'.repeat(qualityRes.stars)}')`, 'success', currentEquity);
-      } else {
-        this.addLog(`[SERVER BOT] Cumpărare ${symbol} neefectuată: Costul ($${cost.toFixed(2)} USDT) depășește balanța disponibilă ($${this.state.balance.toFixed(2)} USDT).`, 'warning');
-      }
-    } else if (action === 'SELL') {
-      const existingIndex = this.state.positions.findIndex(p => p.symbol === symbol);
-      if (existingIndex !== -1) {
-        const pos = this.state.positions[existingIndex];
-        if (pos.amount >= amount) {
+        journalService.addJournalEntry({
+          symbol,
+          action: 'BUY',
+          price: finalPrice,
+          amount: finalAmount,
+          fee: finalFee,
+          pnl: 0,
+          pnlPercent: 0,
+          mlProbability: meta?.mlProbability || 75,
+          modelName: meta?.modelName || 'XGBoost Classifier',
+          entryReason: meta?.entryReason || 'Semnal Cumpărare Algoritm AI',
+          mode: this.state.binanceMode,
+          timestamp: new Date().toISOString(),
+          notes: meta?.notes || `Deschis pe modul ${this.state.binanceMode} | Trade Grade: ${qualityRes.grade} (${qualityRes.score}/100)`,
+          tradeGrade: qualityRes.grade,
+          tradeQualityScore: qualityRes.score,
+          stars: qualityRes.stars,
+          oppScore: oppScoreVal,
+          isFeeUnknown: feeUnknown,
+          accountingStatus: feeUnknown ? 'ACCOUNTING_INCOMPLETE' : 'SETTLED'
+        });
+
+        const currentEquity = this.calculateEquity();
+        this.addLog(`[SERVER BOT] Cumpărat ${finalAmount.toFixed(4)} ${symbol} @ $${finalPrice.toFixed(4)} (Comision: $${finalFee.toFixed(4)}) | Trade Quality: Grade ${qualityRes.grade}`, 'success', currentEquity);
+      } else if (action === 'SELL') {
+        const existingIndex = this.state.positions.findIndex(p => p.symbol === symbol);
+        if (existingIndex !== -1) {
+          const pos = this.state.positions[existingIndex];
+          const qtyToClose = Math.min(pos.amount, finalAmount);
           const entryPrice = pos.entryPrice;
-          const pnl = (price - entryPrice) * amount;
-          const pnlPercent = ((price - entryPrice) / entryPrice) * 100;
-          const pnlValueStr = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`;
 
-          // MFE (Maximum Favorable Excursion) & MAE (Maximum Adverse Excursion) Analytics
-          const highestP = (pos as any).highestPrice || Math.max(entryPrice, price);
-          const lowestP = (pos as any).lowestPrice || Math.min(entryPrice, price);
+          const isTradeFeeUnknown = feeUnknown || !!(pos as any).isFeeUnknown;
+          const tradeAccountingStatus: 'SETTLED' | 'ACCOUNTING_INCOMPLETE' = isTradeFeeUnknown ? 'ACCOUNTING_INCOMPLETE' : 'SETTLED';
+
+          // Gross vs Net PnL Accounting
+          const grossPnl = (finalPrice - entryPrice) * qtyToClose;
+          const portionEntryFee = (pos.entryFee || 0) * (qtyToClose / pos.amount);
+          const exitFee = finalFee;
+          const totalFees = portionEntryFee + exitFee;
+          const netPnl = grossPnl - totalFees;
+          const pnlPercent = ((finalPrice - entryPrice) / entryPrice) * 100;
+          const pnlValueStr = netPnl >= 0 ? `+$${netPnl.toFixed(2)}` : `-$${Math.abs(netPnl).toFixed(2)}`;
+
+          if (isTradeFeeUnknown) {
+            this.addLog(`[ACCOUNTING_INCOMPLETE ⚠️] Închidere ${symbol}: Comisionul real este neconfirmat (FEE_UNKNOWN). PnL-ul net este marcat ca ACCOUNTING_INCOMPLETE pentru reconciliere.`, 'warning');
+          }
+
+          // MFE & MAE Analytics
+          const highestP = (pos as any).highestPrice || Math.max(entryPrice, finalPrice);
+          const lowestP = (pos as any).lowestPrice || Math.min(entryPrice, finalPrice);
           const mfePct = parseFloat((((highestP - entryPrice) / entryPrice) * 100).toFixed(2));
           const maePct = parseFloat((((entryPrice - lowestP) / entryPrice) * 100).toFixed(2));
           const captureEff = mfePct > 0 ? Math.min(100, Math.max(0, parseFloat(((pnlPercent / mfePct) * 100).toFixed(1)))) : 0;
-          
-          pos.amount -= amount;
-          if (pos.amount <= 0) {
+
+          const origAmount = pos.amount;
+          const closeRatio = qtyToClose / origAmount;
+          const totalPosMargin = (pos as any).margin || (entryPrice * origAmount);
+          const closingMargin = totalPosMargin * closeRatio;
+
+          pos.amount -= qtyToClose;
+          pos.entryFee = Math.max(0, (pos.entryFee || 0) - portionEntryFee);
+          if ((pos as any).margin !== undefined) {
+            (pos as any).margin = Math.max(0, (pos as any).margin - closingMargin);
+          }
+
+          if (pos.amount <= 0.000001) {
             this.state.positions.splice(existingIndex, 1);
           }
-          const posLev = (pos as any).leverage || 1;
-          const posMargin = (pos as any).margin || ((entryPrice * amount) / posLev);
-          const returnedCapital = posMargin + pnl;
+
+          const returnedCapital = closingMargin + netPnl;
           this.state.balance += returnedCapital;
           this.state.totalTradesExecuted += 1;
 
@@ -2184,27 +2464,27 @@ class ServerBotEngine {
           this.state.tradeHistory.push({
             symbol,
             entryPrice,
-            exitPrice: price,
-            amount,
-            pnl,
+            exitPrice: finalPrice,
+            amount: qtyToClose,
+            pnl: netPnl,
             pnlPercent,
             mfePct,
             maePct,
-            timestamp: sellTimestamp
+            timestamp: sellTimestamp,
+            isFeeUnknown: isTradeFeeUnknown,
+            accountingStatus: tradeAccountingStatus
           } as any);
-          // Limit history size
+
           if (this.state.tradeHistory.length > 1000) {
             this.state.tradeHistory.shift();
           }
 
-          // Register Watch Mode post-exit to require a NEW MOMENTUM EVENT before re-entering
-          const cdMin = registerSymbolCooldown(symbol, pnlPercent, meta?.entryReason || `Ieșire Poziție (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%)`, price);
+          const cdMin = registerSymbolCooldown(symbol, pnlPercent, meta?.entryReason || `Ieșire Poziție (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%)`, finalPrice);
           this.addLog(
-            `[Analitică Tranzacție MFE/MAE 📊] ${symbol}: PnL Final: ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% | MFE (Peak Profit Atinge): +${mfePct.toFixed(2)}% | MAE (Max Drawdown Suferit): -${maePct.toFixed(2)}% | Eficiență Captură MFE: ${captureEff}% | Watch Mode: Activ (${cdMin}m)`,
-            pnlPercent >= 0 ? 'success' : 'warning'
+            `[Analitică Tranzacție MFE/MAE 📊] ${symbol}: Net PnL: ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% (${pnlValueStr} | Gross: $${grossPnl.toFixed(2)}, Taxe Total: $${totalFees.toFixed(2)}) | Watch Mode: Activ (${cdMin}m)`,
+            netPnl >= 0 ? 'success' : 'warning'
           );
 
-          // Calculate Trade Quality Rating & Grade for SELL
           const entryOpp = (pos as any).entryOppScore || 70;
           const qualityRes = calculateTradeQualityScore({
             action: 'SELL',
@@ -2213,34 +2493,29 @@ class ServerBotEngine {
             pnlPercent
           });
 
-          const minLogs = (pos as any).minuteProfitLogs || [];
-          const minLogSummary = minLogs.length > 0
-            ? ` | Profit pe minute: ${minLogs.map((m: any) => `M${m.minute}:${m.pnlPercent >= 0 ? '+' : ''}${m.pnlPercent}%`).join(' ➔ ')}`
-            : '';
-
-          // Automatically add SELL trade to Trading Journal database
           journalService.addJournalEntry({
             symbol,
             action: 'SELL',
-            price,
-            amount,
-            fee,
-            pnl,
+            price: finalPrice,
+            amount: qtyToClose,
+            fee: exitFee,
+            pnl: netPnl,
             pnlPercent,
             mlProbability: meta?.mlProbability || 75,
             modelName: meta?.modelName || 'XGBoost Classifier',
-            entryReason: meta?.entryReason || 'Ieșire Poziție (Ieșire Semnal / SL / TP)',
+            entryReason: meta?.entryReason || 'Semnal Vânzare AI',
             mode: this.state.binanceMode,
             timestamp: sellTimestamp,
-            notes: (meta?.notes || `Închis PnL: ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% | Grade: ${qualityRes.grade} (${qualityRes.score}/100)`) + minLogSummary,
+            notes: `Ieșire Poziție | Net PnL: ${pnlValueStr} (Taxe: $${totalFees.toFixed(2)}) | Stare: ${tradeAccountingStatus}`,
             tradeGrade: qualityRes.grade,
             tradeQualityScore: qualityRes.score,
             stars: qualityRes.stars,
             oppScore: entryOpp,
-            minuteProfitLogs: minLogs
+            isFeeUnknown: isTradeFeeUnknown,
+            accountingStatus: tradeAccountingStatus
           });
 
-          // Update per-symbol performance statistics for G&S-Trade-Bot
+          // Update per-symbol performance statistics
           if (!this.state.symbolStats) this.state.symbolStats = {};
           const symStat = this.state.symbolStats[symbol] || {
             symbol,
@@ -2259,34 +2534,29 @@ class ServerBotEngine {
           };
 
           symStat.totalTrades += 1;
-          if (pnl > 0) symStat.wins += 1;
-          else if (pnl < 0) symStat.losses += 1;
-          symStat.realizedPnL = parseFloat((symStat.realizedPnL + pnl).toFixed(2));
+          if (netPnl > 0) symStat.wins += 1;
+          else if (netPnl < 0) symStat.losses += 1;
+          symStat.realizedPnL = parseFloat((symStat.realizedPnL + netPnl).toFixed(2));
           symStat.winRate = parseFloat(((symStat.wins / symStat.totalTrades) * 100).toFixed(1));
 
           const symTrades = this.state.tradeHistory.filter(t => t.symbol === symbol);
           const grossWin = symTrades.filter(t => t.pnl > 0).reduce((acc, t) => acc + t.pnl, 0);
           const grossLoss = Math.abs(symTrades.filter(t => t.pnl < 0).reduce((acc, t) => acc + t.pnl, 0));
           symStat.profitFactor = grossLoss > 0 ? parseFloat((grossWin / grossLoss).toFixed(2)) : (grossWin > 0 ? 3.0 : 1.0);
-
-          const winPcnts = symTrades.filter(t => t.pnlPercent > 0).map(t => t.pnlPercent);
-          const lossPcnts = symTrades.filter(t => t.pnlPercent < 0).map(t => Math.abs(t.pnlPercent));
-          symStat.avgProfitPercent = winPcnts.length > 0 ? parseFloat((winPcnts.reduce((a, b) => a + b, 0) / winPcnts.length).toFixed(2)) : 0;
-          symStat.avgLossPercent = lossPcnts.length > 0 ? parseFloat((lossPcnts.reduce((a, b) => a + b, 0) / lossPcnts.length).toFixed(2)) : 0;
           symStat.lastTradedAt = new Date().toISOString();
 
           this.state.symbolStats[symbol] = symStat;
-
-          // Register Post-Exit Cooldown Protection Engine (Prevents rapid re-entries)
-          const cooldownMinutes = registerSymbolCooldown(symbol, pnlPercent, pnlPercent >= 0 ? `Take Profit (+${pnlPercent.toFixed(2)}%)` : `Stop Loss (${pnlPercent.toFixed(2)}%)`);
           
           const currentEquity = this.calculateEquity();
-          this.addLog(`[SERVER BOT] Vândut ${amount} ${symbol} @ $${price} (PNL: ${pnlPercent.toFixed(2)}% | ${pnlValueStr}). Moneda intră în cooldown ${cooldownMinutes} min.`, 'warning', currentEquity);
+          this.addLog(`[SERVER BOT] Vândut ${qtyToClose.toFixed(4)} ${symbol} @ $${finalPrice.toFixed(4)} (Net PnL: ${pnlPercent.toFixed(2)}% | ${pnlValueStr}).`, 'warning', currentEquity);
         }
       }
+      this.savePersistedState();
+      this.checkCircuitBreaker();
+    } finally {
+      // Always release execution lock
+      this.executingSymbols.delete(symbol);
     }
-    this.savePersistedState();
-    this.checkCircuitBreaker();
   }
 
   public calculateEquity(): number {

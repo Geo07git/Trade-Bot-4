@@ -29,6 +29,8 @@ export interface JournalEntry {
   tradeQualityScore?: number;
   stars?: number;
   oppScore?: number;
+  isFeeUnknown?: boolean;
+  accountingStatus?: 'SETTLED' | 'ACCOUNTING_INCOMPLETE';
   minuteProfitLogs?: MinuteProfitLog[];
 }
 
