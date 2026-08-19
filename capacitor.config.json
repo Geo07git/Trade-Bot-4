@@ -1,0 +1,10 @@
+{
+  "appId": "com.gs.tradebot",
+  "appName": "G&S Trade Bot",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  }
+}

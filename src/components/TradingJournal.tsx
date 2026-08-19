@@ -27,6 +27,7 @@ import {
 import { JournalEntry, DailySnapshot } from '../types';
 import { useTradingStore } from '../store';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, Cell } from 'recharts';
+import { apiFetch, safeJson, safeJsonFetch } from '../utils/apiHelper';
 
 interface JournalAnalytics {
   totalTrades: number;
@@ -110,12 +111,96 @@ function formatInTimezone(isoStr?: string, timeZone = 'Europe/Bucharest'): strin
   }
 }
 
+function MinuteProfitDisplay({ minuteLogs, notes }: { minuteLogs?: any[]; notes?: string }) {
+  if (minuteLogs && minuteLogs.length > 0) {
+    return (
+      <div className="flex flex-col gap-0.5 mt-1 pt-1 border-t border-white/5">
+        <div className="text-[9px] font-mono text-zinc-400 flex items-center gap-1 font-semibold">
+          <Clock className="w-2.5 h-2.5 text-sky-400 shrink-0" />
+          <span>Profit/min ({minuteLogs.length}m):</span>
+        </div>
+        <div className="flex flex-wrap gap-0.5 max-w-[220px]">
+          {minuteLogs.map((log, idx) => {
+            const isPos = (log.pnlPercent ?? 0) >= 0;
+            return (
+              <span
+                key={idx}
+                className={`px-1 py-0.25 rounded font-mono text-[9px] font-bold border ${
+                  isPos
+                    ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
+                    : 'bg-rose-500/10 text-rose-300 border-rose-500/20'
+                }`}
+                title={`Minutul ${log.minute}: ${isPos ? '+' : ''}${log.pnlPercent}% ($${log.pnl ?? 0}) @ $${log.price ?? ''}`}
+              >
+                M{log.minute}:{isPos ? '+' : ''}{log.pnlPercent}%
+              </span>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  if (notes && notes.includes('Profit pe minute:')) {
+    const parts = notes.split('Profit pe minute:')[1]?.trim();
+    if (parts) {
+      return (
+        <div className="flex flex-col gap-0.5 mt-1 pt-1 border-t border-white/5">
+          <div className="text-[9px] font-mono text-zinc-400 flex items-center gap-1 font-semibold">
+            <Clock className="w-2.5 h-2.5 text-sky-400 shrink-0" />
+            <span>Profit/min:</span>
+          </div>
+          <span className="font-mono text-[9px] text-zinc-300 bg-zinc-800/80 px-1.5 py-0.5 rounded border border-white/10 max-w-[220px] truncate">
+            {parts}
+          </span>
+        </div>
+      );
+    }
+  }
+
+  return null;
+}
+
 export function TradingJournal() {
-  const { tradeHistory, positions, binanceMode, timezone } = useTradingStore();
+  const { 
+    tradeHistory, 
+    gridHistory, 
+    positions, 
+    binanceMode, 
+    timezone, 
+    initialBalance,
+    accumulationBalance = 0,
+    sessionCycleCount = 1,
+    consolidateAccumulation
+  } = useTradingStore();
   const [entries, setEntries] = useState<JournalEntry[]>([]);
   const [snapshots, setSnapshots] = useState<DailySnapshot[]>([]);
   const [analytics, setAnalytics] = useState<JournalAnalytics | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+
+  // Initial Equity from session start
+  const initialEquity = useMemo(() => {
+    return initialBalance && initialBalance > 0 ? initialBalance : 10000;
+  }, [initialBalance]);
+
+  // Session Profit Target % (defaults to 3.0%, stored in localStorage)
+  const [sessionTargetPct, setSessionTargetPct] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('journal_session_target_pct');
+      return saved ? parseFloat(saved) || 3.0 : 3.0;
+    } catch {
+      return 3.0;
+    }
+  });
+
+  const handleSessionTargetChange = (val: number) => {
+    setSessionTargetPct(val);
+    try {
+      localStorage.setItem('journal_session_target_pct', val.toString());
+    } catch (e) {
+      console.warn('Could not save session target to localStorage:', e);
+    }
+  };
 
   // Filters
   const [selectedSymbol, setSelectedSymbol] = useState<string>('ALL');
@@ -124,6 +209,8 @@ export function TradingJournal() {
   const [selectedMode, setSelectedMode] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeTab, setActiveTab] = useState<'entries' | 'models' | 'snapshots'>('entries');
+  const [isTableCollapsed, setIsTableCollapsed] = useState<boolean>(false);
+  const [sortBy, setSortBy] = useState<'pnl' | 'date'>('date');
   
   // Modal and Manual Save State
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -135,8 +222,9 @@ export function TradingJournal() {
   const [newAction, setNewAction] = useState<'BUY' | 'SELL'>('BUY');
   const [newPrice, setNewPrice] = useState<string>('63000');
   const [newAmount, setNewAmount] = useState<string>('0.05');
-  const [newFee, setNewFee] = useState<string>('0.05');
-  const [newPnL, setNewPnL] = useState<string>('0');
+  const [newFeeBUY, setNewFeeBUY] = useState<string>('2.3625');
+  const [newFeeSELL, setNewFeeSELL] = useState<string>('0');
+  const [newPnLBrut, setNewPnLBrut] = useState<string>('0');
   const [newPnLPercent, setNewPnLPercent] = useState<string>('0');
   const [newMlProb, setNewMlProb] = useState<number>(85);
   const [newModelName, setNewModelName] = useState('Random Forest Ensemble 2.0');
@@ -150,21 +238,26 @@ export function TradingJournal() {
     try {
       const priceNum = parseFloat(newPrice) || 0;
       const amountNum = parseFloat(newAmount) || 0;
-      const feeNum = parseFloat(newFee) || 0;
-      const pnlNum = parseFloat(newPnL) || 0;
+      const feeBUYNum = parseFloat(newFeeBUY) || 0;
+      const feeSELLNum = parseFloat(newFeeSELL) || 0;
+      const feeTotal = newAction === 'BUY' ? feeBUYNum : (feeBUYNum + feeSELLNum);
+      const pnlBrutNum = parseFloat(newPnLBrut) || 0;
       const pnlPctNum = parseFloat(newPnLPercent) || 0;
       const scoreNum = Math.min(100, Math.max(0, newQualityScore || 85));
 
-      const calculatedGrade = scoreNum >= 90 ? 'A+' : scoreNum >= 80 ? 'A' : scoreNum >= 70 ? 'B' : scoreNum >= 60 ? 'C' : 'F';
-      const calculatedStars = scoreNum >= 90 ? 5 : scoreNum >= 80 ? 5 : scoreNum >= 70 ? 4 : scoreNum >= 60 ? 3 : 2;
+      const calculatedGrade = scoreNum >= 90 ? 'A+' : scoreNum >= 82 ? 'A' : scoreNum >= 76 ? 'B' : scoreNum >= 68 ? 'C' : 'F';
+      const calculatedStars = scoreNum >= 90 ? 5 : scoreNum >= 82 ? 5 : scoreNum >= 76 ? 4 : scoreNum >= 68 ? 3 : 2;
 
       const payload = {
         symbol: newSymbol.toUpperCase().trim(),
         action: newAction,
         price: priceNum,
         amount: amountNum,
-        fee: feeNum,
-        pnl: pnlNum,
+        fee: newAction === 'BUY' ? feeBUYNum : feeSELLNum,
+        buyFee: feeBUYNum,
+        sellFee: feeSELLNum,
+        totalFee: feeTotal,
+        pnl: pnlBrutNum,
         pnlPercent: pnlPctNum,
         mlProbability: newMlProb,
         modelName: newModelName,
@@ -178,14 +271,14 @@ export function TradingJournal() {
         date: new Date().toISOString().split('T')[0]
       };
 
-      const res = await fetch('/api/journal/entry', {
+      const res = await apiFetch('/api/journal/entry', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
-      const data = await res.json();
-      if (data.success) {
+      const data = await safeJson(res, { success: false, error: 'Răspuns invalid de la server' });
+      if (data && data.success) {
         setSaveSuccessMsg('Tranzacție salvată cu succes în jurnal!');
         setTimeout(() => setSaveSuccessMsg(null), 3000);
         setIsAddModalOpen(false);
@@ -193,7 +286,7 @@ export function TradingJournal() {
         setNewNotes('');
         await fetchData();
       } else {
-        alert('Eroare la salvare: ' + (data.error || 'Necunoscută'));
+        alert('Eroare la salvare: ' + (data?.error || 'Necunoscută'));
       }
     } catch (err: any) {
       alert('Eroare la conexiunea cu serverul: ' + (err?.message || err));
@@ -203,14 +296,36 @@ export function TradingJournal() {
   };
 
   const handleExportCSV = () => {
-    if (filteredEntries.length === 0) {
+    if (sortedFilteredEntries.length === 0) {
       alert('Nu există tranzacții de exportat.');
       return;
     }
-    const headers = ['ID', 'Data_Ora', 'Simbol', 'Tip', 'Pret_Executie', 'Cantitate', 'Comision', 'PnL', 'PnL_Percent', 'Scor_Calitate', 'Grad_AI', 'Model_ML', 'Motiv_Intrare', 'Mod', 'Note'];
+    const headers = [
+      'ID',
+      'Data_Ora',
+      'Simbol',
+      'Tip',
+      'Pret_Executie',
+      'Cantitate',
+      'Fee_BUY',
+      'Fee_SELL',
+      'Fee_Total',
+      'PnL_Brut',
+      'PnL_Net',
+      'Equity',
+      'Session_PnL_Percent',
+      'Peak_Equity',
+      'Drawdown_Percent',
+      'Scor_Calitate',
+      'Grad_AI',
+      'Model_ML',
+      'Motiv_Intrare',
+      'Mod',
+      'Note'
+    ];
     const csvRows = [headers.join(',')];
 
-    filteredEntries.forEach(e => {
+    sortedFilteredEntries.forEach(e => {
       const timeStr = formatInTimezone(e.timestamp || new Date().toISOString(), timezone || 'Europe/Bucharest');
       const row = [
         `"${e.id}"`,
@@ -219,9 +334,15 @@ export function TradingJournal() {
         `"${e.action || ''}"`,
         e.price || 0,
         e.amount || 0,
-        e.fee || 0,
-        e.pnl || 0,
-        e.pnlPercent || 0,
+        (e.computedFeeBUY || 0).toFixed(4),
+        (e.computedFeeSELL || 0).toFixed(4),
+        (e.computedFeeTotal || 0).toFixed(4),
+        (e.computedPnLBrut || 0).toFixed(2),
+        (e.computedPnLNet || 0).toFixed(2),
+        (e.computedEquity || 0).toFixed(2),
+        (e.computedSessionPnLPercent || 0).toFixed(2),
+        (e.computedPeakEquity || 0).toFixed(2),
+        (e.computedDrawdownPercent || 0).toFixed(2),
         e.tradeQualityScore || 0,
         `"${e.tradeGrade || 'B'}"`,
         `"${(e.modelName || '').replace(/"/g, '""')}"`,
@@ -232,11 +353,12 @@ export function TradingJournal() {
       csvRows.push(row.join(','));
     });
 
-    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const csvContent = '\uFEFF' + csvRows.join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    link.setAttribute('download', `Trading_Journal_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `Trading_Journal_NetPnL_${new Date().toISOString().split('T')[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -262,54 +384,46 @@ export function TradingJournal() {
     document.body.removeChild(link);
   };
 
-  const fetchData = async () => {
-    setIsLoading(true);
+  const fetchData = async (isSilent = false) => {
+    if (!isSilent) setIsLoading(true);
     try {
-      const [entriesRes, snapshotsRes, analyticsRes] = await Promise.all([
-        fetch('/api/journal/entries'),
-        fetch('/api/journal/daily-snapshots'),
-        fetch('/api/journal/analytics')
+      const [entriesData, snapshotsData, analyticsData] = await Promise.all([
+        safeJsonFetch<{ success: boolean; entries: JournalEntry[] }>('/api/journal/entries', undefined, { success: false, entries: [] }),
+        safeJsonFetch<{ success: boolean; snapshots: DailySnapshot[] }>('/api/journal/daily-snapshots', undefined, { success: false, snapshots: [] }),
+        safeJsonFetch<{ success: boolean; analytics: JournalAnalytics }>('/api/journal/analytics', undefined, { success: false, analytics: null as any })
       ]);
 
-      if (entriesRes.ok) {
-        const data = await entriesRes.json();
-        if (data.success && Array.isArray(data.entries)) {
-          setEntries(data.entries);
-        }
+      if (entriesData && entriesData.success && Array.isArray(entriesData.entries)) {
+        setEntries(entriesData.entries);
       }
-      if (snapshotsRes.ok) {
-        const data = await snapshotsRes.json();
-        if (data.success && Array.isArray(data.snapshots)) {
-          setSnapshots(data.snapshots);
-        }
+      if (snapshotsData && snapshotsData.success && Array.isArray(snapshotsData.snapshots)) {
+        setSnapshots(snapshotsData.snapshots);
       }
-      if (analyticsRes.ok) {
-        const data = await analyticsRes.json();
-        if (data.success && data.analytics) {
-          setAnalytics(data.analytics);
-        }
+      if (analyticsData && analyticsData.success && analyticsData.analytics) {
+        setAnalytics(analyticsData.analytics);
       }
-    } catch (err) {
-      console.error('Error fetching journal data:', err);
+    } catch (err: any) {
+      // Graceful fallback to existing state if network is reconnecting
+      console.warn('Journal data fetch notice:', err?.message || err);
     } finally {
-      setIsLoading(false);
+      if (!isSilent) setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchData();
+    fetchData(false);
     const timer = setInterval(() => {
-      fetchData();
-    }, 5000);
+      fetchData(true);
+    }, 10000);
     return () => clearInterval(timer);
   }, []);
 
   const handleClearSnapshots = async () => {
     if (!window.confirm('Ești sigur că vrei să ștergi toate rapoartele zilnice și istoricul evoluției equity?')) return;
     try {
-      const res = await fetch('/api/journal/clear-snapshots', { method: 'POST' });
-      const data = await res.json();
-      if (data.success) {
+      const res = await apiFetch('/api/journal/clear-snapshots', { method: 'POST' });
+      const data = await safeJson(res, { success: false });
+      if (data && data.success) {
         setSnapshots([]);
       }
     } catch (err) {
@@ -320,11 +434,11 @@ export function TradingJournal() {
   const handleClearEntries = async () => {
     if (!window.confirm('Ești sigur că vrei să ștergi toate înregistrările din jurnalul de tranzacții?')) return;
     try {
-      const res = await fetch('/api/journal/clear-entries', { method: 'POST' });
-      const data = await res.json();
-      if (data.success) {
+      const res = await apiFetch('/api/journal/clear-entries', { method: 'POST' });
+      const data = await safeJson(res, { success: false });
+      if (data && data.success) {
         setEntries([]);
-        useTradingStore.setState({ tradeHistory: [] });
+        useTradingStore.setState({ tradeHistory: [], gridHistory: [] });
       }
     } catch (err) {
       console.error('Eroare la ștergerea jurnalului:', err);
@@ -334,13 +448,13 @@ export function TradingJournal() {
   const handleDeleteSingleEntry = async (entry: JournalEntry) => {
     if (!window.confirm(`Ștergi tranzacția ${entry.symbol} (${entry.action}) din ${formatInTimezone(entry.timestamp || new Date().toISOString(), timezone || 'Europe/Bucharest')}?`)) return;
     try {
-      const res = await fetch('/api/journal/delete-entry', {
+      const res = await apiFetch('/api/journal/delete-entry', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: entry.id, symbol: entry.symbol, timestamp: entry.timestamp })
       });
-      const data = await res.json();
-      if (data.success) {
+      const data = await safeJson(res, { success: false });
+      if (data && data.success) {
         setEntries((prev) => prev.filter((e) => e.id !== entry.id));
         if (tradeHistory && Array.isArray(tradeHistory)) {
           const updatedHistory = tradeHistory.filter((t, idx) => {
@@ -351,28 +465,66 @@ export function TradingJournal() {
           });
           useTradingStore.setState({ tradeHistory: updatedHistory });
         }
+        if (gridHistory && Array.isArray(gridHistory)) {
+          const updatedGrid = gridHistory.filter((g) => g.id !== entry.id && `${g.symbol}_${g.timestamp}` !== `${entry.symbol}_${entry.timestamp}`);
+          useTradingStore.setState({ gridHistory: updatedGrid });
+        }
       }
     } catch (err) {
       console.error('Eroare la ștergerea tranzacției:', err);
     }
   };
 
-  // Merge server journal entries with tradeHistory from store so no trade is ever missed
+  // Merge server journal entries, tradeHistory, and gridHistory from Smart AI Grid with strict deduplication
   const allDisplayEntries = useMemo(() => {
-    const existingKeys = new Set(entries.map(e => `${e.symbol}_${e.timestamp}`));
-    const combined = [...entries];
+    // 1. Deduplicate base entries from server
+    const baseEntries: JournalEntry[] = [];
+    (entries || []).forEach(item => {
+      if (!item || !item.symbol) return;
+      const isDup = baseEntries.some(e => {
+        if (item.id && e.id && item.id === e.id) return true;
+        const timeDiff = Math.abs(new Date(item.timestamp).getTime() - new Date(e.timestamp).getTime());
+        const sameSymbol = item.symbol.toUpperCase() === e.symbol.toUpperCase();
+        const sameAction = item.action === e.action;
+        const samePrice = Math.abs((item.price || 0) - (e.price || 0)) < 0.00001;
+        const sameAmount = Math.abs((item.amount || 0) - (e.amount || 0)) < 0.0001;
+        return sameSymbol && sameAction && samePrice && sameAmount && (timeDiff < 15000 || isNaN(timeDiff));
+      });
+      if (!isDup) baseEntries.push(item);
+    });
 
+    const combined = [...baseEntries];
+
+    // 2. Merge tradeHistory safely without generating duplicate entries
     if (tradeHistory && Array.isArray(tradeHistory)) {
       tradeHistory.forEach((t, idx) => {
-        const key = `${t.symbol}_${t.timestamp}`;
-        if (!existingKeys.has(key)) {
+        if (!t || !t.symbol) return;
+        const tExitPrice = (t.exitPrice && t.exitPrice > 0)
+          ? t.exitPrice
+          : ((t.price && t.price > 0) ? t.price : (t.entryPrice || 0));
+        const tTimeMs = new Date(t.timestamp).getTime();
+
+        const alreadyInBase = baseEntries.some(e => {
+          if (e.symbol.toUpperCase() !== t.symbol.toUpperCase()) return false;
+          if (e.action === 'SELL') {
+            const timeDiff = Math.abs(new Date(e.timestamp).getTime() - tTimeMs);
+            const priceMatch = Math.abs((e.price || 0) - tExitPrice) < 0.0001;
+            const pnlMatch = Math.abs((e.pnl || 0) - (t.pnl || 0)) < 0.001;
+            if (timeDiff < 30000 || (priceMatch && pnlMatch)) return true;
+          }
+          return false;
+        });
+
+        if (!alreadyInBase) {
+          const amt = t.amount || 0;
+          const calculatedFee = t.fee || (tExitPrice * amt * 0.00075);
           combined.push({
-            id: `store_trade_${idx}_${t.symbol}`,
+            id: `store_trade_${idx}_${t.symbol}_${t.timestamp}`,
             symbol: t.symbol || 'USDT',
             action: 'SELL' as const,
-            price: t.exitPrice || t.entryPrice || 0,
-            amount: t.amount || 0,
-            fee: (t.exitPrice || 0) * (t.amount || 0) * 0.00075,
+            price: tExitPrice,
+            amount: amt,
+            fee: calculatedFee,
             pnl: t.pnl || 0,
             pnlPercent: t.pnlPercent || 0,
             mlProbability: 78,
@@ -390,8 +542,50 @@ export function TradingJournal() {
       });
     }
 
+    // 3. Merge gridHistory safely
+    if (gridHistory && Array.isArray(gridHistory)) {
+      gridHistory.forEach((g, idx) => {
+        if (!g || !g.symbol) return;
+        const gId = g.id || `grid_${idx}_${g.symbol}_${g.timestamp}`;
+        const gTimeMs = new Date(g.timestamp).getTime();
+        const action = g.action === 'GRID_BUY' ? 'BUY' : 'SELL';
+
+        const alreadyInCombined = combined.some(c => {
+          if (c.id === gId) return true;
+          if (c.symbol.toUpperCase() !== g.symbol.toUpperCase()) return false;
+          const timeDiff = Math.abs(new Date(c.timestamp).getTime() - gTimeMs);
+          return c.action === action && Math.abs(c.price - (g.price || 0)) < 0.0001 && (timeDiff < 15000 || isNaN(timeDiff));
+        });
+
+        if (!alreadyInCombined) {
+          const pnlVal = g.pnl || 0;
+          const pnlPct = pnlVal && g.price && g.amount ? (pnlVal / (g.price * g.amount)) * 100 : 0;
+          combined.push({
+            id: gId,
+            symbol: g.symbol || 'USDT',
+            action: action as any,
+            price: g.price || 0,
+            amount: g.amount || 0,
+            fee: (g.price || 0) * (g.amount || 0) * 0.00075,
+            pnl: pnlVal,
+            pnlPercent: pnlPct,
+            mlProbability: 88,
+            modelName: 'Smart AI Grid Engine 2.0',
+            entryReason: `Smart AI Grid [${g.regime || '🟢 Range'}] (${g.action === 'GRID_BUY' ? 'Ordin Cumpărare' : 'Vânzare Profit Grid'})`,
+            mode: (binanceMode || 'paper') as any,
+            timestamp: g.timestamp || new Date().toISOString(),
+            date: (g.timestamp || new Date().toISOString()).split('T')[0],
+            notes: `Ordin automat de oscilație executat pe ${g.symbol}`,
+            tradeGrade: 'A+',
+            tradeQualityScore: 92,
+            stars: 5
+          });
+        }
+      });
+    }
+
     return combined.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  }, [entries, tradeHistory, binanceMode]);
+  }, [entries, tradeHistory, gridHistory, binanceMode]);
 
   const uniqueSymbols = useMemo(() => {
     const symbols = new Set(allDisplayEntries.map(e => e?.symbol).filter(Boolean));
@@ -403,8 +597,127 @@ export function TradingJournal() {
     return ['ALL', ...Array.from(models)];
   }, [allDisplayEntries]);
 
+  // Chronological calculation of Fee BUY, Fee SELL, Fee Total, PnL Brut, PnL Net, Equity, Session PnL %, Peak Equity, Drawdown %
+  const processedEntries = useMemo(() => {
+    if (!allDisplayEntries || allDisplayEntries.length === 0) return [];
+
+    // Sort ascending by time for sequential equity tracking
+    const chronological = [...allDisplayEntries].sort(
+      (a, b) => new Date(a.timestamp || 0).getTime() - new Date(b.timestamp || 0).getTime()
+    );
+
+    let runningEquity = initialEquity;
+    let peakEquity = initialEquity;
+
+    const lastBuyFeesBySymbol: Record<string, number> = {};
+
+    return chronological.map((e) => {
+      const isBuy = e.action === 'BUY';
+      const sym = (e.symbol || 'USDT').toUpperCase();
+
+      let feeBUY = 0;
+      let feeSELL = 0;
+      let pnlBrut = 0;
+
+      const effPrice = (e.price && e.price > 0)
+        ? e.price
+        : ((e as any).exitPrice || (e as any).entryPrice || 0);
+      const amt = e.amount || 0;
+
+      if (isBuy) {
+        feeBUY = e.fee > 0 ? e.fee : (effPrice * amt * 0.00075);
+        feeSELL = 0;
+        pnlBrut = 0;
+        lastBuyFeesBySymbol[sym] = feeBUY;
+      } else {
+        // SELL action
+        feeSELL = e.fee > 0 ? e.fee : (effPrice * amt * 0.00075);
+
+        if ((e as any).buyFee !== undefined && (e as any).buyFee > 0) {
+          feeBUY = (e as any).buyFee;
+        } else if ((e as any).entryPrice && (e as any).entryPrice > 0) {
+          feeBUY = (e as any).entryPrice * amt * 0.00075;
+        } else if (lastBuyFeesBySymbol[sym] !== undefined && lastBuyFeesBySymbol[sym] > 0) {
+          feeBUY = lastBuyFeesBySymbol[sym];
+        } else {
+          feeBUY = feeSELL > 0 ? feeSELL : (effPrice * amt * 0.00075);
+        }
+
+        pnlBrut = e.pnl !== undefined ? e.pnl : 0;
+      }
+
+      const feeTotal = feeBUY + feeSELL;
+
+      // PnL Net = PnL Brut - Fee Total
+      const pnlNet = isBuy ? -feeBUY : (pnlBrut - feeTotal);
+
+      const hadPrecedingBuy = isBuy ? false : (lastBuyFeesBySymbol[sym] !== undefined || Boolean((e as any).entryPrice));
+      const equityDelta = isBuy ? -feeBUY : (hadPrecedingBuy ? (pnlBrut - feeSELL) : pnlNet);
+
+      runningEquity = runningEquity + equityDelta;
+
+      const sessionPnLPercent = initialEquity > 0 ? ((runningEquity - initialEquity) / initialEquity) * 100 : 0;
+      peakEquity = Math.max(peakEquity, runningEquity);
+      const drawdownPercent = peakEquity > 0 ? ((peakEquity - runningEquity) / peakEquity) * 100 : 0;
+
+      return {
+        ...e,
+        computedFeeBUY: feeBUY,
+        computedFeeSELL: feeSELL,
+        computedFeeTotal: feeTotal,
+        computedPnLBrut: pnlBrut,
+        computedPnLNet: pnlNet,
+        computedEquity: runningEquity,
+        computedSessionPnLPercent: sessionPnLPercent,
+        computedPeakEquity: peakEquity,
+        computedDrawdownPercent: drawdownPercent
+      };
+    });
+  }, [allDisplayEntries, initialEquity]);
+
+  // Session Summary KPI Statistics
+  const summarySessionStats = useMemo(() => {
+    const count = processedEntries.length;
+    const closed = processedEntries.filter(e => e.action === 'SELL');
+    const currentEquity = processedEntries.length > 0 ? processedEntries[processedEntries.length - 1].computedEquity : initialEquity;
+    const currentPeakEquity = processedEntries.length > 0 ? Math.max(...processedEntries.map(e => e.computedPeakEquity)) : initialEquity;
+
+    const totalPnLBrut = closed.reduce((acc, e) => acc + (e.computedPnLBrut || 0), 0);
+    const totalFeeBUY = processedEntries.reduce((acc, e) => acc + (e.computedFeeBUY || 0), 0);
+    const totalFeeSELL = processedEntries.reduce((acc, e) => acc + (e.computedFeeSELL || 0), 0);
+    const totalFeeTotal = totalFeeBUY + totalFeeSELL;
+
+    const sessionNetPnL = currentEquity - initialEquity;
+    const sessionNetPnLPercent = initialEquity > 0 ? (sessionNetPnL / initialEquity) * 100 : 0;
+
+    const targetProfitUsdt = (initialEquity * sessionTargetPct) / 100;
+    const targetProgressPercent = targetProfitUsdt > 0 ? Math.min(100, Math.max(0, (sessionNetPnL / targetProfitUsdt) * 100)) : 0;
+    const isTargetAchieved = sessionNetPnL >= targetProfitUsdt && targetProfitUsdt > 0;
+
+    const maxDrawdownPercent = currentPeakEquity > 0 ? Math.max(0, ...processedEntries.map(e => e.computedDrawdownPercent)) : 0;
+
+    return {
+      count,
+      closedCount: closed.length,
+      initialEquity,
+      currentEquity,
+      currentPeakEquity,
+      totalPnLBrut,
+      totalFeeBUY,
+      totalFeeSELL,
+      totalFeeTotal,
+      sessionNetPnL,
+      sessionNetPnLPercent,
+      targetProfitUsdt,
+      targetProgressPercent,
+      isTargetAchieved,
+      sessionTargetPct,
+      maxDrawdownPercent
+    };
+  }, [processedEntries, initialEquity, sessionTargetPct]);
+
   const filteredEntries = useMemo(() => {
-    return allDisplayEntries.filter(e => {
+    return processedEntries.filter(e => {
       if (!e) return false;
       if (selectedSymbol !== 'ALL' && e.symbol !== selectedSymbol) return false;
       if (selectedModel !== 'ALL' && e.modelName !== selectedModel) return false;
@@ -420,14 +733,50 @@ export function TradingJournal() {
       }
       return true;
     });
-  }, [allDisplayEntries, selectedSymbol, selectedModel, selectedAction, selectedMode, searchQuery]);
+  }, [processedEntries, selectedSymbol, selectedModel, selectedAction, selectedMode, searchQuery]);
+
+  const sortedFilteredEntries = useMemo(() => {
+    const list = [...filteredEntries];
+    if (sortBy === 'pnl') {
+      list.sort((a, b) => {
+        const pnlA = a.computedPnLNet !== undefined ? a.computedPnLNet : (a.pnl || 0);
+        const pnlB = b.computedPnLNet !== undefined ? b.computedPnLNet : (a.pnl || 0);
+        if (pnlB !== pnlA) return pnlB - pnlA;
+        return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+      });
+    } else {
+      list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    }
+    return list;
+  }, [filteredEntries, sortBy]);
+
+  const getYDomain = useMemo(() => {
+    return ([dataMin, dataMax]: [number, number]): [number, number] => {
+      if (!Number.isFinite(dataMin) || !Number.isFinite(dataMax)) {
+        return [0, 100];
+      }
+      const min = Number(dataMin.toFixed(2));
+      const max = Number(dataMax.toFixed(2));
+      if (min === max) {
+        const pad = min === 0 ? 10 : Math.abs(min) * 0.05;
+        return [Number((min - pad).toFixed(2)), Number((max + pad).toFixed(2))];
+      }
+      const range = max - min;
+      if (range < 0.01) {
+        return [Number((min - 1).toFixed(2)), Number((max + 1).toFixed(2))];
+      }
+      const pad = range * 0.05;
+      return [Number((min - pad).toFixed(2)), Number((max + pad).toFixed(2))];
+    };
+  }, []);
 
   const snapshotChartData = useMemo(() => {
-    return [...snapshots].reverse().map(s => ({
-      date: s.date.substring(5), // MM-DD
-      equity: s.equity,
-      realizedPnL: s.realizedPnL,
-      winRate: s.winRate
+    if (!snapshots || snapshots.length === 0) return [];
+    return [...snapshots].reverse().map((s, index) => ({
+      date: s.date ? s.date.substring(5) : `D-${index}`,
+      equity: Number(Number(s.equity || 0).toFixed(2)),
+      realizedPnL: Number(Number(s.realizedPnL || 0).toFixed(2)),
+      winRate: Number(Number(s.winRate || 0).toFixed(2))
     }));
   }, [snapshots]);
 
@@ -439,9 +788,9 @@ export function TradingJournal() {
         return e.tradeQualityScore;
       }
       if (e.tradeGrade === 'A+') return 93.5;
-      if (e.tradeGrade === 'A') return 84.5;
-      if (e.tradeGrade === 'B') return 74.5;
-      if (e.tradeGrade === 'C') return 64.5;
+      if (e.tradeGrade === 'A') return 85.5;
+      if (e.tradeGrade === 'B') return 78.5;
+      if (e.tradeGrade === 'C') return 71.5;
       if (e.tradeGrade === 'D' || e.tradeGrade === 'F') return 52.0;
       return Math.min(100, Math.max(10, (e.mlProbability || 75) * 0.9 + (e.pnlPercent && e.pnlPercent > 0 ? 15 : 0)));
     };
@@ -544,26 +893,26 @@ export function TradingJournal() {
     };
 
     const b90 = closed.filter(e => getScore(e) >= 90);
-    const b80 = closed.filter(e => getScore(e) >= 80 && getScore(e) < 90);
-    const b70 = closed.filter(e => getScore(e) >= 70 && getScore(e) < 80);
-    const b60 = closed.filter(e => getScore(e) >= 60 && getScore(e) < 70);
-    const bUnder60 = closed.filter(e => getScore(e) < 60);
+    const b82 = closed.filter(e => getScore(e) >= 82 && getScore(e) < 90);
+    const b76 = closed.filter(e => getScore(e) >= 76 && getScore(e) < 82);
+    const b68 = closed.filter(e => getScore(e) >= 68 && getScore(e) < 76);
+    const bUnder68 = closed.filter(e => getScore(e) < 68);
 
     return {
       brackets: [
         calcBracket(b90, 'Scor 90-100', '90-100', 'A+', 5, 'emerald'),
-        calcBracket(b80, 'Scor 80-89', '80-89.9', 'A', 5, 'sky'),
-        calcBracket(b70, 'Scor 70-79', '70-79.9', 'B', 4, 'indigo'),
-        calcBracket(b60, 'Scor 60-69', '60-69.9', 'C', 3, 'amber'),
-        calcBracket(bUnder60, 'Scor < 60', '< 60', 'F', 2, 'rose'),
+        calcBracket(b82, 'Scor 82-89.9', '82-89.9', 'A', 5, 'sky'),
+        calcBracket(b76, 'Scor 76-81.9', '76-81.9', 'B', 4, 'indigo'),
+        calcBracket(b68, 'Scor 68-75.9', '68-75.9', 'C', 3, 'amber'),
+        calcBracket(bUnder68, 'Scor < 68', '< 68', 'F', 2, 'rose'),
       ]
     };
   }, [allDisplayEntries]);
 
   return (
-    <div className="h-full w-full bg-black overflow-y-auto p-4 md:p-8 space-y-8 pb-24">
+    <div className="h-full w-full bg-black overflow-y-auto p-3 sm:p-6 md:p-8 space-y-4 sm:space-y-6 pb-28">
       {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-white/5 pb-6">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-white/5 pb-4 sm:pb-6">
         <div>
           <div className="flex items-center gap-3">
             <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
@@ -606,7 +955,7 @@ export function TradingJournal() {
           </button>
 
           <button
-            onClick={fetchData}
+            onClick={() => fetchData(false)}
             disabled={isLoading}
             className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-zinc-900 border border-white/10 text-zinc-300 hover:text-white hover:bg-zinc-800 transition-colors text-xs font-medium cursor-pointer"
           >
@@ -616,58 +965,128 @@ export function TradingJournal() {
         </div>
       </div>
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* KPI Cards: Equity & Session Profit Target & Fees & Vault */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+        {/* Card 1: Capital & Equity Sesiune */}
         <div className="bg-zinc-900/40 border border-white/5 rounded-2xl p-4 md:p-5">
           <div className="flex items-center justify-between text-zinc-400 mb-2">
-            <span className="text-xs font-medium uppercase tracking-wider">Tranzacții Totale</span>
+            <span className="text-xs font-medium uppercase tracking-wider">Equity Curent (Sesiune)</span>
+            <DollarSign size={16} className={summarySessionStats.sessionNetPnL >= 0 ? "text-emerald-400" : "text-rose-400"} />
+          </div>
+          <div className="text-2xl font-serif text-white font-mono font-bold">
+            ${summarySessionStats.currentEquity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+          <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/5 text-[11px] font-mono">
+            <span className="text-zinc-500">Equity Inițial: ${summarySessionStats.initialEquity.toLocaleString()}</span>
+            <span className={summarySessionStats.sessionNetPnL >= 0 ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
+              {summarySessionStats.sessionNetPnL >= 0 ? '+' : ''}${summarySessionStats.sessionNetPnL.toFixed(2)} ({summarySessionStats.sessionNetPnLPercent >= 0 ? '+' : ''}{summarySessionStats.sessionNetPnLPercent.toFixed(2)}%)
+            </span>
+          </div>
+        </div>
+
+        {/* Card Vault: Sold "Acumulare" (Profit Conservat 3%) */}
+        <div className="bg-gradient-to-b from-amber-950/40 to-zinc-900/60 border border-amber-500/30 rounded-2xl p-4 md:p-5 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-amber-300 mb-1">
+              <span className="text-xs font-semibold uppercase tracking-wider">Sold "Acumulare"</span>
+              <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                Ciclu #{sessionCycleCount}
+              </span>
+            </div>
+            <div className="text-2xl font-serif text-amber-300 font-mono font-bold">
+              ${accumulationBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+          </div>
+          <div className="flex items-center justify-between mt-2 pt-2 border-t border-amber-500/20 text-[11px] font-mono text-amber-400/90">
+            <span>Profit Salvat:</span>
+            <button
+              onClick={() => consolidateAccumulation && consolidateAccumulation()}
+              className="px-2 py-0.5 rounded bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-[10px] transition-all cursor-pointer"
+              title="Extras profitul curent în balanța Acumulare și resetare ciclu"
+            >
+              🔒 Consolidează +{summarySessionStats.sessionNetPnLPercent.toFixed(1)}%
+            </button>
+          </div>
+        </div>
+
+        {/* Card 2: Target Profit Sesiune */}
+        <div className="bg-zinc-900/40 border border-white/5 rounded-2xl p-4 md:p-5 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-zinc-400 mb-1">
+              <span className="text-xs font-medium uppercase tracking-wider">Session Profit Target</span>
+              <Award size={16} className={summarySessionStats.isTargetAchieved ? "text-emerald-400 animate-pulse" : "text-indigo-400"} />
+            </div>
+            <div className="flex items-baseline justify-between mb-1.5">
+              <span className="text-lg font-serif font-bold text-indigo-300 font-mono">
+                +{summarySessionStats.sessionTargetPct}% <span className="text-xs font-sans text-zinc-400">(${summarySessionStats.targetProfitUsdt.toFixed(2)})</span>
+              </span>
+              <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase font-mono ${
+                summarySessionStats.isTargetAchieved
+                  ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                  : "bg-indigo-500/10 text-indigo-300 border border-indigo-500/20"
+              }`}>
+                {summarySessionStats.isTargetAchieved ? '🎯 Target Atins!' : `${summarySessionStats.targetProgressPercent.toFixed(0)}% Progres`}
+              </span>
+            </div>
+
+            {/* Target Progress Bar */}
+            <div className="w-full bg-zinc-800 rounded-full h-2 overflow-hidden mb-2">
+              <div
+                className={`h-full transition-all duration-500 rounded-full ${
+                  summarySessionStats.isTargetAchieved ? 'bg-emerald-400 shadow-lg shadow-emerald-500/50' : 'bg-indigo-500'
+                }`}
+                style={{ width: `${summarySessionStats.targetProgressPercent}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Target Preset Selector Buttons */}
+          <div className="flex items-center gap-1.5 pt-1.5 border-t border-white/5 text-[10px]">
+            <span className="text-zinc-500">Setează Target:</span>
+            {[1, 2, 3, 5, 10].map((pct) => (
+              <button
+                key={pct}
+                onClick={() => handleSessionTargetChange(pct)}
+                className={`px-1.5 py-0.5 rounded font-mono font-medium transition-colors cursor-pointer ${
+                  sessionTargetPct === pct
+                    ? 'bg-indigo-500 text-white font-bold'
+                    : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'
+                }`}
+              >
+                +{pct}%
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Card 3: Comisioane Defalcate (Fee BUY, Fee SELL, Fee Total) */}
+        <div className="bg-zinc-900/40 border border-white/5 rounded-2xl p-4 md:p-5">
+          <div className="flex items-center justify-between text-zinc-400 mb-2">
+            <span className="text-xs font-medium uppercase tracking-wider">Comisioane Totale</span>
             <Zap size={16} className="text-amber-400" />
           </div>
-          <div className="text-2xl font-serif text-white">
-            {analytics?.totalTrades || 0}
+          <div className="text-2xl font-serif text-amber-300 font-mono font-bold">
+            ${summarySessionStats.totalFeeTotal.toFixed(4)}
           </div>
-          <p className="text-[11px] text-zinc-500 mt-1">
-            {analytics?.closedTrades || 0} închise cu PnL calculat
-          </p>
+          <div className="grid grid-cols-2 gap-1 mt-2 pt-2 border-t border-white/5 text-[10px] font-mono text-zinc-400">
+            <div>Fee BUY: <span className="text-amber-400">${summarySessionStats.totalFeeBUY.toFixed(4)}</span></div>
+            <div>Fee SELL: <span className="text-amber-400">${summarySessionStats.totalFeeSELL.toFixed(4)}</span></div>
+          </div>
         </div>
 
+        {/* Card 4: Peak Equity & Drawdown Max */}
         <div className="bg-zinc-900/40 border border-white/5 rounded-2xl p-4 md:p-5">
           <div className="flex items-center justify-between text-zinc-400 mb-2">
-            <span className="text-xs font-medium uppercase tracking-wider">Rată de Câștig (Win Rate)</span>
-            <Percent size={16} className="text-emerald-400" />
+            <span className="text-xs font-medium uppercase tracking-wider">Peak Equity & Drawdown</span>
+            <Percent size={16} className="text-rose-400" />
           </div>
-          <div className="text-2xl font-serif text-emerald-400">
-            {analytics?.winRate || 0}%
+          <div className="text-2xl font-serif text-indigo-300 font-mono font-bold">
+            ${summarySessionStats.currentPeakEquity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
-          <p className="text-[11px] text-zinc-500 mt-1">
-            Măsurat pe tranzacțiile închise
-          </p>
-        </div>
-
-        <div className="bg-zinc-900/40 border border-white/5 rounded-2xl p-4 md:p-5">
-          <div className="flex items-center justify-between text-zinc-400 mb-2">
-            <span className="text-xs font-medium uppercase tracking-wider">PnL Total Realizat</span>
-            <DollarSign size={16} className={analytics && analytics.totalPnL >= 0 ? "text-emerald-400" : "text-rose-400"} />
+          <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/5 text-[11px] font-mono">
+            <span className="text-zinc-500">Max Drawdown:</span>
+            <span className="text-rose-400 font-bold">-{summarySessionStats.maxDrawdownPercent.toFixed(2)}%</span>
           </div>
-          <div className={`text-2xl font-serif ${analytics && analytics.totalPnL >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-            {analytics && analytics.totalPnL >= 0 ? '+' : ''}${analytics?.totalPnL.toFixed(2) || '0.00'}
-          </div>
-          <p className="text-[11px] text-zinc-500 mt-1">
-            Comisioane totale: ${analytics?.totalFees.toFixed(2) || '0.00'}
-          </p>
-        </div>
-
-        <div className="bg-zinc-900/40 border border-white/5 rounded-2xl p-4 md:p-5">
-          <div className="flex items-center justify-between text-zinc-400 mb-2">
-            <span className="text-xs font-medium uppercase tracking-wider">Cel mai bun Model ML</span>
-            <Award size={16} className="text-indigo-400" />
-          </div>
-          <div className="text-lg font-serif text-indigo-300 truncate">
-            {analytics?.bestModel || 'XGBoost Classifier'}
-          </div>
-          <p className="text-[11px] text-zinc-500 mt-1 truncate">
-            Top strategie: {analytics?.bestStrategy || 'RSI + Momentum'}
-          </p>
         </div>
       </div>
 
@@ -837,253 +1256,399 @@ export function TradingJournal() {
             </div>
           </div>
 
-          {/* Filters Bar */}
-          <div className="bg-zinc-900/40 border border-white/5 rounded-2xl p-4 flex flex-col md:flex-row gap-4 items-stretch md:items-center justify-between">
-            {/* Search */}
-            <div className="relative flex-1">
-              <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500" />
-              <input
-                type="text"
-                placeholder="Caută după simbol, strategie sau model..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full bg-zinc-950 border border-white/10 rounded-xl pl-10 pr-4 py-2 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-emerald-500/50"
-              />
+          {/* Collapsible Journal Table Section */}
+          <div className="bg-zinc-900/40 border border-white/5 rounded-2xl overflow-hidden shadow-xl transition-all">
+            {/* Header / Collapse Bar */}
+            <div 
+              onClick={() => setIsTableCollapsed(!isTableCollapsed)}
+              className="p-4 bg-zinc-900/80 border-b border-white/5 flex items-center justify-between cursor-pointer hover:bg-zinc-800/60 transition-colors select-none flex-wrap gap-3"
+            >
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                  <BookOpen className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-sm text-white flex items-center gap-2 flex-wrap">
+                    Tabel Tranzacții & Istoric Execuții ({sortedFilteredEntries.length})
+                    {isTableCollapsed ? (
+                      <span className="text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2.5 py-0.5 rounded-full">
+                        Colapsat (Apasă pentru deschidere)
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-mono bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 px-2.5 py-0.5 rounded-full">
+                        Scrolabil (Max 10 rânduri vizibile)
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    {isTableCollapsed 
+                      ? "Ordonat implicit după mărimea câștigului (PnL descrescător). Apasă pentru a vizualiza lista." 
+                      : `Tabel scrolabil de maxim 10 rânduri. Derulați pentru a vedea toate cele ${sortedFilteredEntries.length} tranzacții sau folosiți filtrele de căutare.`}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                {!isTableCollapsed && (
+                  <div className="flex items-center gap-2 bg-zinc-950 border border-white/10 rounded-xl px-3 py-1.5" onClick={(e) => e.stopPropagation()}>
+                    <span className="text-xs text-zinc-400 font-medium">Ordonare:</span>
+                    <select
+                      value={sortBy}
+                      onChange={(e) => setSortBy(e.target.value as 'pnl' | 'date')}
+                      className="bg-black text-xs text-emerald-400 font-mono font-bold focus:outline-none cursor-pointer border border-emerald-500/30 rounded px-2 py-0.5"
+                    >
+                      <option value="pnl">💰 Mărime Câștig (PnL Descrescător)</option>
+                      <option value="date">🕒 Dată & Oră (Cele mai recente)</option>
+                    </select>
+                  </div>
+                )}
+
+                <button 
+                  className="p-2 bg-zinc-800 text-zinc-300 hover:text-white rounded-xl border border-white/10 flex items-center justify-center transition-transform"
+                  title={isTableCollapsed ? "Extinde tabelul" : "Colapsează tabelul"}
+                >
+                  <ChevronDown className={`w-4 h-4 transition-transform duration-300 ${isTableCollapsed ? '' : 'rotate-180'}`} />
+                </button>
+              </div>
             </div>
 
-            {/* Select Dropdowns */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <select
-                value={selectedSymbol}
-                onChange={(e) => setSelectedSymbol(e.target.value)}
-                className="bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500/50"
+            {/* Collapsed State Box */}
+            {isTableCollapsed ? (
+              <div 
+                onClick={() => setIsTableCollapsed(false)}
+                className="p-8 bg-zinc-950/40 text-center flex flex-col items-center justify-center gap-3 cursor-pointer hover:bg-zinc-900/30 transition-colors border-t border-white/5"
               >
-                <option value="ALL">Toate Simbolurile</option>
-                {uniqueSymbols.filter(s => s !== 'ALL').map(s => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-
-              <select
-                value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
-                className="bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500/50"
-              >
-                <option value="ALL">Toate Modelele ML</option>
-                {uniqueModels.filter(m => m !== 'ALL').map(m => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-
-              <select
-                value={selectedAction}
-                onChange={(e) => setSelectedAction(e.target.value)}
-                className="bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500/50"
-              >
-                <option value="ALL">BUY & SELL</option>
-                <option value="BUY">🟢 Doar BUY</option>
-                <option value="SELL">🔴 Doar SELL</option>
-              </select>
-
-              <select
-                value={selectedMode}
-                onChange={(e) => setSelectedMode(e.target.value)}
-                className="bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500/50"
-              >
-                <option value="ALL">Toate Modurile</option>
-                <option value="paper">Paper Trading</option>
-                <option value="testnet">Binance Testnet</option>
-                <option value="live">Binance Live</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Desktop Table View */}
-          <div className="hidden md:block bg-zinc-900/40 border border-white/5 rounded-2xl overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-zinc-900/80 text-zinc-400 font-mono text-[11px] uppercase border-b border-white/5">
-                  <tr>
-                    <th className="px-5 py-3">Dată & Oră</th>
-                    <th className="px-5 py-3">Simbol</th>
-                    <th className="px-5 py-3">Tip</th>
-                    <th className="px-5 py-3 text-right">Preț Execuție</th>
-                    <th className="px-5 py-3 text-right">Cantitate</th>
-                    <th className="px-5 py-3 text-right">Comision</th>
-                    <th className="px-5 py-3 text-right">PnL</th>
-                    <th className="px-5 py-3">Grad Calitate AI</th>
-                    <th className="px-5 py-3">Probabilitate ML</th>
-                    <th className="px-5 py-3">Model ML</th>
-                    <th className="px-5 py-3">Motiv Intrare / Strategie</th>
-                    <th className="px-5 py-3 text-center">Acțiuni</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5 text-zinc-300">
-                  {filteredEntries.length === 0 ? (
-                    <tr>
-                      <td colSpan={12} className="px-5 py-12 text-center text-zinc-500">
-                        Nicio tranzacție găsită conform filtrelor selectate.
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredEntries.map((e) => (
-                      <tr key={e.id} className="hover:bg-white/[0.02] transition-colors">
-                        <td className="px-5 py-3.5 font-mono text-zinc-400 whitespace-nowrap">
-                          {formatInTimezone(e.timestamp || new Date().toISOString(), timezone || 'Europe/Bucharest')}
-                        </td>
-
-                        <td className="px-5 py-3.5 font-semibold text-white whitespace-nowrap">
-                          {e.symbol || 'USDT'}
-                        </td>
-
-                        <td className="px-5 py-3.5 whitespace-nowrap">
-                          <span className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase ${
-                            e.action === 'BUY'
-                              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                              : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                          }`}>
-                            {e.action || 'BUY'}
-                          </span>
-                        </td>
-
-                        <td className="px-5 py-3.5 font-mono text-right whitespace-nowrap">
-                          ${(e.price || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                        </td>
-
-                        <td className="px-5 py-3.5 font-mono text-right whitespace-nowrap">
-                          {e.amount || 0}
-                        </td>
-
-                        <td className="px-5 py-3.5 font-mono text-right text-zinc-400 whitespace-nowrap">
-                          ${(e.fee || 0).toFixed(4)}
-                        </td>
-
-                        <td className="px-5 py-3.5 font-mono text-right whitespace-nowrap font-medium">
-                          {e.action === 'SELL' ? (
-                            <span className={(e.pnl || 0) >= 0 ? "text-emerald-400" : "text-rose-400"}>
-                              {(e.pnl || 0) >= 0 ? '+' : ''}${(e.pnl || 0).toFixed(2)} ({(e.pnlPercent || 0) >= 0 ? '+' : ''}${(e.pnlPercent || 0).toFixed(2)}%)
-                            </span>
-                          ) : (
-                            <span className="text-zinc-500">-</span>
-                          )}
-                        </td>
-
-                        <td className="px-5 py-3.5 whitespace-nowrap">
-                          <TradeGradeBadge grade={e.tradeGrade} score={e.tradeQualityScore} stars={e.stars} />
-                        </td>
-
-                        <td className="px-5 py-3.5 whitespace-nowrap">
-                          <div className="flex items-center gap-2">
-                            <div className="w-12 bg-zinc-800 rounded-full h-1.5 overflow-hidden">
-                              <div 
-                                className="bg-emerald-400 h-full rounded-full"
-                                style={{ width: `${Math.min(100, Math.max(0, e.mlProbability || 75))}%` }}
-                              />
-                            </div>
-                            <span className="font-mono text-emerald-400 font-semibold text-[11px]">
-                              {e.mlProbability || 75}%
-                            </span>
-                          </div>
-                        </td>
-
-                        <td className="px-5 py-3.5 whitespace-nowrap">
-                          <span className="px-2 py-1 rounded bg-zinc-800 text-zinc-300 font-sans text-[11px]">
-                            {e.modelName || 'Random Forest 2.0'}
-                          </span>
-                        </td>
-
-                        <td className="px-5 py-3.5 text-zinc-300 max-w-xs truncate" title={e.entryReason || ''}>
-                          {e.entryReason || 'Semnal AI Strategy'}
-                        </td>
-
-                        <td className="px-5 py-3.5 text-center whitespace-nowrap">
-                          <button
-                            onClick={() => handleDeleteSingleEntry(e)}
-                            className="p-1.5 text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer"
-                            title="Șterge tranzacția din jurnal"
-                          >
-                            <Trash2 size={14} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Mobile Card List View */}
-          <div className="block md:hidden space-y-3">
-            {filteredEntries.length === 0 ? (
-              <div className="p-8 text-center text-zinc-500 bg-zinc-900/40 rounded-2xl border border-white/5">
-                Nicio tranzacție găsită.
+                <div className="flex items-center gap-2 text-xs text-zinc-300 font-mono">
+                  <TrendingUp className="w-4 h-4 text-emerald-400" />
+                  <span>Tabelul cu tranzacții este colapsat. Apasă pentru deschidere ({sortedFilteredEntries.length} tranzacții salvate).</span>
+                </div>
+                <button className="px-4 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer">
+                  <BookOpen className="w-3.5 h-3.5" />
+                  Afișează Tranzacțiile Ordonate după Profit (PnL)
+                </button>
               </div>
             ) : (
-              filteredEntries.map((e) => (
-                <div key={e.id} className="bg-zinc-900/50 border border-white/5 rounded-2xl p-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className={`px-2.5 py-0.5 rounded text-[10px] font-bold ${
-                        e.action === 'BUY'
-                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                          : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                      }`}>
-                        {e.action || 'BUY'}
-                      </span>
-                      <span className="font-semibold text-white text-sm">{e.symbol || 'USDT'}</span>
-                    </div>
-
-                    <div className="flex items-center gap-3">
-                      <TradeGradeBadge grade={e.tradeGrade} score={e.tradeQualityScore} stars={e.stars} />
-                      <span className="text-[11px] font-mono text-zinc-400">
-                        {formatInTimezone(e.timestamp || new Date().toISOString(), timezone || 'Europe/Bucharest')}
-                      </span>
-                    </div>
+              <div className="p-4 space-y-4">
+                {/* Filters Bar */}
+                <div className="bg-zinc-900/40 border border-white/5 rounded-2xl p-4 flex flex-col md:flex-row gap-4 items-stretch md:items-center justify-between">
+                  {/* Search */}
+                  <div className="relative flex-1">
+                    <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500" />
+                    <input
+                      type="text"
+                      placeholder="Caută după simbol, strategie sau model..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="w-full bg-zinc-950 border border-white/10 rounded-xl pl-10 pr-4 py-2 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-emerald-500/50"
+                    />
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2 text-xs font-mono bg-zinc-950/50 p-2.5 rounded-xl">
-                    <div>
-                      <span className="text-zinc-500 text-[10px] block">PREȚ EXECUȚIE</span>
-                      <span className="text-zinc-200">${(e.price || 0).toLocaleString()}</span>
-                    </div>
-                    <div>
-                      <span className="text-zinc-500 text-[10px] block">CANTITATE</span>
-                      <span className="text-zinc-200">{e.amount || 0}</span>
-                    </div>
-                    <div>
-                      <span className="text-zinc-500 text-[10px] block">COMISION</span>
-                      <span className="text-zinc-400">${(e.fee || 0).toFixed(4)}</span>
-                    </div>
-                    <div>
-                      <span className="text-zinc-500 text-[10px] block">PNL REALIZAT</span>
-                      {e.action === 'SELL' ? (
-                        <span className={(e.pnl || 0) >= 0 ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
-                          {(e.pnl || 0) >= 0 ? '+' : ''}${(e.pnl || 0).toFixed(2)}
-                        </span>
-                      ) : (
-                        <span className="text-zinc-500">-</span>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between text-xs pt-1 border-t border-white/5">
-                    <span className="text-zinc-400">{e.modelName || 'Random Forest 2.0'}</span>
-                    <span className="text-emerald-400 font-mono font-semibold">{e.mlProbability || 75}% Prob</span>
-                  </div>
-
-                  <div className="flex items-center justify-between text-[11px] text-zinc-400 italic bg-zinc-900 p-2 rounded-lg">
-                    <span className="truncate max-w-[200px]">{e.entryReason || 'Semnal AI Strategy'}</span>
-                    <button
-                      onClick={() => handleDeleteSingleEntry(e)}
-                      className="p-1.5 text-zinc-500 hover:text-rose-400 hover:bg-rose-500/15 rounded-lg transition-colors cursor-pointer shrink-0"
-                      title="Șterge tranzacția"
+                  {/* Select Dropdowns */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <select
+                      value={selectedSymbol}
+                      onChange={(e) => setSelectedSymbol(e.target.value)}
+                      className="bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500/50"
                     >
-                      <Trash2 size={14} />
-                    </button>
+                      <option value="ALL">Toate Simbolurile</option>
+                      {uniqueSymbols.filter(s => s !== 'ALL').map(s => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={selectedModel}
+                      onChange={(e) => setSelectedModel(e.target.value)}
+                      className="bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500/50"
+                    >
+                      <option value="ALL">Toate Modelele ML</option>
+                      {uniqueModels.filter(m => m !== 'ALL').map(m => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={selectedAction}
+                      onChange={(e) => setSelectedAction(e.target.value)}
+                      className="bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500/50"
+                    >
+                      <option value="ALL">BUY & SELL</option>
+                      <option value="BUY">🟢 Doar BUY</option>
+                      <option value="SELL">🔴 Doar SELL</option>
+                    </select>
+
+                    <select
+                      value={selectedMode}
+                      onChange={(e) => setSelectedMode(e.target.value)}
+                      className="bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500/50"
+                    >
+                      <option value="ALL">Toate Modurile</option>
+                      <option value="paper">Paper Trading</option>
+                      <option value="testnet">Binance Testnet</option>
+                      <option value="live">Binance Live</option>
+                    </select>
                   </div>
                 </div>
-              ))
+
+                {/* Desktop Table View */}
+                <div className="hidden md:block bg-zinc-900/40 border border-white/5 rounded-2xl overflow-hidden shadow-lg">
+                  <div className="max-h-[500px] overflow-auto border-t border-white/5">
+                    <table className="w-full text-left text-xs">
+                      <thead className="sticky top-0 z-10 bg-zinc-900/95 backdrop-blur-md text-zinc-400 font-mono text-[11px] uppercase border-b border-white/10 shadow-sm">
+                        <tr>
+                          <th className="px-3 py-2 whitespace-nowrap">Dată / Oră</th>
+                          <th className="px-3 py-2 whitespace-nowrap">Simbol</th>
+                          <th className="px-3 py-2 whitespace-nowrap">Tip</th>
+                          <th className="px-3 py-2 text-right whitespace-nowrap">Preț</th>
+                          <th className="px-3 py-2 text-right whitespace-nowrap">Cantitate</th>
+                          <th className="px-3 py-2 text-right whitespace-nowrap text-amber-400/90">Fee BUY</th>
+                          <th className="px-3 py-2 text-right whitespace-nowrap text-amber-400/90">Fee SELL</th>
+                          <th className="px-3 py-2 text-right whitespace-nowrap text-amber-400/90">Fee Total</th>
+                          <th className="px-3 py-2 text-right whitespace-nowrap">PnL Brut</th>
+                          <th className="px-3 py-2 text-right whitespace-nowrap">PnL Net</th>
+                          <th className="px-3 py-2 text-right whitespace-nowrap text-indigo-300">Equity</th>
+                          <th className="px-3 py-2 text-right whitespace-nowrap">Session PnL %</th>
+                          <th className="px-3 py-2 text-right whitespace-nowrap text-indigo-300">Peak Equity</th>
+                          <th className="px-3 py-2 text-right whitespace-nowrap text-rose-400">Drawdown %</th>
+                          <th className="px-3 py-2 whitespace-nowrap">Grad AI</th>
+                          <th className="px-3 py-2 whitespace-nowrap">Prob ML</th>
+                          <th className="px-3 py-2 whitespace-nowrap">Model</th>
+                          <th className="px-3 py-2 max-w-[200px]">Motiv / Strategie</th>
+                          <th className="px-3 py-2 text-center whitespace-nowrap">Acțiuni</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/5 text-zinc-300">
+                        {sortedFilteredEntries.length === 0 ? (
+                          <tr>
+                            <td colSpan={19} className="px-3 py-8 text-center text-zinc-500">
+                              Nicio tranzacție găsită conform filtrelor selectate.
+                            </td>
+                          </tr>
+                        ) : (
+                          sortedFilteredEntries.map((e) => (
+                            <tr key={e.id} className="hover:bg-white/[0.02] transition-colors">
+                              <td className="px-3 py-2 font-mono text-zinc-400 whitespace-nowrap text-[11px]">
+                                {formatInTimezone(e.timestamp || new Date().toISOString(), timezone || 'Europe/Bucharest')}
+                              </td>
+
+                              <td className="px-3 py-2 font-semibold text-white whitespace-nowrap text-xs">
+                                {e.symbol || 'USDT'}
+                              </td>
+
+                              <td className="px-3 py-2 whitespace-nowrap">
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                  e.action === 'BUY'
+                                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                    : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                                }`}>
+                                  {e.action || 'BUY'}
+                                </span>
+                              </td>
+
+                              <td className="px-3 py-2 font-mono text-right whitespace-nowrap text-xs">
+                                ${(e.price || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                              </td>
+
+                              <td className="px-3 py-2 font-mono text-right whitespace-nowrap text-xs">
+                                {e.amount || 0}
+                              </td>
+
+                              {/* Fee BUY */}
+                              <td className="px-3 py-2 font-mono text-right text-amber-400 whitespace-nowrap text-xs font-semibold">
+                                ${(e.computedFeeBUY || 0).toFixed(4)}
+                              </td>
+
+                              {/* Fee SELL */}
+                              <td className="px-3 py-2 font-mono text-right text-amber-400 whitespace-nowrap text-xs font-semibold">
+                                ${(e.computedFeeSELL || 0).toFixed(4)}
+                              </td>
+
+                              {/* Fee Total */}
+                              <td className="px-3 py-2 font-mono text-right text-amber-300 whitespace-nowrap text-xs font-bold">
+                                ${(e.computedFeeTotal || 0).toFixed(4)}
+                              </td>
+
+                              {/* PnL Brut */}
+                              <td className="px-3 py-2 font-mono text-right whitespace-nowrap text-xs">
+                                {e.action === 'SELL' ? (
+                                  <span className={(e.computedPnLBrut || 0) >= 0 ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
+                                    {(e.computedPnLBrut || 0) >= 0 ? '+' : ''}${(e.computedPnLBrut || 0).toFixed(2)}
+                                  </span>
+                                ) : (
+                                  <span className="text-zinc-500">-</span>
+                                )}
+                              </td>
+
+                              {/* PnL Net */}
+                              <td className="px-3 py-2 font-mono text-right whitespace-nowrap text-xs font-bold">
+                                {e.action === 'SELL' ? (
+                                  <span className={(e.computedPnLNet || 0) >= 0 ? "text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20" : "text-rose-400 bg-rose-500/10 px-1.5 py-0.5 rounded border border-rose-500/20"}>
+                                    {(e.computedPnLNet || 0) >= 0 ? '+' : ''}${(e.computedPnLNet || 0).toFixed(2)}
+                                  </span>
+                                ) : (
+                                  <span className="text-amber-400 text-[11px] font-normal">
+                                    -${(e.computedFeeBUY || 0).toFixed(4)}
+                                  </span>
+                                )}
+                              </td>
+
+                              {/* Equity */}
+                              <td className="px-3 py-2 font-mono text-right text-indigo-200 font-bold whitespace-nowrap text-xs">
+                                ${(e.computedEquity || initialEquity).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </td>
+
+                              {/* Session PnL % */}
+                              <td className="px-3 py-2 font-mono text-right whitespace-nowrap text-xs font-bold">
+                                <span className={(e.computedSessionPnLPercent || 0) >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                                  {(e.computedSessionPnLPercent || 0) >= 0 ? '+' : ''}${(e.computedSessionPnLPercent || 0).toFixed(2)}%
+                                </span>
+                              </td>
+
+                              {/* Peak Equity */}
+                              <td className="px-3 py-2 font-mono text-right text-indigo-300 whitespace-nowrap text-xs">
+                                ${(e.computedPeakEquity || initialEquity).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </td>
+
+                              {/* Drawdown % */}
+                              <td className="px-3 py-2 font-mono text-right text-rose-400 font-semibold whitespace-nowrap text-xs">
+                                -{(e.computedDrawdownPercent || 0).toFixed(2)}%
+                              </td>
+
+                              <td className="px-3 py-2 whitespace-nowrap">
+                                <TradeGradeBadge grade={e.tradeGrade} score={e.tradeQualityScore} stars={e.stars} />
+                              </td>
+
+                              <td className="px-3 py-2 whitespace-nowrap">
+                                <div className="flex items-center gap-1.5">
+                                  <div className="w-10 bg-zinc-800 rounded-full h-1.5 overflow-hidden">
+                                    <div 
+                                      className="bg-emerald-400 h-full rounded-full"
+                                      style={{ width: `${Math.min(100, Math.max(0, e.mlProbability || 75))}%` }}
+                                    />
+                                  </div>
+                                  <span className="font-mono text-emerald-400 font-semibold text-[10px]">
+                                    {e.mlProbability || 75}%
+                                  </span>
+                                </div>
+                              </td>
+
+                              <td className="px-3 py-2 whitespace-nowrap">
+                                <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-sans text-[10px] truncate max-w-[100px] inline-block">
+                                  {e.modelName || 'Random Forest 2.0'}
+                                </span>
+                              </td>
+
+                              <td className="px-3 py-2 text-zinc-300 max-w-[200px]">
+                                <div className="text-[11px] text-zinc-200 font-medium truncate" title={e.entryReason || 'Semnal AI Strategy'}>
+                                  {e.entryReason || 'Semnal AI Strategy'}
+                                </div>
+                                <MinuteProfitDisplay minuteLogs={e.minuteProfitLogs} notes={e.notes} />
+                              </td>
+
+                              <td className="px-3 py-2 text-center whitespace-nowrap">
+                                <button
+                                  onClick={() => handleDeleteSingleEntry(e)}
+                                  className="p-1 text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer"
+                                  title="Șterge tranzacția din jurnal"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Mobile Card List View */}
+                <div className="block md:hidden max-h-[580px] overflow-y-auto pr-1 space-y-3">
+                  {sortedFilteredEntries.length === 0 ? (
+                    <div className="p-8 text-center text-zinc-500 bg-zinc-900/40 rounded-2xl border border-white/5">
+                      Nicio tranzacție găsită.
+                    </div>
+                  ) : (
+                    sortedFilteredEntries.map((e) => (
+                      <div key={e.id} className="bg-zinc-900/50 border border-white/5 rounded-2xl p-4 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className={`px-2.5 py-0.5 rounded text-[10px] font-bold ${
+                              e.action === 'BUY'
+                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                            }`}>
+                              {e.action || 'BUY'}
+                            </span>
+                            <span className="font-semibold text-white text-sm">{e.symbol || 'USDT'}</span>
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <TradeGradeBadge grade={e.tradeGrade} score={e.tradeQualityScore} stars={e.stars} />
+                            <span className="text-[11px] font-mono text-zinc-400">
+                              {formatInTimezone(e.timestamp || new Date().toISOString(), timezone || 'Europe/Bucharest')}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 text-xs font-mono bg-zinc-950/50 p-2.5 rounded-xl">
+                          <div>
+                            <span className="text-zinc-500 text-[10px] block">PREȚ EXECUȚIE</span>
+                            <span className="text-zinc-200">${(e.price || 0).toLocaleString()}</span>
+                          </div>
+                          <div>
+                            <span className="text-zinc-500 text-[10px] block">CANTITATE</span>
+                            <span className="text-zinc-200">{e.amount || 0}</span>
+                          </div>
+                          <div>
+                            <span className="text-amber-400 text-[10px] block">FEE BUY / SELL / TOT</span>
+                            <span className="text-amber-300 font-bold">${(e.computedFeeBUY || 0).toFixed(2)} / ${(e.computedFeeSELL || 0).toFixed(2)} / ${(e.computedFeeTotal || 0).toFixed(2)}</span>
+                          </div>
+                          <div>
+                            <span className="text-zinc-500 text-[10px] block">PNL BRUT / NET</span>
+                            {e.action === 'SELL' ? (
+                              <span className={(e.computedPnLNet || 0) >= 0 ? "text-emerald-400 font-bold block" : "text-rose-400 font-bold block"}>
+                                Brut: ${(e.computedPnLBrut || 0).toFixed(2)} | Net: {(e.computedPnLNet || 0) >= 0 ? '+' : ''}${(e.computedPnLNet || 0).toFixed(2)}
+                              </span>
+                            ) : (
+                              <span className="text-amber-400 block text-[11px]">Net: -${(e.computedFeeBUY || 0).toFixed(2)}</span>
+                            )}
+                          </div>
+                          <div>
+                            <span className="text-indigo-300 text-[10px] block">EQUITY / PEAK</span>
+                            <span className="text-indigo-200 font-bold">${(e.computedEquity || initialEquity).toLocaleString('en-US', { maximumFractionDigits: 0 })} / ${(e.computedPeakEquity || initialEquity).toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
+                          </div>
+                          <div>
+                            <span className="text-zinc-500 text-[10px] block">SESSION % / DD %</span>
+                            <span className={(e.computedSessionPnLPercent || 0) >= 0 ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
+                              {(e.computedSessionPnLPercent || 0) >= 0 ? '+' : ''}${(e.computedSessionPnLPercent || 0).toFixed(2)}% / -{(e.computedDrawdownPercent || 0).toFixed(2)}%
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between text-xs pt-1 border-t border-white/5">
+                          <span className="text-zinc-400">{e.modelName || 'Random Forest 2.0'}</span>
+                          <span className="text-emerald-400 font-mono font-semibold">{e.mlProbability || 75}% Prob</span>
+                        </div>
+
+                        <div className="text-[11px] text-zinc-400 bg-zinc-900 p-2.5 rounded-lg space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="truncate max-w-[200px] font-medium text-zinc-200">{e.entryReason || 'Semnal AI Strategy'}</span>
+                            <button
+                              onClick={() => handleDeleteSingleEntry(e)}
+                              className="p-1.5 text-zinc-500 hover:text-rose-400 hover:bg-rose-500/15 rounded-lg transition-colors cursor-pointer shrink-0"
+                              title="Șterge tranzacția"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                          <MinuteProfitDisplay minuteLogs={e.minuteProfitLogs} notes={e.notes} />
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
             )}
           </div>
         </div>
@@ -1197,8 +1762,15 @@ export function TradingJournal() {
                         <stop offset="95%" stopColor="#10b981" stopOpacity={0.0}/>
                       </linearGradient>
                     </defs>
-                    <XAxis dataKey="date" stroke="#52525b" fontSize={11} tickLine={false} />
-                    <YAxis stroke="#52525b" fontSize={11} tickLine={false} domain={['auto', 'auto']} />
+                    <XAxis dataKey="date" stroke="#52525b" fontSize={11} tickLine={false} allowDuplicatedCategory={false} />
+                    <YAxis 
+                      stroke="#52525b" 
+                      fontSize={11} 
+                      tickLine={false} 
+                      domain={getYDomain} 
+                      tickFormatter={(val) => `$${Number(val).toFixed(2)}`}
+                      allowDuplicatedCategory={false}
+                    />
                     <Tooltip 
                       contentStyle={{ backgroundColor: '#09090b', borderColor: 'rgba(255,255,255,0.1)', borderRadius: '12px' }}
                       labelStyle={{ color: '#a1a1aa' }}
@@ -1230,9 +1802,9 @@ export function TradingJournal() {
             </div>
 
             {snapshots.length > 0 ? (
-              <div className="overflow-x-auto">
+              <div className="max-h-[460px] overflow-auto border-t border-white/5">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-zinc-900/80 text-zinc-400 font-mono text-[11px] uppercase border-b border-white/5">
+                  <thead className="sticky top-0 z-10 bg-zinc-900/95 backdrop-blur-md text-zinc-400 font-mono text-[11px] uppercase border-b border-white/10 shadow-sm">
                     <tr>
                       <th className="px-5 py-3">Dată</th>
                       <th className="px-5 py-3 text-right">Equity Închidere</th>
@@ -1345,39 +1917,70 @@ export function TradingJournal() {
                 </div>
 
                 <div>
-                  <label className="block text-zinc-400 mb-1 font-sans font-medium">Comision ($)</label>
+                  <label className="block text-zinc-400 mb-1 font-sans font-medium">Fee BUY ($)</label>
                   <input
                     type="number"
                     step="any"
-                    value={newFee}
-                    onChange={(e) => setNewFee(e.target.value)}
-                    className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-emerald-500/50"
+                    value={newFeeBUY}
+                    onChange={(e) => setNewFeeBUY(e.target.value)}
+                    placeholder="0.00"
+                    className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2 text-amber-400 focus:outline-none focus:border-emerald-500/50"
                   />
                 </div>
               </div>
 
               {newAction === 'SELL' && (
-                <div className="grid grid-cols-2 gap-3 font-mono">
-                  <div>
-                    <label className="block text-zinc-400 mb-1 font-sans font-medium">PnL Realizat ($)</label>
-                    <input
-                      type="number"
-                      step="any"
-                      value={newPnL}
-                      onChange={(e) => setNewPnL(e.target.value)}
-                      className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-emerald-500/50"
-                    />
+                <div className="space-y-3">
+                  <div className="grid grid-cols-3 gap-3 font-mono">
+                    <div>
+                      <label className="block text-zinc-400 mb-1 font-sans font-medium">Fee SELL ($)</label>
+                      <input
+                        type="number"
+                        step="any"
+                        value={newFeeSELL}
+                        onChange={(e) => setNewFeeSELL(e.target.value)}
+                        placeholder="0.00"
+                        className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2 text-amber-400 focus:outline-none focus:border-emerald-500/50"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-zinc-400 mb-1 font-sans font-medium">PnL Brut ($)</label>
+                      <input
+                        type="number"
+                        step="any"
+                        value={newPnLBrut}
+                        onChange={(e) => {
+                          setNewPnLBrut(e.target.value);
+                        }}
+                        placeholder="0.00"
+                        className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-emerald-500/50"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-zinc-400 mb-1 font-sans font-medium">PnL %</label>
+                      <input
+                        type="number"
+                        step="any"
+                        value={newPnLPercent}
+                        onChange={(e) => setNewPnLPercent(e.target.value)}
+                        className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-emerald-500/50"
+                      />
+                    </div>
                   </div>
 
-                  <div>
-                    <label className="block text-zinc-400 mb-1 font-sans font-medium">PnL %</label>
-                    <input
-                      type="number"
-                      step="any"
-                      value={newPnLPercent}
-                      onChange={(e) => setNewPnLPercent(e.target.value)}
-                      className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-emerald-500/50"
-                    />
+                  {/* Calculated Net PnL Preview Banner */}
+                  <div className="bg-zinc-900/80 border border-white/10 p-3 rounded-xl flex items-center justify-between text-xs font-mono">
+                    <span className="text-zinc-400">
+                      Fee Total: <span className="text-amber-400 font-bold">${((parseFloat(newFeeBUY) || 0) + (parseFloat(newFeeSELL) || 0)).toFixed(4)}</span>
+                    </span>
+                    <span className="text-zinc-300">
+                      PnL Net Calculat: <span className={((parseFloat(newPnLBrut) || 0) - ((parseFloat(newFeeBUY) || 0) + (parseFloat(newFeeSELL) || 0))) >= 0 ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
+                        {((parseFloat(newPnLBrut) || 0) - ((parseFloat(newFeeBUY) || 0) + (parseFloat(newFeeSELL) || 0))) >= 0 ? '+' : ''}
+                        ${(((parseFloat(newPnLBrut) || 0) - ((parseFloat(newFeeBUY) || 0) + (parseFloat(newFeeSELL) || 0)))).toFixed(2)}
+                      </span>
+                    </span>
                   </div>
                 </div>
               )}

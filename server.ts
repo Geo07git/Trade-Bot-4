@@ -1,10 +1,13 @@
 import express from 'express';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
+import fs from 'fs';
+import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { botEngine } from './server/bot';
 import { getAccountInfo, getMyTrades, getOpenOrders } from './server/services/BinanceService';
 import { journalService } from './server/services/JournalService';
+
+dotenv.config();
 
 async function startServer() {
   const app = express();
@@ -50,7 +53,7 @@ async function startServer() {
 
   app.post('/api/bot/reset', (req, res) => {
     const { balance } = req.body;
-    botEngine.resetPortfolio(balance || 100);
+    botEngine.resetPortfolio(balance || 10000);
     res.json({ success: true, state: botEngine.state });
   });
 
@@ -84,7 +87,10 @@ async function startServer() {
   });
 
   app.post('/api/bot/send-telegram-guide', async (req, res) => {
-    const { chatId } = req.body || {};
+    const { chatId, botToken } = req.body || {};
+    if (botToken) {
+      botEngine.updateConfig({ telegramBotToken: botToken, telegramChatId: chatId });
+    }
     const result = await botEngine.sendTelegramCommandGuide(chatId, true);
     res.json(result);
   });
@@ -94,13 +100,28 @@ async function startServer() {
     res.json({ ...result, state: botEngine.state, calculatedEquity: botEngine.calculateEquity() });
   });
 
+  app.post('/api/bot/consolidate-accumulation', (req, res) => {
+    const result = botEngine.consolidateAccumulation();
+    res.json({ ...result, state: botEngine.state, calculatedEquity: botEngine.calculateEquity() });
+  });
+
+  app.post('/api/bot/reset-accumulation', (req, res) => {
+    const result = botEngine.resetAccumulationVault();
+    res.json({ ...result, state: botEngine.state, calculatedEquity: botEngine.calculateEquity() });
+  });
+
   app.post('/api/bot/trade', async (req, res) => {
-    const { symbol, action, price, amount } = req.body;
-    if (symbol && action && price && amount) {
-      await botEngine.executeTrade(symbol, action, price, amount);
-      return res.json({ success: true, state: botEngine.state });
+    try {
+      const { symbol, action, price, amount } = req.body;
+      if (symbol && action && price !== undefined && amount !== undefined) {
+        await botEngine.executeTrade(symbol, action, Number(price), Number(amount));
+        return res.json({ success: true, state: botEngine.state, calculatedEquity: botEngine.calculateEquity() });
+      }
+      res.status(400).json({ success: false, error: 'Missing required parameters (symbol, action, price, amount)' });
+    } catch (err: any) {
+      console.error('[API /api/bot/trade Error]', err?.message || err);
+      res.status(500).json({ success: false, error: err?.message || 'Trade execution failed' });
     }
-    res.status(400).json({ error: 'Missing parameters' });
   });
 
   // Dedicated Binance Service Routes (Account Info & Trade History)
@@ -224,312 +245,245 @@ async function startServer() {
     }
   });
 
-  // Helper to strip HTML tags and decode HTML entities
-  function cleanNewsText(str: string): string {
-    if (!str) return '';
-    return str
-      .replace(/&#39;/g, "'")
-      .replace(/&quot;/g, '"')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/<[^>]*>?/gm, '')
-      .trim();
-  }
-
-  // In-memory cache for live news
-  let cachedNewsArticles: any[] = [];
-  let newsCacheTime = 0;
-
-  // Live Multi-Source Crypto & Binance News API Route
-  app.get('/api/news', async (req, res) => {
+  // Smart AI Grid Bot API Routes
+  app.post('/api/grid-bot/config', (req, res) => {
     try {
-      const nowMs = Date.now();
-      // Serve cached news if less than 60 seconds old
-      if (cachedNewsArticles.length > 0 && nowMs - newsCacheTime < 60000) {
-        return res.json({ success: true, articles: cachedNewsArticles, cached: true });
-      }
-
-      const bullishKeywords = ['surge', 'rally', 'bull', 'soar', 'high', 'breakout', 'growth', 'gain', 'launch', 'partnership', 'approval', 'etf', 'buy', 'record', 'all-time', 'positive', 'upgrade', 'profit', 'soaring', 'rebound', 'inflow'];
-      const bearishKeywords = ['crash', 'drop', 'dump', 'bear', 'plunge', 'fall', 'decline', 'ban', 'lawsuit', 'sec', 'hack', 'exploit', 'liquidation', 'loss', 'risk', 'warning', 'sell', 'investigation', 'arrest', 'outflow'];
-      const possibleCoins = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'DOT', 'NEAR', 'ATOM', 'PEPE', 'SHIB', 'SUI', 'APT'];
-
-      const rawArticlesCollected: any[] = [];
-
-      // 1. Fetch from CryptoCompare Public News API (extremely reliable, real-time live news)
-      try {
-        const ccRes = await fetch('https://min-api.cryptocompare.com/data/v2/news/?lang=EN', {
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-        });
-        if (ccRes.ok) {
-          const ccData = await ccRes.json();
-          if (ccData && Array.isArray(ccData.Data)) {
-            ccData.Data.forEach((item: any) => {
-              rawArticlesCollected.push({
-                title: item.title,
-                url: item.url,
-                source: item.source_info?.name || item.source || 'Crypto News',
-                publishedAt: item.published_on ? new Date(item.published_on * 1000).toISOString() : new Date().toISOString(),
-                body: item.body || item.title || '',
-                imageurl: item.imageurl || null
-              });
-            });
-          }
-        }
-      } catch (err) {
-        // Continue to other sources
-      }
-
-      // 2. Fetch from Binance CMS Official Announcements API
-      try {
-        const bnRes = await fetch('https://www.binance.com/bapi/composite/v1/public/cms/article/catalog/list/query?catalogId=48&pageNo=1&pageSize=15', {
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-        });
-        if (bnRes.ok) {
-          const bnData = await bnRes.json();
-          const articles = bnData?.data?.articles || bnData?.data?.catalogs?.[0]?.articles;
-          if (Array.isArray(articles)) {
-            articles.forEach((item: any) => {
-              rawArticlesCollected.push({
-                title: item.title,
-                url: `https://www.binance.com/en/support/announcement/${item.code || item.id}`,
-                source: 'Binance Announcements',
-                publishedAt: item.releaseDate ? new Date(item.releaseDate).toISOString() : new Date().toISOString(),
-                body: item.title || 'Binance official announcement',
-                imageurl: 'https://images.unsplash.com/photo-1621416894569-0f39ed31d247?auto=format&fit=crop&w=600&q=80'
-              });
-            });
-          }
-        }
-      } catch (err) {
-        // Continue
-      }
-
-      // 3. Try fetching via JSON RSS converters
-      const rss2JsonUrls = [
-        { url: 'https://api.rss2json.com/v1/api.json?rss_url=https://cointelegraph.com/rss', source: 'Cointelegraph' },
-        { url: 'https://api.rss2json.com/v1/api.json?rss_url=https://www.coindesk.com/arc/outboundfeeds/rss/', source: 'CoinDesk' },
-        { url: 'https://api.rss2json.com/v1/api.json?rss_url=https://decrypt.co/feed', source: 'Decrypt' }
-      ];
-
-      const jsonPromises = rss2JsonUrls.map(async (src) => {
-        try {
-          const response = await fetch(src.url, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-          });
-          if (!response.ok) return [];
-          const data = await response.json();
-          if (data.status === 'ok' && Array.isArray(data.items)) {
-            return data.items.map((item: any) => ({
-              title: item.title,
-              url: item.link,
-              source: src.source,
-              publishedAt: item.pubDate,
-              body: item.description || '',
-              imageurl: item.thumbnail || item.enclosure?.link || null
-            }));
-          }
-        } catch {
-          return [];
-        }
-        return [];
-      });
-
-      const jsonResults = await Promise.allSettled(jsonPromises);
-      jsonResults.forEach((r) => {
-        if (r.status === 'fulfilled' && Array.isArray(r.value)) {
-          rawArticlesCollected.push(...r.value);
-        }
-      });
-
-      // 4. Fallback to direct XML parsing if articles returned are few
-      if (rawArticlesCollected.length < 5) {
-        const directXmlUrls = [
-          { url: 'https://cointelegraph.com/rss', source: 'Cointelegraph' },
-          { url: 'https://www.coindesk.com/arc/outboundfeeds/rss/', source: 'CoinDesk' },
-          { url: 'https://decrypt.co/feed', source: 'Decrypt' }
-        ];
-        const xmlPromises = directXmlUrls.map(async (src) => {
-          try {
-            const response = await fetch(src.url, {
-              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-            });
-            if (!response.ok) return [];
-            const xml = await response.text();
-            const items: any[] = [];
-            const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
-            let match;
-            while ((match = itemRegex.exec(xml)) !== null) {
-              const itemXml = match[1];
-              const titleMatch = /<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/i.exec(itemXml);
-              const linkMatch = /<link>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/link>/i.exec(itemXml);
-              const pubDateMatch = /<pubDate>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/pubDate>/i.exec(itemXml);
-              const descMatch = /<description>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/description>/i.exec(itemXml);
-              const mediaMatch = /<media:content[^>]+url=[\"']([^\"']+)[\"']/i.exec(itemXml) || 
-                                 /<enclosure[^>]+url=[\"']([^\"']+)[\"']/i.exec(itemXml) ||
-                                 /<media:thumbnail[^>]+url=[\"']([^\"']+)[\"']/i.exec(itemXml);
-
-              if (titleMatch) {
-                items.push({
-                  title: titleMatch[1],
-                  url: linkMatch ? linkMatch[1].trim() : '',
-                  source: src.source,
-                  publishedAt: pubDateMatch ? pubDateMatch[1].trim() : new Date().toISOString(),
-                  body: descMatch ? descMatch[1] : '',
-                  imageurl: mediaMatch ? mediaMatch[1] : null
-                });
-              }
-            }
-            return items;
-          } catch {
-            return [];
-          }
-        });
-
-        const xmlResults = await Promise.allSettled(xmlPromises);
-        xmlResults.forEach((r) => {
-          if (r.status === 'fulfilled' && Array.isArray(r.value)) {
-            rawArticlesCollected.push(...r.value);
-          }
-        });
-      }
-
-      // Deduplicate by title
-      const seenTitles = new Set<string>();
-      const uniqueArticles = rawArticlesCollected.filter((item) => {
-        const cleanT = cleanNewsText(item.title).toLowerCase();
-        if (!cleanT || seenTitles.has(cleanT)) return false;
-        seenTitles.add(cleanT);
-        return true;
-      });
-
-      if (uniqueArticles.length === 0) {
-        throw new Error('No live articles retrieved');
-      }
-
-      const articles = uniqueArticles.slice(0, 30).map((item: any, idx: number) => {
-        const title = cleanNewsText(item.title);
-        const summary = cleanNewsText(item.body);
-        const textToAnalyze = `${title} ${summary}`.toLowerCase();
-
-        let bullScore = 0;
-        let bearScore = 0;
-        bullishKeywords.forEach((kw) => { if (textToAnalyze.includes(kw)) bullScore++; });
-        bearishKeywords.forEach((kw) => { if (textToAnalyze.includes(kw)) bearScore++; });
-
-        let sentiment: 'bullish' | 'bearish' | 'neutral' = 'neutral';
-        if (bullScore > bearScore) sentiment = 'bullish';
-        else if (bearScore > bullScore) sentiment = 'bearish';
-
-        const matchedSymbols: string[] = [];
-        possibleCoins.forEach((coin) => {
-          if (textToAnalyze.includes(coin.toLowerCase()) || textToAnalyze.includes(coin)) {
-            matchedSymbols.push(`${coin}USDT`);
-          }
-        });
-
-        let pubDate = new Date().toISOString();
-        if (item.publishedAt) {
-          const parsed = new Date(item.publishedAt);
-          if (!isNaN(parsed.getTime())) {
-            pubDate = parsed.toISOString();
-          }
-        }
-
-        let shortSummary = summary;
-        if (shortSummary.length > 220) {
-          shortSummary = shortSummary.substring(0, 220) + '...';
-        }
-
-        return {
-          id: `news-${idx}-${Date.now()}`,
-          title: title || 'Crypto Market Update',
-          url: item.url || 'https://cointelegraph.com',
-          source: item.source || 'Crypto News',
-          publishedAt: pubDate,
-          categories: [item.source || 'Crypto', ...(matchedSymbols.length > 0 ? matchedSymbols.map((s) => s.replace('USDT', '')) : ['Market'])],
-          summary: shortSummary || title,
-          sentiment,
-          imageUrl: item.imageurl || null,
-          relatedSymbols: matchedSymbols.length > 0 ? Array.from(new Set(matchedSymbols)) : ['BTCUSDT']
+      const { 
+        gridLevels, rangePercent, highVolMultiplier, capitalPerGridPercent, 
+        autoRegimeSwitch, active, gridMode, dynamicCapital, rangeThresholdProb,
+        enableCapitalRotation, minRotationHoldMinutes, minOppScoreDiff, stagnantProfitMaxPct
+      } = req.body || {};
+      
+      if (!botEngine.state.gridConfig) {
+        botEngine.state.gridConfig = {
+          active: true,
+          autoRegimeSwitch: true,
+          gridMode: 'dynamic_atr',
+          gridLevels: 6,
+          rangePercent: 2.5,
+          highVolMultiplier: 1.8,
+          capitalPerGridPercent: 15,
+          dynamicCapital: true,
+          rangeThresholdProb: 75,
+          enableCapitalRotation: true,
+          minRotationHoldMinutes: 90,
+          minOppScoreDiff: 15,
+          stagnantProfitMaxPct: 0.30
         };
-      });
+      }
 
-      // Sort by publishedAt descending (newest first)
-      articles.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+      if (gridLevels !== undefined) botEngine.state.gridConfig.gridLevels = Number(gridLevels);
+      if (rangePercent !== undefined) botEngine.state.gridConfig.rangePercent = Number(rangePercent);
+      if (highVolMultiplier !== undefined) botEngine.state.gridConfig.highVolMultiplier = Number(highVolMultiplier);
+      if (capitalPerGridPercent !== undefined) botEngine.state.gridConfig.capitalPerGridPercent = Number(capitalPerGridPercent);
+      if (autoRegimeSwitch !== undefined) botEngine.state.gridConfig.autoRegimeSwitch = !!autoRegimeSwitch;
+      if (gridMode !== undefined) botEngine.state.gridConfig.gridMode = gridMode;
+      if (dynamicCapital !== undefined) botEngine.state.gridConfig.dynamicCapital = !!dynamicCapital;
+      if (rangeThresholdProb !== undefined) botEngine.state.gridConfig.rangeThresholdProb = Number(rangeThresholdProb);
+      if (enableCapitalRotation !== undefined) botEngine.state.gridConfig.enableCapitalRotation = !!enableCapitalRotation;
+      if (minRotationHoldMinutes !== undefined) botEngine.state.gridConfig.minRotationHoldMinutes = Number(minRotationHoldMinutes);
+      if (minOppScoreDiff !== undefined) botEngine.state.gridConfig.minOppScoreDiff = Number(minOppScoreDiff);
+      if (stagnantProfitMaxPct !== undefined) botEngine.state.gridConfig.stagnantProfitMaxPct = Number(stagnantProfitMaxPct);
 
-      cachedNewsArticles = articles;
-      newsCacheTime = nowMs;
+      if (active !== undefined) {
+        botEngine.state.gridConfig.active = !!active;
+        botEngine.state.smartGridActive = !!active;
+      }
 
-      res.json({ success: true, articles });
+      botEngine.addLog(`[Smart AI Grid Configuration] Parametrii Grid-ului au fost actualizați (Mode: ${botEngine.state.gridConfig.gridMode}, Levels: ${botEngine.state.gridConfig.gridLevels}, Rotation Engine: ${botEngine.state.gridConfig.enableCapitalRotation ? 'ACTIV' : 'INACTIV'}).`, 'info');
+      botEngine.savePersistedState(true);
+
+      res.json({ success: true, gridConfig: botEngine.state.gridConfig, smartGridActive: botEngine.state.smartGridActive });
     } catch (err: any) {
-      // Gracefully serve dynamic updated structured news
-      const now = new Date();
-      const fallbackArticles = [
-        {
-          id: 'fb-1',
-          title: 'Binance Announces New Launchpool Project & Staking Rewards for BNB Holders',
-          url: 'https://www.binance.com/en/support/announcement',
-          source: 'Binance Announcements',
-          publishedAt: new Date(now.getTime() - 15 * 60000).toISOString(),
-          categories: ['Binance', 'BNB', 'Launchpool'],
-          summary: 'Binance introduces the latest project on its Launchpool platform, allowing users to stake BNB and FDUSD to farm new tokens prior to official trading list.',
-          sentiment: 'bullish',
-          imageUrl: 'https://images.unsplash.com/photo-1621416894569-0f39ed31d247?auto=format&fit=crop&w=600&q=80',
-          relatedSymbols: ['BNBUSDT', 'BTCUSDT']
-        },
-        {
-          id: 'fb-2',
-          title: 'Bitcoin Consolidates Above $65,000 as Institutional ETF Inflows Rebound Strong',
-          url: 'https://www.binance.com/en/news',
-          source: 'Binance News',
-          publishedAt: new Date(now.getTime() - 45 * 60000).toISOString(),
-          categories: ['BTC', 'Bitcoin', 'ETFs'],
-          summary: 'Institutional Bitcoin spot ETFs recorded over $450 million in net daily inflows, reinforcing strong support around key technical moving averages.',
-          sentiment: 'bullish',
-          imageUrl: 'https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=600&q=80',
-          relatedSymbols: ['BTCUSDT']
-        },
-        {
-          id: 'fb-3',
-          title: 'Ethereum Network Gas Fees Drop to 6-Month Lows as L2 Scaling Solutions Surge',
-          url: 'https://www.binance.com/en/news',
-          source: 'CryptoGlobe / Binance',
-          publishedAt: new Date(now.getTime() - 120 * 60000).toISOString(),
-          categories: ['ETH', 'Layer2', 'DeFi'],
-          summary: 'Ethereum layer-2 rollups now process over 80% of daily transactions, driving mainnet gas fees down while total ecosystem value locked hits new highs.',
-          sentiment: 'neutral',
-          imageUrl: 'https://images.unsplash.com/photo-1622979135225-d2ba269bc1bd?auto=format&fit=crop&w=600&q=80',
-          relatedSymbols: ['ETHUSDT', 'OPUSDT', 'ARBUSDT']
-        },
-        {
-          id: 'fb-4',
-          title: 'FED Rate Cuts Expectations Impact Crypto Volatility and Dollar Index',
-          url: 'https://www.binance.com/en/news',
-          source: 'MarketWatch / Binance',
-          publishedAt: new Date(now.getTime() - 210 * 60000).toISOString(),
-          categories: ['Macro', 'Fed', 'Economy'],
-          summary: 'Global macroeconomic indicators suggest potential monetary easing in upcoming central bank meetings, driving capital into risk-on crypto assets.',
-          sentiment: 'bullish',
-          imageUrl: 'https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?auto=format&fit=crop&w=600&q=80',
-          relatedSymbols: ['BTCUSDT', 'SOLUSDT']
-        },
-        {
-          id: 'fb-5',
-          title: 'Solana DeFi Ecosystem TVL Surpasses $5 Billion Driven by Meme Trading Volume',
-          url: 'https://www.binance.com/en/news',
-          source: 'Coindesk / Binance',
-          publishedAt: new Date(now.getTime() - 360 * 60000).toISOString(),
-          categories: ['Solana', 'DeFi', 'SOL'],
-          summary: 'Solana DEX volume briefly flipped Ethereum mainnet volume over 24 hours as liquidity pools see record engagement.',
-          sentiment: 'bullish',
-          imageUrl: 'https://images.unsplash.com/photo-1639762681485-074b7f938ba0?auto=format&fit=crop&w=600&q=80',
-          relatedSymbols: ['SOLUSDT']
-        }
-      ];
-      res.json({ success: true, articles: fallbackArticles });
+      res.status(500).json({ success: false, error: err?.message || 'Eroare la salvarea configurației Grid' });
     }
+  });
+
+  app.post('/api/grid-bot/toggle', (req, res) => {
+    try {
+      const { active } = req.body || {};
+      const newActive = active !== undefined ? !!active : !botEngine.state.smartGridActive;
+      botEngine.state.smartGridActive = newActive;
+      if (botEngine.state.gridConfig) {
+        botEngine.state.gridConfig.active = newActive;
+      }
+      botEngine.addLog(`[Smart AI Grid Bot] Sistemul Smart Grid este acum ${newActive ? 'ACTIVAT 🟢' : 'DEZACTIVAT 🔴'}.`, newActive ? 'success' : 'warning');
+      botEngine.savePersistedState(true);
+
+      res.json({ success: true, smartGridActive: newActive, state: botEngine.state });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Eroare la comutarea stării Smart Grid' });
+    }
+  });
+
+  app.post('/api/grid-bot/reset', (req, res) => {
+    try {
+      botEngine.state.gridHistory = [];
+      if (botEngine.state.smartGridStatus) {
+        botEngine.state.smartGridStatus.forEach(s => {
+          s.executedGridTrades = 0;
+          s.gridProfit = 0;
+          s.lastAction = 'Resetat Manual';
+        });
+      }
+      botEngine.addLog(`[Smart AI Grid Bot] Istoricul și statisticile Grid au fost resetate.`, 'info');
+      botEngine.savePersistedState(true);
+
+      res.json({ success: true, message: 'Grid-ul a fost resetat.', state: botEngine.state });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Eroare la resetarea istoricului Grid' });
+    }
+  });
+
+  // Scalping AI Engine API Routes
+  app.post('/api/scalping-bot/config', (req, res) => {
+    try {
+      const {
+        active,
+        minRfProb,
+        minMetaScore,
+        stopLossPercent,
+        targetTakeProfit,
+        trailingStopActivation,
+        trailingStopDistance,
+        breakEvenActivation,
+        positionSizePercent,
+        maxHoldMinutes,
+        maxNegativeHoldMinutes,
+        enableMaxNegativeHold,
+        minOpportunityScore,
+        cooldownMinutes,
+        enableDynamicSizing,
+        minVolumeGrowth,
+        leverage
+      } = req.body || {};
+
+      if (!botEngine.state.scalpingConfig) {
+        botEngine.state.scalpingConfig = {
+          active: true,
+          minRfProb: 50,
+          minMetaScore: 50,
+          stopLossPercent: 2.0,
+          targetTakeProfit: 1.2,
+          trailingStopActivation: 1.2,
+          trailingStopDistance: 0.5,
+          breakEvenActivation: 1.0,
+          positionSizePercent: 5.0,
+          maxHoldMinutes: 15,
+          minOpportunityScore: 55,
+          cooldownMinutes: 8,
+          enableDynamicSizing: true,
+          minVolumeGrowth: 0.8
+        };
+      }
+
+      if (active !== undefined) botEngine.state.scalpingConfig.active = !!active;
+      if (minRfProb !== undefined) botEngine.state.scalpingConfig.minRfProb = Number(minRfProb);
+      if (minMetaScore !== undefined) botEngine.state.scalpingConfig.minMetaScore = Number(minMetaScore);
+      if (stopLossPercent !== undefined) {
+        botEngine.state.scalpingConfig.stopLossPercent = Number(stopLossPercent);
+        botEngine.state.stopLossPercent = Number(stopLossPercent);
+      }
+      if (targetTakeProfit !== undefined) botEngine.state.scalpingConfig.targetTakeProfit = Number(targetTakeProfit);
+      if (trailingStopActivation !== undefined) botEngine.state.scalpingConfig.trailingStopActivation = Number(trailingStopActivation);
+      if (trailingStopDistance !== undefined) botEngine.state.scalpingConfig.trailingStopDistance = Number(trailingStopDistance);
+      if (breakEvenActivation !== undefined) botEngine.state.scalpingConfig.breakEvenActivation = Number(breakEvenActivation);
+      if (positionSizePercent !== undefined) {
+        botEngine.state.scalpingConfig.positionSizePercent = Number(positionSizePercent);
+        botEngine.state.positionSizePercent = Number(positionSizePercent);
+      }
+      if (maxHoldMinutes !== undefined) {
+        botEngine.state.scalpingConfig.maxHoldMinutes = Number(maxHoldMinutes);
+        botEngine.state.maxHoldMinutes = Number(maxHoldMinutes);
+      }
+      if (maxNegativeHoldMinutes !== undefined) {
+        botEngine.state.scalpingConfig.maxNegativeHoldMinutes = Number(maxNegativeHoldMinutes);
+      }
+      if (enableMaxNegativeHold !== undefined) {
+        botEngine.state.scalpingConfig.enableMaxNegativeHold = !!enableMaxNegativeHold;
+      }
+      if (minOpportunityScore !== undefined) botEngine.state.scalpingConfig.minOpportunityScore = Number(minOpportunityScore);
+      if (cooldownMinutes !== undefined) botEngine.state.scalpingConfig.cooldownMinutes = Number(cooldownMinutes);
+      if (enableDynamicSizing !== undefined) botEngine.state.scalpingConfig.enableDynamicSizing = !!enableDynamicSizing;
+      if (minVolumeGrowth !== undefined) botEngine.state.scalpingConfig.minVolumeGrowth = Number(minVolumeGrowth);
+      if (leverage !== undefined) botEngine.state.scalpingConfig.leverage = Math.max(1, Math.min(50, Number(leverage)));
+
+      botEngine.addLog(
+        `[Motor Scalping Configuration] Parametrii au fost actualizați: RF Min ${botEngine.state.scalpingConfig.minRfProb}%, MetaScore Min ${botEngine.state.scalpingConfig.minMetaScore}, SL ${botEngine.state.scalpingConfig.stopLossPercent}%, TP ${botEngine.state.scalpingConfig.targetTakeProfit}%, Trail Activation ${botEngine.state.scalpingConfig.trailingStopActivation}%, Trail Dist ${botEngine.state.scalpingConfig.trailingStopDistance}%, Hold Max ${botEngine.state.scalpingConfig.maxHoldMinutes}m, Size ${botEngine.state.scalpingConfig.positionSizePercent}%.`,
+        'info'
+      );
+      botEngine.savePersistedState(true);
+
+      res.json({ success: true, scalpingConfig: botEngine.state.scalpingConfig });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Eroare la salvarea configurației Scalping' });
+    }
+  });
+
+  app.post('/api/scalping-bot/toggle', (req, res) => {
+    try {
+      const { active } = req.body || {};
+      if (!botEngine.state.scalpingConfig) {
+        botEngine.state.scalpingConfig = {
+          active: true,
+          minRfProb: 50,
+          minMetaScore: 50,
+          stopLossPercent: 2.0,
+          targetTakeProfit: 1.2,
+          trailingStopActivation: 1.2,
+          trailingStopDistance: 0.5,
+          breakEvenActivation: 1.0,
+          positionSizePercent: 5.0,
+          maxHoldMinutes: 15,
+          minOpportunityScore: 55,
+          cooldownMinutes: 8,
+          enableDynamicSizing: true,
+          minVolumeGrowth: 0.8
+        };
+      }
+
+      const newActive = active !== undefined ? !!active : !botEngine.state.scalpingConfig.active;
+      botEngine.state.scalpingConfig.active = newActive;
+
+      botEngine.addLog(`[Motor Scalping] Modulul de Scalping ML este acum ${newActive ? 'ACTIVAT 🟢' : 'DEZACTIVAT 🔴'}.`, newActive ? 'success' : 'warning');
+      botEngine.savePersistedState(true);
+
+      res.json({ success: true, scalpingActive: newActive, scalpingConfig: botEngine.state.scalpingConfig, state: botEngine.state });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Eroare la comutarea stării Scalping' });
+    }
+  });
+
+  app.post('/api/scalping-bot/reset', (req, res) => {
+    try {
+      botEngine.addLog(`[Motor Scalping] Parametrii și istoricul scalping au fost resetate la valorile implicite.`, 'info');
+      botEngine.state.scalpingConfig = {
+        active: true,
+        minRfProb: 50,
+        minMetaScore: 50,
+        stopLossPercent: 2.0,
+        targetTakeProfit: 1.2,
+        trailingStopActivation: 1.2,
+        trailingStopDistance: 0.5,
+        breakEvenActivation: 1.0,
+        positionSizePercent: 5.0,
+        maxHoldMinutes: 15,
+        minOpportunityScore: 55,
+        cooldownMinutes: 8,
+        enableDynamicSizing: true,
+        minVolumeGrowth: 0.8
+      };
+      botEngine.savePersistedState(true);
+
+      res.json({ success: true, message: 'Motorul de scalping a fost resetat.', scalpingConfig: botEngine.state.scalpingConfig, state: botEngine.state });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Eroare la resetarea motorului de scalping' });
+    }
+  });
+
+  // Live Multi-Source Crypto & Binance News API Route (Disabled to save API & CPU resources)
+  app.get('/api/news', (req, res) => {
+    res.json({ success: true, articles: [] });
   });
 
   // API Route for AI Analysis
@@ -613,7 +567,21 @@ User prompt:
 ${prompt}`,
       });
 
-      res.json({ result: response.text });
+      const inputTokens = response.usageMetadata?.promptTokenCount || 0;
+      const outputTokens = response.usageMetadata?.candidatesTokenCount || 0;
+
+      console.log(`Live Usage -> Input: ${inputTokens} | Output: ${outputTokens}`);
+
+      botEngine.recordAiUsage(inputTokens, outputTokens);
+
+      res.json({
+        result: response.text,
+        usage: {
+          inputTokens,
+          outputTokens,
+          totalTokens: inputTokens + outputTokens
+        }
+      });
     } catch (err: any) {
       console.error(err);
       res.status(500).json({ error: err.message });
@@ -622,13 +590,21 @@ ${prompt}`,
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const candidatePaths = [
+      __dirname,
+      path.join(__dirname, 'dist'),
+      path.join(process.cwd(), 'dist')
+    ];
+    const distPath = candidatePaths.find(p => fs.existsSync(path.join(p, 'index.html'))) || path.join(process.cwd(), 'dist');
+    console.log(`[Server] Serving static frontend files from: ${distPath}`);
+
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

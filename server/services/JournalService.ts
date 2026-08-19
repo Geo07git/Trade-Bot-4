@@ -1,6 +1,14 @@
 import fs from 'fs';
 import path from 'path';
 
+export interface MinuteProfitLog {
+  minute: number;
+  pnlPercent: number;
+  pnl: number;
+  price: number;
+  timestamp: string;
+}
+
 export interface JournalEntry {
   id: string;
   symbol: string;
@@ -21,6 +29,7 @@ export interface JournalEntry {
   tradeQualityScore?: number;
   stars?: number;
   oppScore?: number;
+  minuteProfitLogs?: MinuteProfitLog[];
 }
 
 export interface DailySnapshot {
@@ -62,8 +71,9 @@ class JournalService {
       if (fs.existsSync(this.journalFilePath)) {
         const raw = fs.readFileSync(this.journalFilePath, 'utf-8');
         const parsed = JSON.parse(raw);
-        // Clean out any legacy demo seed entries
-        this.entries = Array.isArray(parsed) ? parsed.filter((e: JournalEntry) => !e.id?.startsWith('seed_')) : [];
+        // Clean out any legacy demo seed entries and deduplicate
+        const rawEntries = Array.isArray(parsed) ? parsed.filter((e: JournalEntry) => !e.id?.startsWith('seed_')) : [];
+        this.entries = this.deduplicateEntries(rawEntries);
         this.saveEntries();
       } else {
         this.entries = [];
@@ -85,6 +95,31 @@ class JournalService {
       this.saveEntries();
       this.saveSnapshots();
     }
+  }
+
+  public deduplicateEntries(list: JournalEntry[]): JournalEntry[] {
+    const result: JournalEntry[] = [];
+    for (const item of list) {
+      if (!item || !item.symbol) continue;
+      const isDup = result.some(existing => {
+        if (item.id && existing.id && item.id === existing.id) return true;
+        const timeDiff = Math.abs(new Date(item.timestamp).getTime() - new Date(existing.timestamp).getTime());
+        const sameSymbol = item.symbol.toUpperCase() === existing.symbol.toUpperCase();
+        const sameAction = item.action === existing.action;
+        const samePrice = Math.abs((item.price || 0) - (existing.price || 0)) < 0.00001;
+        const sameAmount = Math.abs((item.amount || 0) - (existing.amount || 0)) < 0.0001;
+
+        if (sameSymbol && sameAction && samePrice && sameAmount && (timeDiff < 15000 || isNaN(timeDiff))) {
+          return true;
+        }
+        return false;
+      });
+
+      if (!isDup) {
+        result.push(item);
+      }
+    }
+    return result;
   }
 
   public clearSnapshots() {
@@ -156,16 +191,40 @@ class JournalService {
       tradeGrade: data.tradeGrade || (pnlPercentNum > 0 ? 'A' : pnlPercentNum < -2 ? 'C' : 'B'),
       tradeQualityScore: data.tradeQualityScore || 80,
       stars: data.stars || 4,
-      oppScore: data.oppScore || 75
+      oppScore: data.oppScore || 75,
+      minuteProfitLogs: data.minuteProfitLogs || []
     };
 
+    const existingIndex = this.entries.findIndex(existing => {
+      if (data.id && existing.id === data.id) return true;
+      const timeDiff = Math.abs(new Date(existing.timestamp).getTime() - new Date(timestamp).getTime());
+      const sameSymbol = existing.symbol.toUpperCase() === symbolStr.toUpperCase();
+      const sameAction = existing.action === (data.action === 'SELL' ? 'SELL' : 'BUY');
+      const samePrice = Math.abs((existing.price || 0) - priceNum) < 0.00001;
+      const sameAmount = Math.abs((existing.amount || 0) - amountNum) < 0.0001;
+
+      return sameSymbol && sameAction && samePrice && sameAmount && (timeDiff < 15000 || isNaN(timeDiff));
+    });
+
+    if (existingIndex !== -1) {
+      this.entries[existingIndex] = {
+        ...this.entries[existingIndex],
+        ...entry,
+        id: this.entries[existingIndex].id
+      };
+      this.entries = this.deduplicateEntries(this.entries);
+      this.saveEntries();
+      return this.entries[existingIndex];
+    }
+
     this.entries.unshift(entry); // newest first
+    this.entries = this.deduplicateEntries(this.entries);
     this.saveEntries();
     return entry;
   }
 
   public getEntries(filters?: { symbol?: string; modelName?: string; date?: string; action?: 'BUY' | 'SELL'; mode?: string }): JournalEntry[] {
-    let result = [...this.entries];
+    let result = this.deduplicateEntries(this.entries);
 
     if (filters) {
       if (filters.symbol && filters.symbol !== 'ALL') {

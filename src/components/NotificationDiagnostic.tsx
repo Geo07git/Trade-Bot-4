@@ -129,7 +129,7 @@ export function NotificationDiagnostic() {
     if (Notification.permission === 'granted') {
       try {
         addLog('info', 'Incercare generare notificare de test...');
-        const notif = new Notification('AI.TRADE Diagnostic', {
+        const notif = new Notification('G&S-Trade-Bot Diagnostic', {
           body: 'Notificările Web Push pe desktop funcționează corect!',
           icon: 'https://cdn-icons-png.flaticon.com/512/2950/2950073.png',
         });
@@ -169,7 +169,7 @@ export function NotificationDiagnostic() {
     }
 
     try {
-      const n = new Notification('🚨 Semnal AI.TRADE Test', {
+      const n = new Notification('🚨 Semnal G&S-Trade-Bot Test', {
         body: 'Cumpărare automată BTCUSDT la prețul $98,450.00 (Probabilitate AI: 88%)',
         icon: 'https://cdn-icons-png.flaticon.com/512/2950/2950073.png',
       });

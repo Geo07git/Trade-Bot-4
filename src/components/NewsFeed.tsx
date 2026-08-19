@@ -3,6 +3,7 @@ import { NewsArticle } from '../types';
 import { Newspaper, RefreshCw, ExternalLink, TrendingUp, TrendingDown, Minus, Search, Sparkles, Filter, ShieldCheck, Zap } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { safeJsonFetch } from '../utils/apiHelper';
 
 function cn(...inputs: (string | undefined | null | false)[]) {
   return twMerge(clsx(inputs));
@@ -19,12 +20,9 @@ export function NewsFeed() {
   const fetchNews = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/news');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.articles) {
-          setArticles(data.articles);
-        }
+      const data = await safeJsonFetch<{ articles?: NewsArticle[] }>('/api/news', undefined, { articles: [] });
+      if (data && Array.isArray(data.articles)) {
+        setArticles(data.articles);
       }
     } catch (err) {
       console.error('Error fetching news feed:', err);
@@ -120,7 +118,7 @@ export function NewsFeed() {
         </button>
       </header>
 
-      <div className="p-4 sm:p-8 overflow-y-auto flex-1 space-y-6">
+      <div className="p-3 sm:p-6 overflow-y-auto flex-1 space-y-4 pb-28">
         {/* Market Sentiment Overview Card */}
         <div className="bg-gradient-to-r from-zinc-900/80 via-zinc-900/40 to-zinc-900/80 border border-white/10 rounded-2xl p-5 shadow-2xl relative overflow-hidden">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">

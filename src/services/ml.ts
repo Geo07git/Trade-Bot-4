@@ -1,50 +1,48 @@
-// Technical Indicators & Machine Learning Engine for AI.TRADE Bot
+// Technical Indicators & Machine Learning Engine for G&S-Trade-Bot
 // Performs real mathematical calculations and trains actual ML models on historical market klines.
+
+import { getTCNModelInstance } from './tcn';
 
 interface CooldownEntry {
   cooldownUntil: number;
   reason: string;
   durationMinutes: number;
+  lastExitPrice?: number;
+  lastExitTime?: number;
+  lastExitPnL?: number;
 }
 
 const symbolCooldownMap = new Map<string, CooldownEntry>();
 
 /**
- * Registers a post-exit cooldown for a symbol after Stop Loss or Take Profit.
- * Prevents over-trading and quick re-entries that give back profits.
+ * Registers Watch Mode for a symbol after exit (Stop Loss or Take Profit).
+ * Instead of hard time-blocking, it puts the symbol in Watch Mode where re-entry requires a NEW MOMENTUM EVENT.
  */
-export function registerSymbolCooldown(symbol: string, pnlPercent: number, customReason?: string): number {
+export function registerSymbolCooldown(
+  symbol: string, 
+  pnlPercent: number, 
+  customReason?: string,
+  lastExitPrice?: number
+): number {
   const cleanSym = symbol.toUpperCase().replace('USDT', '') + 'USDT';
-  // Standard post-trade cooldown (minimum 30 minutes) to prevent immediate whipsaw re-entries
-  let durationMinutes = 3;
-
-  if (pnlPercent < 0) {
-    // Stop Loss / Cut Loss: 30 minutes cooldown to allow market structure to reset
-    durationMinutes = 3;
-  } else if (pnlPercent < 3) {
-    // Take Profit 0-3%: 25 minutes cooldown
-    durationMinutes = 2.5;
-  } else if (pnlPercent < 6) {
-    // Take Profit 3-6%: 35 minutes cooldown
-    durationMinutes = 3.5;
-  } else {
-    // Large Take Profit (>6%): 45 minutes cooldown
-    durationMinutes = 4.5;
-  }
-
+  // Watch mode window (8 minutes)
+  const durationMinutes = 8;
   const cooldownUntil = Date.now() + (durationMinutes * 60 * 1000);
-  const reasonStr = customReason || (pnlPercent < 0 ? `Stop Loss (${pnlPercent.toFixed(2)}%)` : `Take Profit (+${pnlPercent.toFixed(2)}%)`);
+  const reasonStr = customReason || (pnlPercent < 0 ? `Stop Loss (${pnlPercent.toFixed(2)}%)` : `Ieșire (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%)`);
 
   symbolCooldownMap.set(cleanSym, {
     cooldownUntil,
     reason: reasonStr,
-    durationMinutes
+    durationMinutes,
+    lastExitPrice,
+    lastExitTime: Date.now(),
+    lastExitPnL: pnlPercent
   });
 
   return durationMinutes;
 }
 
-export function getSymbolCooldown(symbol: string): { active: boolean; remainingMinutes: number; reason: string; durationMinutes: number } | null {
+export function getSymbolWatchMode(symbol: string): (CooldownEntry & { active: boolean; remainingMinutes: number }) | null {
   const cleanSym = symbol.toUpperCase().replace('USDT', '') + 'USDT';
   const entry = symbolCooldownMap.get(cleanSym);
   if (!entry) return null;
@@ -57,11 +55,14 @@ export function getSymbolCooldown(symbol: string): { active: boolean; remainingM
 
   const remainingMinutes = Math.ceil((entry.cooldownUntil - now) / 60000);
   return {
+    ...entry,
     active: true,
     remainingMinutes,
-    reason: entry.reason,
-    durationMinutes: entry.durationMinutes
   };
+}
+
+export function getSymbolCooldown(symbol: string) {
+  return getSymbolWatchMode(symbol);
 }
 
 export interface ExitScoreFactors {
@@ -178,15 +179,15 @@ export function calculateTradeQualityScore(params: {
     grade = 'A+';
     stars = 5;
     ratingLabel = 'A+ Excepțional';
-  } else if (score >= 80) {
+  } else if (score >= 82) {
     grade = 'A';
     stars = 5;
     ratingLabel = 'A Excelent';
-  } else if (score >= 70) {
+  } else if (score >= 76) {
     grade = 'B';
     stars = 4;
     ratingLabel = 'B Bun';
-  } else if (score >= 60) {
+  } else if (score >= 68) {
     grade = 'C';
     stars = 3;
     ratingLabel = 'C Acceptabil';
@@ -448,9 +449,12 @@ export interface NewsSentimentData {
 }
 
 export interface MarketRegimeInfo {
-  currentRegime: 'Trend' | 'Sideways' | 'High Volatility';
+  currentRegime: 'Trend' | 'Sideways' | 'High Volatility' | 'Stagnant (NO-TRADE)';
   adx: number;
   atrPercent: number;
+  range20pPct?: number;
+  isStagnant?: boolean;
+  stagnationReason?: string;
   regimeDescription: string;
 }
 
@@ -472,11 +476,249 @@ export interface ReversalSignal {
   adx: number;
 }
 
+export interface CandlestickPatternResult {
+  score: number; // 0 - 100
+  patternName: string;
+  patternType: 'BULLISH' | 'NEUTRAL' | 'BEARISH';
+}
+
+export function calculateCandlestickPatternScore(klines: Kline[]): CandlestickPatternResult {
+  if (!klines || klines.length < 4) {
+    return { score: 50, patternName: 'Consolidare / Date Insuficiente', patternType: 'NEUTRAL' };
+  }
+
+  // Validate pattern on the last fully CLOSED 1m candle (klines[length - 2]) to prevent noise on forming candles
+  const lastClosedIdx = klines.length - 2;
+  const c0 = klines[lastClosedIdx];     // Last fully closed 1m candle
+  const c1 = klines[lastClosedIdx - 1]; // 1 closed candle back
+  const c2 = klines[lastClosedIdx - 2]; // 2 closed candles back
+
+  const body0 = Math.abs(c0.close - c0.open);
+  const range0 = (c0.high - c0.low) || 0.000001;
+  const upperWick0 = c0.high - Math.max(c0.open, c0.close);
+  const lowerWick0 = Math.min(c0.open, c0.close) - c0.low;
+  const isGreen0 = c0.close >= c0.open;
+
+  const body1 = Math.abs(c1.close - c1.open);
+  const range1 = (c1.high - c1.low) || 0.000001;
+  const isGreen1 = c1.close >= c1.open;
+
+  // 1. Bullish Engulfing (Current green engulfs previous red)
+  if (!isGreen1 && isGreen0 && c0.open <= c1.close && c0.close > c1.open && body0 >= body1 * 0.92) {
+    return { score: 96, patternName: 'Bullish Engulfing 🟢', patternType: 'BULLISH' };
+  }
+
+  // 2. Hammer / Bullish Pinbar Rejection (Long lower wick, small upper wick)
+  if (lowerWick0 >= 2.0 * body0 && upperWick0 <= 0.4 * body0 && lowerWick0 >= range0 * 0.5) {
+    const score = isGreen0 ? 94 : 86;
+    return { score, patternName: 'Hammer / Pinbar Rebound 🔨', patternType: 'BULLISH' };
+  }
+
+  // 3. Three White Soldiers (3 consecutive strong green bars with higher closes)
+  const isGreen2 = c2.close >= c2.open;
+  if (isGreen2 && isGreen1 && isGreen0 && c1.close > c2.close && c0.close > c1.close) {
+    return { score: 95, patternName: '3 White Soldiers Momentum 🚀', patternType: 'BULLISH' };
+  }
+
+  // 4. Bullish Harami / Inside Bar Breakout
+  if (!isGreen1 && isGreen0 && c0.high <= c1.high && c0.low >= c1.low && c0.close > c1.close) {
+    return { score: 88, patternName: 'Inside Bar Breakout ⚡', patternType: 'BULLISH' };
+  }
+
+  // 5. Strong Marubozu / Expansion Green Bar
+  if (isGreen0 && (body0 / range0) >= 0.75 && body0 > (range1 * 1.3)) {
+    return { score: 90, patternName: 'Bullish Marubozu 💥', patternType: 'BULLISH' };
+  }
+
+  // 6. Piercing Line Rebound
+  if (!isGreen1 && isGreen0 && c0.close >= (c1.open + c1.close) / 2) {
+    return { score: 84, patternName: 'Piercing Line Rebound 📈', patternType: 'BULLISH' };
+  }
+
+  // 7. Doji / Consolidation
+  if ((body0 / range0) < 0.18) {
+    return { score: 48, patternName: 'Doji / Consolidare ⚖️', patternType: 'NEUTRAL' };
+  }
+
+  // 8. Bearish Engulfing / Shooting Star
+  if (isGreen1 && !isGreen0 && c0.open >= c1.close && c0.close < c1.open && body0 > body1) {
+    return { score: 18, patternName: 'Bearish Engulfing 🔴', patternType: 'BEARISH' };
+  }
+  if (upperWick0 >= 2.0 * body0 && lowerWick0 <= 0.4 * body0) {
+    return { score: 22, patternName: 'Shooting Star Rejection 🌠', patternType: 'BEARISH' };
+  }
+
+  // Default continuous score
+  let defaultScore = 50;
+  if (isGreen0) {
+    defaultScore = 58 + Math.min(30, Math.round((body0 / range0) * 30));
+  } else {
+    defaultScore = Math.max(15, 48 - Math.round((body0 / range0) * 25));
+  }
+
+  return {
+    score: defaultScore,
+    patternName: isGreen0 ? 'Impuls Taurin 📈' : 'Corecție Urs 📉',
+    patternType: isGreen0 ? 'BULLISH' : 'BEARISH'
+  };
+}
+
+export function calculateMomentumAccelScore(klines: Kline[], priceChange24h: number): number {
+  if (!klines || klines.length < 5) {
+    return Math.min(100, Math.max(0, Math.round(50 + priceChange24h * 2.5)));
+  }
+  const lastClose = klines[klines.length - 1].close;
+  const close3Ago = klines[Math.max(0, klines.length - 4)].close;
+  const close10Ago = klines[Math.max(0, klines.length - 11)].close;
+
+  const mom3 = close3Ago > 0 ? ((lastClose - close3Ago) / close3Ago) * 100 : 0;
+  const mom10 = close10Ago > 0 ? ((lastClose - close10Ago) / close10Ago) * 100 : 0;
+
+  const accel = mom3 - (mom10 / 3.3);
+  let score = 50 + (mom3 * 7.5) + (accel * 12.0);
+
+  // Dampen overextended late pumps (>20% in 24h) to favor fresh momentum starters
+  if (priceChange24h > 20.0) {
+    score *= 0.82;
+  } else if (priceChange24h > 12.0) {
+    score *= 0.92;
+  }
+
+  return Math.min(100, Math.max(0, Math.round(score)));
+}
+
+export function calculateBreakoutAtrExpansionScore(klines: Kline[], high24h: number, currentPrice: number): number {
+  if (!klines || klines.length < 15) return 50;
+
+  // 1. ATR Expansion ratio: Current 1m candle range vs 14-period average candle range
+  const lastIdx = klines.length - 1;
+  const currentCandleRange = Math.max(0.000001, klines[lastIdx].high - klines[lastIdx].low);
+
+  let sumRange = 0;
+  const count = Math.min(14, klines.length - 1);
+  for (let i = klines.length - 1 - count; i < klines.length - 1; i++) {
+    sumRange += (klines[i].high - klines[i].low);
+  }
+  const avgRange = (sumRange / count) || 0.000001;
+  const atrExpansionRatio = currentCandleRange / avgRange;
+
+  let expansionScore = 50;
+  if (atrExpansionRatio >= 2.5) expansionScore = 98;
+  else if (atrExpansionRatio >= 1.8) expansionScore = 88;
+  else if (atrExpansionRatio >= 1.3) expansionScore = 75;
+  else if (atrExpansionRatio >= 1.0) expansionScore = 60;
+  else expansionScore = 40;
+
+  // 2. Breakout closeness: Distance to recent 20-candle high
+  const recent20High = Math.max(...klines.slice(-20).map(k => k.high));
+  const distToHighPct = recent20High > 0 ? ((currentPrice - recent20High) / recent20High) * 100 : 0;
+
+  let breakoutScore = 50;
+  if (distToHighPct >= -0.2) breakoutScore = 98;
+  else if (distToHighPct >= -1.0) breakoutScore = 85;
+  else if (distToHighPct >= -2.0) breakoutScore = 70;
+  else if (distToHighPct >= -4.0) breakoutScore = 50;
+  else breakoutScore = 30;
+
+  return Math.min(100, Math.max(0, Math.round(expansionScore * 0.5 + breakoutScore * 0.5)));
+}
+
+export function calculateTrendConfirmationScore(klines: Kline[], priceChange24h: number): number {
+  if (!klines || klines.length < 20) {
+    return priceChange24h >= 1.0 ? 70 : 40;
+  }
+
+  const closes = klines.map(k => k.close);
+  const lastClose = closes[closes.length - 1];
+
+  const ema9 = calculateEMASeries(closes, 9);
+  const ema21 = calculateEMASeries(closes, 21);
+  const lastEma9 = ema9[ema9.length - 1];
+  const lastEma21 = ema21[ema21.length - 1];
+
+  let alignmentScore = 50;
+  if (lastClose > lastEma9 && lastEma9 > lastEma21) {
+    alignmentScore = 95;
+  } else if (lastClose > lastEma9) {
+    alignmentScore = 75;
+  } else if (lastClose < lastEma21) {
+    alignmentScore = 25;
+  }
+
+  const c0 = closes[closes.length - 1];
+  const c1 = closes[closes.length - 2];
+  const c2 = closes[closes.length - 3];
+  const structureBullish = (c0 >= c1 && c1 >= c2) ? 20 : (c0 >= c1 ? 10 : 0);
+
+  let sweetSpotBonus = 0;
+  if (priceChange24h >= 1.5 && priceChange24h <= 10.0) {
+    sweetSpotBonus = 20;
+  } else if (priceChange24h > 10.0 && priceChange24h <= 18.0) {
+    sweetSpotBonus = 10;
+  } else if (priceChange24h >= 0) {
+    sweetSpotBonus = 5;
+  }
+
+  return Math.min(100, Math.max(0, Math.round(alignmentScore * 0.6 + structureBullish + sweetSpotBonus)));
+}
+
+export function calculateRvolScore(klines: Kline[], volume24h: number): number {
+  if (!klines || klines.length < 10) {
+    return volume24h > 5000000 ? 80 : 50;
+  }
+  const curVol = klines[klines.length - 1].volume;
+  const pastVols = klines.slice(-20, -1).map(k => k.volume);
+  const avgVol = pastVols.length > 0 ? pastVols.reduce((a, b) => a + b, 0) / pastVols.length : curVol;
+
+  const rvol = avgVol > 0 ? curVol / avgVol : 1.0;
+
+  if (rvol >= 2.5) return 98;
+  if (rvol >= 1.8) return 88;
+  if (rvol >= 1.3) return 76;
+  if (rvol >= 1.0) return 62;
+  if (rvol >= 0.7) return 45;
+  return 25;
+}
+
+export function calculateStructureScore(klines: Kline[], high24h: number, currentPrice: number): number {
+  if (!klines || klines.length < 20) return 60;
+
+  const recentKlines = klines.slice(-20);
+  const highest20 = Math.max(...recentKlines.map(k => k.high));
+  const distToHigh = highest20 > 0 ? ((currentPrice - highest20) / highest20) * 100 : 0;
+
+  if (distToHigh >= -0.3) return 96;
+  if (distToHigh >= -1.2) return 85;
+  if (distToHigh >= -2.5) return 70;
+  if (distToHigh >= -4.5) return 50;
+  return 30;
+}
+
+export function calculateLiquiditySpreadScore(volume24h: number, spreadPercent: number): number {
+  let score = 50;
+  if (volume24h >= 20000000) score += 35;
+  else if (volume24h >= 10000000) score += 28;
+  else if (volume24h >= 3000000) score += 20;
+  else if (volume24h >= 1000000) score += 10;
+
+  if (spreadPercent <= 0.03) score += 15;
+  else if (spreadPercent <= 0.05) score += 8;
+
+  return Math.min(100, Math.max(0, score));
+}
+
 export interface StrategyResult {
   symbol: string;
   signal: 'BUY' | 'SELL' | 'HOLD';
   probability: number;
   rfProb?: number;
+  tcnProb?: number;
+  tcnDetails?: {
+    inferenceTimeMs: number;
+    isColdStart: boolean;
+    statusMessage: string;
+    sequenceLength: number;
+  };
   metaProb?: number;
   vetoReason?: string;
   targetScore?: number;
@@ -514,7 +756,7 @@ export async function fetchHistoricalKlines(symbol: string, limit = 1000): Promi
   const cached = klineCache.get(cleanSymbol);
 
   // Return cached klines if fetched within the last 180 seconds (3 minutes)
-  if (cached && (Date.now() - cached.timestamp < 180000) && cached.klines.length >= 100) {
+  if (cached && (Date.now() - cached.timestamp < 180000) && cached.klines.length >= Math.min(limit, 30)) {
     return cached.klines.slice(-limit);
   }
 
@@ -1425,34 +1667,72 @@ export class PlattCalibrator {
 }
 
 // ==========================================
-// 4. REGIME DETECTION (TREND / SIDEWAYS / HIGH VOLATILITY)
+// 4. REGIME DETECTION (TREND / SIDEWAYS / HIGH VOLATILITY / STAGNANT NO-TRADE)
 // ==========================================
 export function detectMarketRegime(
   adx: number,
   atrPercent: number,
   bbWidthPct: number,
   ema20: number,
-  ema50: number
-): { currentRegime: 'Trend' | 'Sideways' | 'High Volatility'; regimeDescription: string; regimeCode: number } {
+  ema50: number,
+  range20pPct?: number,
+  volRatio?: number,
+  minAtrThreshold: number = 0.30,
+  minRangeThreshold: number = 0.55
+): { 
+  currentRegime: 'Trend' | 'Sideways' | 'High Volatility' | 'Stagnant (NO-TRADE)'; 
+  regimeDescription: string; 
+  regimeCode: number;
+  isStagnant: boolean;
+  stagnationReason?: string;
+} {
+  // 1. High Volatility Check
   if (atrPercent >= 3.2 || bbWidthPct >= 6.5) {
     return {
       currentRegime: 'High Volatility',
       regimeDescription: 'Piață cu Volatilitate Ridicată / Șocuri de Preț (Risc crescut)',
-      regimeCode: 2
+      regimeCode: 2,
+      isStagnant: false
     };
   }
+
+  // 2. Stagnation / Low Volatility Regime (NO-TRADE Filter)
+  // Prevents fee erosion when volatility/range is smaller than roundtrip fees (~0.15%-0.20%) + min profit
+  const isAtrLow = atrPercent < minAtrThreshold;
+  const isRangeLow = range20pPct !== undefined && range20pPct > 0 && range20pPct < minRangeThreshold;
+  const isSqueezeLow = bbWidthPct < 0.60 && adx < 18.0;
+  const hasNoVolumeSpike = (volRatio === undefined || volRatio < 1.8);
+
+  if ((isAtrLow || isRangeLow || isSqueezeLow) && hasNoVolumeSpike) {
+    const atrMsg = `ATR=${atrPercent.toFixed(2)}% (<${minAtrThreshold.toFixed(2)}%)`;
+    const rangeMsg = range20pPct !== undefined ? `, Range20p=${range20pPct.toFixed(2)}% (<${minRangeThreshold.toFixed(2)}%)` : '';
+    const adxMsg = `ADX=${adx.toFixed(1)}`;
+    return {
+      currentRegime: 'Stagnant (NO-TRADE)',
+      regimeDescription: `🧊 Regim Stagnare / Volatilitate Scăzută (${atrMsg}${rangeMsg}, ${adxMsg}). Conservare capital - comisioanele depășesc profitul potențial.`,
+      regimeCode: -1,
+      isStagnant: true,
+      stagnationReason: `Mediul de tranzacționare are volatilitate redusă (${atrMsg}${rangeMsg}). Profitul potențial nu acoperă costurile comisioanelor.`
+    };
+  }
+
+  // 3. Sideways Regime
   if (adx < 20.0) {
     return {
       currentRegime: 'Sideways',
       regimeDescription: 'Piață Laterală / Consolidare fără Trend Clar (ADX < 20)',
-      regimeCode: 0
+      regimeCode: 0,
+      isStagnant: false
     };
   }
+
+  // 4. Trend Regime
   const trendDir = ema20 >= ema50 ? 'Ascendent (Bullish)' : 'Descendent (Bearish)';
   return {
     currentRegime: 'Trend',
     regimeDescription: `Piață în Trend ${trendDir} Puternic (ADX = ${adx.toFixed(1)})`,
-    regimeCode: 1
+    regimeCode: 1,
+    isStagnant: false
   };
 }
 
@@ -1616,52 +1896,12 @@ function extractFeatures(
 }
 
 export async function fetchNewsSentimentForSymbol(symbol: string): Promise<NewsSentimentData> {
-  if (typeof window !== 'undefined') {
-    try {
-      const res = await fetch('/api/news');
-      if (res.ok) {
-        const data = await res.json();
-        const articles: any[] = data.articles || [];
-        const cleanSym = symbol.toUpperCase().replace('USDT', '');
-
-        const symbolArticles = articles.filter(a =>
-          a.relatedSymbols?.some((s: string) => s.toUpperCase().includes(cleanSym)) ||
-          a.categories?.some((c: string) => c.toUpperCase().includes(cleanSym)) ||
-          a.title.toUpperCase().includes(cleanSym)
-        );
-
-        const targetArticles = symbolArticles.length >= 1 ? symbolArticles : articles;
-
-        const bullishCount = targetArticles.filter(a => a.sentiment === 'bullish').length;
-        const bearishCount = targetArticles.filter(a => a.sentiment === 'bearish').length;
-        const neutralCount = targetArticles.filter(a => a.sentiment === 'neutral').length;
-        const total = targetArticles.length || 1;
-
-        const score = Math.round(((bullishCount - bearishCount) / total) * 100);
-        let sentimentLabel: 'Bullish' | 'Bearish' | 'Neutral' = 'Neutral';
-        if (score >= 15) sentimentLabel = 'Bullish';
-        else if (score <= -15) sentimentLabel = 'Bearish';
-
-        return {
-          score,
-          bullishCount,
-          bearishCount,
-          neutralCount,
-          sentimentLabel,
-          impactAdjustment: 0,
-        };
-      }
-    } catch {
-      // Ignore network errors gracefully
-    }
-  }
-
   return {
-    score: 20,
-    bullishCount: 3,
-    bearishCount: 1,
-    neutralCount: 1,
-    sentimentLabel: 'Bullish',
+    score: 0,
+    bullishCount: 0,
+    bearishCount: 0,
+    neutralCount: 0,
+    sentimentLabel: 'Neutral',
     impactAdjustment: 0,
   };
 }
@@ -1688,14 +1928,16 @@ function calculateRocAucBuy(scores: { isBuy: boolean; probBuy: number }[]): numb
 
 export async function runRealStrategyAnalysis(
   symbol: string,
-  _modelType: 'rf' | string = 'rf',
+  _modelType: 'rf' | 'tcn' | 'both' | string = 'both',
   modelParams: any = {},
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  selectedModelType?: 'rf' | 'tcn' | 'both'
 ): Promise<StrategyResult> {
   if (onProgress) onProgress(10);
   
-  // PASUL 2: Fetch 1000 candles history for robust training
-  const klines = await fetchHistoricalKlines(symbol, 1000);
+  const fastMode = Boolean(modelParams?.fastMode);
+  const candleLimit = fastMode ? 300 : 1000;
+  const klines = await fetchHistoricalKlines(symbol, candleLimit);
   
   if (onProgress) onProgress(25);
 
@@ -1812,7 +2054,7 @@ export async function runRealStrategyAnalysis(
   };
   
   // Real Walk-Forward Validation (Expanding Window with Purged Lookahead)
-  const nFolds = 2;
+  const nFolds = fastMode ? 1 : 2;
   const minTrainSize = Math.floor(dataset.length * 0.5); // 50% training set
   const testSize = Math.floor((dataset.length - minTrainSize) / nFolds);
 
@@ -1863,7 +2105,9 @@ export async function runRealStrategyAnalysis(
 
     // PASUL 1: Train Primary Random Forest
     const model = new RandomForest();
-    model.train(trainData, modelParams.nEstimators || 18, modelParams.maxDepth || 6, 3);
+    const numEstimators = modelParams.nEstimators || (fastMode ? 8 : 18);
+    const maxTreeDepth = modelParams.maxDepth || (fastMode ? 5 : 6);
+    model.train(trainData, numEstimators, maxTreeDepth, 3);
 
     if (fold === nFolds - 1) {
        finalModel = model;
@@ -2194,6 +2438,31 @@ export async function runRealStrategyAnalysis(
   const rawProb = Math.round(currentPred.prob);
   const calibratedProb = plattCalibrator.calibrate(rawProb);
 
+  // TCN Model Sequence Inference (Temporal Convolutional Network)
+  const tcnModel = getTCNModelInstance({
+    timeframe: (modelParams.tcnTimeframe || '1m') as any,
+    sequenceLength: modelParams.tcnSequenceLength || 100,
+    filters: modelParams.tcnFilters || 24,
+    dilationRates: modelParams.tcnDilationRates || [1, 2, 4, 8],
+  });
+
+  let tcnPrediction: any;
+  try {
+    tcnPrediction = await tcnModel.predict(klines);
+  } catch (err: any) {
+    console.warn(`[ML TCN Prediction Warning]: ${err?.message || err}`);
+    tcnPrediction = {
+      value: 0,
+      probBuy: 33.3,
+      probSell: 33.3,
+      probHold: 33.4,
+      prob: 50,
+      inferenceTimeMs: 0,
+      isColdStart: true,
+      statusMessage: '⚠️ TCN Standby'
+    };
+  }
+
   // Market Regime Detection
   const lastI = klines.length - 1;
   const lastAtr = atrArr[lastI] || closes[lastI] * 0.02;
@@ -2203,12 +2472,30 @@ export async function runRealStrategyAnalysis(
   const lastBbWidthPct = ((lastBbUpper - lastBbLower) / closes[lastI]) * 100;
   const lastAdx = adxArr[lastI] || 25;
 
+  // 20-period High-Low Range Percentage
+  const range20Start = Math.max(0, klines.length - 20);
+  let high20 = -Infinity;
+  let low20 = Infinity;
+  for (let k = range20Start; k < klines.length; k++) {
+    if (klines[k].high > high20) high20 = klines[k].high;
+    if (klines[k].low < low20) low20 = klines[k].low;
+  }
+  const range20pPct = low20 > 0 && high20 > low20 ? ((high20 - low20) / low20) * 100 : 0;
+  const lastVolRatio = volumeEmaArr[klines.length - 1] ? klines[klines.length - 1].volume / volumeEmaArr[klines.length - 1] : 1;
+
+  const minAtrPctThreshold = modelParams.minAtrPctThreshold !== undefined ? modelParams.minAtrPctThreshold : 0.30;
+  const minRange20pThreshold = modelParams.minRange20pThreshold !== undefined ? modelParams.minRange20pThreshold : 0.55;
+
   const marketRegime = detectMarketRegime(
     lastAdx,
     lastAtrPct,
     lastBbWidthPct,
     ema20Arr[lastI] || closes[lastI],
-    ema50Arr[lastI] || closes[lastI]
+    ema50Arr[lastI] || closes[lastI],
+    range20pPct,
+    lastVolRatio,
+    minAtrPctThreshold,
+    minRange20pThreshold
   );
 
   // Meta Model Prediction
@@ -2251,7 +2538,6 @@ export async function runRealStrategyAnalysis(
   const rfScore = adjustedProb;
   const newsScore = Math.max(0, Math.min(100, Math.round(50 + newsSentiment.score / 2)));
   const trendScore = Math.max(0, Math.min(100, Math.round(lastAdx * 2)));
-  const lastVolRatio = volumeEmaArr[klines.length - 1] ? klines[klines.length - 1].volume / volumeEmaArr[klines.length - 1] : 1;
   const volumeScore = Math.max(0, Math.min(100, Math.round(lastVolRatio * 50)));
   const volatilityScore = Math.max(0, Math.min(100, Math.round(100 - (lastAtrPct * 10))));
 
@@ -2295,18 +2581,76 @@ export async function runRealStrategyAnalysis(
   let metaVetoApplied = false;
   let vetoReason = '';
 
+  // 0. Model Selection Engine Routing ('rf' | 'tcn' | 'both')
+  const effectiveModelType: 'rf' | 'tcn' | 'both' = (selectedModelType || modelParams?.mlModelType || _modelType || 'both') as 'rf' | 'tcn' | 'both';
+
   // 1. Strict Veto Guardrails Only (Hard safety stops before continuous scoring)
   let strictVetoTriggered = false;
 
-  const isBuyCandidate = currentPred.value === 1 || (currentPred.probBuy > currentPred.probSell && currentPred.probBuy >= 32);
-  const isSellCandidate = currentPred.value === -1 || (currentPred.probSell > currentPred.probBuy && currentPred.probSell >= 52);
+  let isBuyCandidate = false;
+  let isSellCandidate = false;
+  let baseScoreForUnification = calibratedProb;
 
-  // Veto Check 1: Primary RF Prob < 32% or Neutral prediction with no candidate bias or reversal
-  const minRfTarget = 32;
-  if (!isBuyCandidate && !isSellCandidate && calibratedProb < minRfTarget) {
-    if (!reversalSignal.isBullishReversal && !reversalSignal.isBearishReversal) {
+  if (effectiveModelType === 'tcn') {
+    if (tcnPrediction.isColdStart) {
       strictVetoTriggered = true;
-      vetoReason = `🚫 VETO Strict: Probabilitate Random Forest < ${minRfTarget}% (${calibratedProb}%)`;
+      vetoReason = '🚫 Model TCN în Standby (Neantrenat). Antrenează modelul TCN din Setări / AI pentru a activa modul TCN Deep Learning.';
+      isBuyCandidate = false;
+      isSellCandidate = false;
+      baseScoreForUnification = 50;
+    } else {
+      isBuyCandidate = tcnPrediction.probBuy > tcnPrediction.probSell && tcnPrediction.probBuy >= 34;
+      isSellCandidate = tcnPrediction.probSell > tcnPrediction.probBuy && tcnPrediction.probSell >= 48;
+      baseScoreForUnification = isBuyCandidate ? Math.round(tcnPrediction.probBuy) : (isSellCandidate ? Math.round(tcnPrediction.probSell) : Math.round(tcnPrediction.prob));
+
+      // TCN Veto
+      if (!isBuyCandidate && !isSellCandidate && tcnPrediction.prob < 34) {
+        if (!reversalSignal.isBullishReversal && !reversalSignal.isBearishReversal) {
+          strictVetoTriggered = true;
+          vetoReason = `🚫 VETO Strict TCN: Probabilitate TCN Conv1D < 34% (${tcnPrediction.prob}%)`;
+        }
+      }
+    }
+  } else if (effectiveModelType === 'rf') {
+    isBuyCandidate = currentPred.value === 1 || (currentPred.probBuy > currentPred.probSell && currentPred.probBuy >= 32);
+    isSellCandidate = currentPred.value === -1 || (currentPred.probSell > currentPred.probBuy && currentPred.probSell >= 52);
+    baseScoreForUnification = calibratedProb;
+
+    // Veto Check: Primary RF Prob < 32%
+    const minRfTarget = 32;
+    if (!isBuyCandidate && !isSellCandidate && calibratedProb < minRfTarget) {
+      if (!reversalSignal.isBullishReversal && !reversalSignal.isBearishReversal) {
+        strictVetoTriggered = true;
+        vetoReason = `🚫 VETO Strict RF: Probabilitate Random Forest < ${minRfTarget}% (${calibratedProb}%)`;
+      }
+    }
+  } else {
+    // Mode 'both' (Hybrid Confluence)
+    const rfBuy = currentPred.value === 1 || (currentPred.probBuy > currentPred.probSell && currentPred.probBuy >= 32);
+    const rfSell = currentPred.value === -1 || (currentPred.probSell > currentPred.probBuy && currentPred.probSell >= 52);
+    
+    isBuyCandidate = rfBuy && (tcnPrediction.isColdStart || tcnPrediction.probBuy >= tcnPrediction.probSell * 0.85);
+    isSellCandidate = rfSell && (tcnPrediction.isColdStart || tcnPrediction.probSell >= tcnPrediction.probBuy * 0.85);
+    baseScoreForUnification = calibratedProb;
+
+    // Veto Check 1: Primary RF Prob < 32%
+    const minRfTarget = 32;
+    if (!isBuyCandidate && !isSellCandidate && calibratedProb < minRfTarget) {
+      if (!reversalSignal.isBullishReversal && !reversalSignal.isBearishReversal) {
+        strictVetoTriggered = true;
+        vetoReason = `🚫 VETO Strict Hibrid: Probabilitate Random Forest < ${minRfTarget}% (${calibratedProb}%)`;
+      }
+    }
+
+    // TCN Strong Contradiction Veto in Hybrid Mode
+    if (!strictVetoTriggered && !tcnPrediction.isColdStart) {
+      if (rfBuy && tcnPrediction.probSell >= 68) {
+        strictVetoTriggered = true;
+        vetoReason = `🚫 VETO Divergență Hibrid: TCN indică Sell puternic (${tcnPrediction.probSell.toFixed(1)}%) vs RF Buy`;
+      } else if (rfSell && tcnPrediction.probBuy >= 68) {
+        strictVetoTriggered = true;
+        vetoReason = `🚫 VETO Divergență Hibrid: TCN indică Buy puternic (${tcnPrediction.probBuy.toFixed(1)}%) vs RF Sell`;
+      }
     }
   }
 
@@ -2325,16 +2669,46 @@ export async function runRealStrategyAnalysis(
     vetoReason = `🚫 VETO Volum Scăzut: VolRatio (${lastVolRatio.toFixed(2)}x < 0.18x) insuficient pentru cumpărare`;
   }
 
-  // Veto Check 4: Post-Exit Cooldown Engine Protection (Blocks quick re-entries after SL / TP)
-  const cooldownInfo = getSymbolCooldown(symbol);
-  if (!strictVetoTriggered && cooldownInfo && cooldownInfo.active) {
+  // Veto Check 4: Watch Mode Re-Entry Guard Protection (Allows re-entry ONLY on a NEW MOMENTUM EVENT: breakout/reclaim + RVOL surge + candle confirmation)
+  const watchMode = getSymbolWatchMode(symbol);
+  if (!strictVetoTriggered && watchMode && watchMode.active) {
     if (isBuyCandidate || reversalSignal.isBullishReversal) {
-      // Require high confidence (RF >= 65% AND Meta >= 55%) to bypass active post-exit cooldown
-      const isExtremeHighConfidence = calibratedProb >= 65 && metaProfitProb >= 55;
-      if (!isExtremeHighConfidence) {
+      const lastClose = closes[lastI];
+      const lastOpen = klines[lastI]?.open || lastClose;
+
+      // 1) Price Breakout / Reclaim: Price accelerates above previous exit price (+0.25%) or EMA20 (+0.2%)
+      const isPriceBreakout = watchMode.lastExitPrice 
+        ? (lastClose >= watchMode.lastExitPrice * 1.0025) 
+        : (lastClose >= curEma20 * 1.002);
+
+      // 2) RVOL / Volume Surge: Significant volume presence (1.15x+)
+      const isVolumeSurge = lastVolRatio >= 1.15;
+
+      // 3) Candle Acceleration & Pattern: Green expansion bar or fresh Bullish Reversal
+      const isGreenExpansion = (lastClose > lastOpen) && ((lastClose - lastOpen) / lastOpen >= 0.0025) || reversalSignal.isBullishReversal;
+
+      // 4) ML Confidence: RF & Meta scores strong
+      const isStrongMlConfluence = (effectiveModelType === 'tcn' ? (tcnPrediction.prob >= 60) : (calibratedProb >= 65)) && metaProfitProb >= 55;
+
+      // A New Momentum Event requires Breakout/Reclaim + (Volume Surge OR Green Expansion) + ML Confluence
+      const isNewMomentumEvent = (isPriceBreakout || reversalSignal.isBullishReversal) && (isVolumeSurge || isGreenExpansion) && isStrongMlConfluence;
+
+      if (!isNewMomentumEvent) {
         strictVetoTriggered = true;
-        vetoReason = `🚫 VETO Cooldown: Monedă recent închisă cu ${cooldownInfo.reason}. Re-intrare blocată încă ${cooldownInfo.remainingMinutes} min (protecție supra-tranzacționare).`;
+        vetoReason = `🚫 VETO Watch Mode: Simbol în WATCH MODE. Re-intrare permisă doar la un NOU Event de Momentum (Breakout > Exit, RVOL > 1.15x, Candlestick Confirmat).`;
       }
+    }
+  }
+
+  // Veto Check 5: Stagnation & Low-Volatility Regime Protection (NO-TRADE Filter)
+  const isStagnationEnabled = modelParams.enableStagnationFilter !== false;
+  if (!strictVetoTriggered && isStagnationEnabled && marketRegime.isStagnant) {
+    // Exception allowed ONLY if explosive volume breakout (RVOL >= 2.0x) or strong Reversal pattern
+    const isBreakoutVolume = lastVolRatio >= 2.0;
+    const isStrongReversal = reversalSignal.isBullishReversal || reversalSignal.isBearishReversal;
+    if (!isBreakoutVolume && !isStrongReversal) {
+      strictVetoTriggered = true;
+      vetoReason = `🧊 VETO Regim Stagnare (NO-TRADE): ATR (${lastAtrPct.toFixed(2)}% < ${minAtrPctThreshold.toFixed(2)}%) sau Range 20p (${range20pPct.toFixed(2)}% < ${minRange20pThreshold.toFixed(2)}%) - Volatilitate prea scăzută pentru acoperirea comisioanelor (~0.15%-0.20%). Conservare capital.`;
     }
   }
 
@@ -2387,11 +2761,28 @@ export async function runRealStrategyAnalysis(
   const metaAdjustment = Math.max(-10, Math.min(10, Math.round((metaProfitProb - 50) * 0.2)));
   scoreAdjustments.push(`${metaAdjustment >= 0 ? '+' : ''}${metaAdjustment}% Meta-Model (${metaProfitProb}%)`);
 
+  // TCN Conv1D Continuous Adjustment (+/- 8%) when model is trained and mode is 'both'
+  let tcnAdjustment = 0;
+  if (effectiveModelType === 'both' && !tcnPrediction.isColdStart) {
+    if (isBuyCandidate) {
+      tcnAdjustment = Math.max(-8, Math.min(8, Math.round((tcnPrediction.probBuy - tcnPrediction.probSell) * 0.15)));
+    } else if (isSellCandidate) {
+      tcnAdjustment = Math.max(-8, Math.min(8, Math.round((tcnPrediction.probSell - tcnPrediction.probBuy) * 0.15)));
+    }
+    if (tcnAdjustment !== 0) {
+      scoreAdjustments.push(`${tcnAdjustment >= 0 ? '+' : ''}${tcnAdjustment}% TCN Conv1D (${tcnPrediction.prob}%)`);
+    }
+  } else if (effectiveModelType === 'rf') {
+    scoreAdjustments.push(`[Doar Random Forest Activ]`);
+  } else if (effectiveModelType === 'tcn') {
+    scoreAdjustments.push(`[Doar TCN Deep Learning Activ]`);
+  }
+
   // News & Macro Impact (+/- 3%..5%)
   scoreAdjustments.push(`${impactAdjustment >= 0 ? '+' : ''}${impactAdjustment}% News Sentiment (${newsSentiment.sentimentLabel})`);
 
   // Calculate Unified Confidence Score
-  const rawUnifiedScore = calibratedProb + metaAdjustment + adxAdjustment + trendAdjustment + rsiAdjustment + volAdjustment + impactAdjustment;
+  const rawUnifiedScore = baseScoreForUnification + metaAdjustment + tcnAdjustment + adxAdjustment + trendAdjustment + rsiAdjustment + volAdjustment + impactAdjustment;
   const finalUnifiedScore = Math.min(98, Math.max(5, Math.round(rawUnifiedScore)));
   const minConfidenceTarget = 38; // Execution threshold for active trading (scaled ~10% for faster scalping capture)
 
@@ -2475,11 +2866,20 @@ export async function runRealStrategyAnalysis(
   const trendSign = trendAdjustment >= 0 ? `+${trendAdjustment}%` : `${trendAdjustment}%`;
   const metaSign = metaAdjustment >= 0 ? `+${metaAdjustment}%` : `${metaAdjustment}%`;
 
+  const modelEngineLabel = effectiveModelType === 'both' 
+    ? 'Hibrid Confluent (Random Forest + TCN Causal Conv1D)'
+    : (effectiveModelType === 'tcn' ? 'Doar TCN Deep Learning (Rețea Neuronală Causal Conv1D)' : 'Doar Random Forest (18 Arbori Decizionali)');
+
   const detailedExplanation: string[] = [
+    `0. Mod Calcul Activ: ${modelEngineLabel}`,
     `1. Triple Barrier Labeling & Purged Walk-Forward CV: Antrenat pe 1000 lumânări cu aliniere trend.`,
-    `2. Probability Calibration (Platt Scaling): Probabilitate brută ${rawProb}% recalibrată la ${calibratedProb}%.`,
-    `3. Reversal & Regime Detector: ${reversalSignal.isBullishReversal ? `⚡ CAPITULATION REBOUND BUY DETECTAT (${reversalSignal.reasons.join(', ')})` : reversalSignal.isBearishReversal ? `⚡ EUPHORIA REVERSAL SELL DETECTAT (${reversalSignal.reasons.join(', ')})` : `Reversal Inactiv | ADX=${lastAdx.toFixed(1)} (${adxSign}), VolRatio=${lastVolRatio.toFixed(2)} (${volSign})`}.`,
-    `4. Contribuții Defalcate Scor Unificat:
+    `2. TCN Model (Temporal Convolutional Network 1D Causal): Probabilitate Secvențială ${tcnPrediction.prob}% (${tcnPrediction.statusMessage}).`,
+    `3. Probability Calibration (Platt Scaling): Probabilitate brută ${rawProb}% recalibrată la ${calibratedProb}%.`,
+    `4. Reversal & Regime Detector: ${reversalSignal.isBullishReversal ? `⚡ CAPITULATION REBOUND BUY DETECTAT (${reversalSignal.reasons.join(', ')})` : reversalSignal.isBearishReversal ? `⚡ EUPHORIA REVERSAL SELL DETECTAT (${reversalSignal.reasons.join(', ')})` : `Reversal Inactiv | ADX=${lastAdx.toFixed(1)} (${adxSign}), VolRatio=${lastVolRatio.toFixed(2)} (${volSign})`}.`,
+    `5. Contribuții Defalcate Scor Unificat:
+       • Mod Calcul Selectat: ${modelEngineLabel}
+       • Scor Primar Utilizat: ${baseScoreForUnification}% (${effectiveModelType === 'tcn' ? 'TCN Conv1D' : 'Random Forest'})
+       • TCN Causal Conv1D Sequence: ${tcnPrediction.prob}%
        • Random Forest (Bază Calibrată): ${calibratedProb}%
        • Meta-Model Adjustment: ${metaSign}
        • EMA Trend Alignment: ${trendSign}
@@ -2487,8 +2887,8 @@ export async function runRealStrategyAnalysis(
        • ADX Trend Strength: ${adxSign}
        • News & Sentiment Impact: ${impactSign}
        ➜ Scor Final Ajustat: ${finalUnifiedScore}%`,
-    `5. Sentiment Știri & Macro: ${newsSentiment.sentimentLabel} (${sentimentSign} Net, impact ${impactSign})`,
-    action !== 'HOLD' ? `6. Execution Engine: Strategie [${entryStrategy}] | Intrare: $${entryPrice.toFixed(4)} | TP: $${tpPrice.toFixed(4)} (${tpMultiplier.toFixed(1)}x ATR) | SL: $${slPrice.toFixed(4)} (${slMultiplier.toFixed(1)}x ATR) | Risk/Reward 1:${(tpMultiplier / slMultiplier).toFixed(2)}` : `6. Execution Engine: Stare În Așteptare (HOLD)`
+    `6. Sentiment Știri & Macro: ${newsSentiment.sentimentLabel} (${sentimentSign} Net, impact ${impactSign})`,
+    action !== 'HOLD' ? `7. Execution Engine: Strategie [${entryStrategy}] | Intrare: $${entryPrice.toFixed(4)} | TP: $${tpPrice.toFixed(4)} (${tpMultiplier.toFixed(1)}x ATR) | SL: $${slPrice.toFixed(4)} (${slMultiplier.toFixed(1)}x ATR) | Risk/Reward 1:${(tpMultiplier / slMultiplier).toFixed(2)}` : `7. Execution Engine: Stare În Așteptare (HOLD)`
   ];
 
   const isNeutralPrediction = currentPred.value === 0;
@@ -2512,6 +2912,13 @@ export async function runRealStrategyAnalysis(
     signal: action,
     probability: finalUnifiedScore,
     rfProb: calibratedProb,
+    tcnProb: tcnPrediction.prob,
+    tcnDetails: {
+      inferenceTimeMs: tcnPrediction.inferenceTimeMs,
+      isColdStart: tcnPrediction.isColdStart,
+      statusMessage: tcnPrediction.statusMessage,
+      sequenceLength: tcnModel.getConfig().sequenceLength,
+    },
     metaProb: metaProfitProb,
     vetoReason,
     targetScore: finalUnifiedScore,
@@ -2532,6 +2939,9 @@ export async function runRealStrategyAnalysis(
       currentRegime: marketRegime.currentRegime,
       adx: parseFloat(lastAdx.toFixed(1)),
       atrPercent: parseFloat(lastAtrPct.toFixed(2)),
+      range20pPct: parseFloat(range20pPct.toFixed(2)),
+      isStagnant: marketRegime.isStagnant,
+      stagnationReason: marketRegime.stagnationReason,
       regimeDescription: marketRegime.regimeDescription,
     },
     metaModelStats: {

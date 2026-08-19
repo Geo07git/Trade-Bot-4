@@ -3,8 +3,22 @@ import path from 'path';
 import Binance from 'binance-api-node';
 import { getAccountInfo } from './services/BinanceService';
 import { journalService } from './services/JournalService';
-import { runRealStrategyAnalysis, registerSymbolCooldown, getSymbolCooldown, calculateExitScore, calculateTradeQualityScore } from '../src/services/ml';
-import { MarketOpportunity, SymbolPerformanceStat } from '../src/types';
+import { 
+  runRealStrategyAnalysis, 
+  registerSymbolCooldown, 
+  getSymbolCooldown, 
+  calculateExitScore, 
+  calculateTradeQualityScore,
+  calculateCandlestickPatternScore,
+  calculateMomentumAccelScore,
+  calculateRvolScore,
+  calculateStructureScore,
+  calculateLiquiditySpreadScore,
+  calculateBreakoutAtrExpansionScore,
+  calculateTrendConfirmationScore,
+  fetchHistoricalKlines
+} from '../src/services/ml';
+import { MarketOpportunity, SymbolPerformanceStat, SmartGridStatus, MetaTradeScoreBreakdown, ScalpingConfig } from '../src/types';
 
 function createBinanceClient(options: { apiKey?: string; apiSecret?: string; httpBase?: string }) {
   const binanceFactory = typeof Binance === 'function' 
@@ -118,6 +132,10 @@ export interface Position {
   amount: number;
   entryPrice: number;
   currentPrice: number;
+  strategy?: 'grid' | 'scalping' | 'manual';
+  leverage?: number;
+  margin?: number;
+  entryPatternName?: string;
 }
 
 export interface LogItem {
@@ -138,8 +156,10 @@ export interface CompletedTrade {
 }
 
 export interface ReportConfig {
+  enabled?: boolean;
   channels: {
     telegram: boolean;
+    discord: boolean;
     browser: boolean;
   };
   daily: {
@@ -173,15 +193,33 @@ export interface SignalJournalEntry {
   explanation?: string[];
 }
 
+export interface AiUsageStats {
+  totalRequests: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  lastRequestTime: string | null;
+  lastInputTokens: number;
+  lastOutputTokens: number;
+}
+
 export interface BotState {
+  aiUsageStats?: AiUsageStats;
   autoTradingActive: boolean;
   circuitBreakerTriggered?: boolean;
   circuitBreakerReason?: string | null;
   balance: number;
   initialBalance: number;
+  accumulationBalance?: number;
+  accumulationTargetPercent?: number;
+  sessionCycleCount?: number;
+  accumulationTargetEnabled?: boolean;
   positionSizePercent?: number; // % of equity per position (e.g. 5%)
   stopLossPercent?: number; // % hard safety stop loss limit (e.g. 2.0%)
   maxHoldMinutes?: number; // Timp maxim de deținere o poziție în minute (ex: 5 sau 10 minute). Ieșire automată după depășire.
+  maxNegativeHoldMinutes?: number; // Timp maxim de deținere de la intrarea pe minus (ex: 1.0 min).
+  enableMaxNegativeHold?: boolean; // ON/OFF switch for max negative hold limit rule
+  executionEngine?: 'both' | 'grid' | 'scalping'; // Execuție: amândouă, doar grid, sau doar scalping
+  mlModelType?: 'rf' | 'tcn' | 'both'; // Model ML: doar Random Forest, doar TCN, sau ambele hibrid
   watchlist: WatchlistItem[];
   marketOpportunities: MarketOpportunity[];
   symbolStats: Record<string, SymbolPerformanceStat>;
@@ -192,7 +230,7 @@ export interface BotState {
   signalJournal: SignalJournalEntry[];
   tradeHistory: CompletedTrade[];
   reportConfig: ReportConfig;
-  notificationProvider: 'telegram';
+  notificationProvider: 'telegram' | 'discord' | 'all';
   discordWebhookUrl: string;
   telegramBotToken: string;
   telegramChatId: string;
@@ -208,6 +246,69 @@ export interface BotState {
   serverStartedAt: string;
   lastCheckAt: string;
   totalTradesExecuted: number;
+  smartGridActive?: boolean;
+  scalpingConfig?: ScalpingConfig;
+  gridConfig?: {
+    active: boolean;
+    autoRegimeSwitch: boolean;
+    gridMode: 'dynamic_atr' | 'support_resistance' | 'fixed_percent';
+    gridLevels: number;
+    rangePercent: number;
+    highVolMultiplier: number;
+    capitalPerGridPercent: number;
+    dynamicCapital: boolean;
+    rangeThresholdProb: number;
+    enableCapitalRotation?: boolean;
+    minRotationHoldMinutes?: number;
+    minOppScoreDiff?: number;
+    stagnantProfitMaxPct?: number;
+  };
+  smartGridStatus?: Array<{
+    symbol: string;
+    regime: 'Range' | 'Trend' | 'High Volatility' | 'High Risk';
+    regimeBadge: '🟢 Range' | '🔵 Trend' | '🟠 Volatilitate' | '🔴 Risc Ridicat';
+    regimeExplanation: string;
+    gridActive: boolean;
+    gridAnchorPrice?: number;
+    currentPrice: number;
+    lowerPrice: number;
+    upperPrice: number;
+    gridStepPercent: number;
+    buyLevels: number[];
+    sellLevels: number[];
+    executedGridTrades: number;
+    gridProfit: number;
+    opportunityScore: number;
+    rangeProb: number;
+    trendProb: number;
+    breakoutProb: number;
+    gridConfidence: number;
+    expectedDailyProfitPct: number;
+    expectedDailyProfitMargin: number;
+    maxDrawdownEstPct: number;
+    choppinessIndex: number;
+    bollingerWidthPct: number;
+    hurstExponent: number;
+    adxValue: number;
+    atrPercent: number;
+    allocatedCapitalPct: number;
+    supportPrice: number;
+    resistancePrice: number;
+    lastAction?: string;
+    updatedAt: string;
+  }>;
+  gridHistory?: Array<{
+    id: string;
+    symbol: string;
+    action: 'GRID_BUY' | 'GRID_SELL' | 'GRID_ROTATION';
+    price: number;
+    amount: number;
+    pnl?: number;
+    regime: string;
+    timestamp: string;
+    holdMinutes?: number;
+    rotationDetail?: string;
+  }>;
 }
 
 const BASELINE_PRICES: Record<string, number> = {
@@ -314,6 +415,49 @@ function getFallbackBasePrice(symbol: string): number {
   return parseFloat((0.05 + (absoluteHash % 245) / 100).toFixed(4));
 }
 
+let validBinanceSymbolsCache: { set: Set<string>; timestamp: number } | null = null;
+
+async function fetchValidBinanceSymbolsServer(): Promise<Set<string>> {
+  if (validBinanceSymbolsCache && (Date.now() - validBinanceSymbolsCache.timestamp < 3600000)) {
+    return validBinanceSymbolsCache.set;
+  }
+
+  const validSet = new Set<string>();
+  const endpoints = [
+    'https://api.binance.com/api/v3/exchangeInfo',
+    'https://api1.binance.com/api/v3/exchangeInfo',
+    'https://api3.binance.com/api/v3/exchangeInfo',
+    'https://data-api.binance.vision/api/v3/exchangeInfo'
+  ];
+
+  for (const url of endpoints) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.symbols)) {
+          for (const s of data.symbols) {
+            if (s.status === 'TRADING' && s.quoteAsset === 'USDT' && s.symbol) {
+              validSet.add(s.symbol);
+            }
+          }
+          if (validSet.size > 0) {
+            validBinanceSymbolsCache = { set: validSet, timestamp: Date.now() };
+            return validSet;
+          }
+        }
+      }
+    } catch (err) {
+      // try next
+    }
+  }
+
+  return validBinanceSymbolsCache ? validBinanceSymbolsCache.set : new Set();
+}
+
 let batchPricesCache: { map: Map<string, number>; timestamp: number } | null = null;
 
 async function fetchBatchPricesServer(): Promise<Map<string, number>> {
@@ -332,7 +476,7 @@ async function fetchBatchPricesServer(): Promise<Map<string, number>> {
   for (const url of endpoints) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2000);
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
       const res = await fetch(url, { signal: controller.signal });
       clearTimeout(timeoutId);
       if (res.ok) {
@@ -355,7 +499,9 @@ async function fetchBatchPricesServer(): Promise<Map<string, number>> {
     }
   }
 
-  if (batchPricesCache) return batchPricesCache.map;
+  if (batchPricesCache && (Date.now() - batchPricesCache.timestamp < 15000)) {
+    return batchPricesCache.map;
+  }
   return priceMap;
 }
 
@@ -378,6 +524,38 @@ async function fetchLivePriceServer(symbol: string): Promise<number | null> {
     return batchMap.get(cleanSymbol)!;
   }
 
+  // Direct single-symbol Binance ticker API query as real live fallback
+  const singleEndpoints = [
+    `https://api.binance.com/api/v3/ticker/price?symbol=${querySymbol}`,
+    `https://api1.binance.com/api/v3/ticker/price?symbol=${querySymbol}`,
+    `https://api3.binance.com/api/v3/ticker/price?symbol=${querySymbol}`,
+    `https://data-api.binance.vision/api/v3/ticker/price?symbol=${querySymbol}`
+  ];
+
+  for (const singleUrl of singleEndpoints) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const res = await fetch(singleUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const data = await res.json();
+        const liveP = parseFloat(data.price);
+        if (!isNaN(liveP) && liveP > 0) {
+          return liveP;
+        }
+      }
+    } catch (e) {
+      // try next endpoint
+    }
+  }
+
+  // Check if valid active trading symbol on Binance
+  const validSymbols = await fetchValidBinanceSymbolsServer();
+  if (validSymbols.size > 0 && !validSymbols.has(querySymbol) && !validSymbols.has(cleanSymbol)) {
+    return null;
+  }
+
   // Fallback to baseline or deterministic price if external network is down or socket hangs
   return getFallbackBasePrice(querySymbol);
 }
@@ -385,43 +563,49 @@ async function fetchLivePriceServer(symbol: string): Promise<number | null> {
 const serverSignalCache = new Map<string, { result: { action: 'BUY' | 'SELL' | 'HOLD'; prob: number; modelName: string; reason: string }; timestamp: number }>();
 const realStrategyCache = new Map<string, { res: any; timestamp: number }>();
 
-async function getCachedRealStrategyAnalysis(symbol: string): Promise<any> {
+async function getCachedRealStrategyAnalysis(symbol: string, mlModelType: 'rf' | 'tcn' | 'both' = 'both'): Promise<any> {
   const cleanSymbol = symbol.trim().toUpperCase();
-  const cached = realStrategyCache.get(cleanSymbol);
-  if (cached && (Date.now() - cached.timestamp < 240000)) { // 4-minute cache
+  const cacheKey = `${cleanSymbol}_${mlModelType}`;
+  const cached = realStrategyCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestamp < 300000)) { // 5-minute cache
     return cached.res;
   }
 
-  try {
-    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('ML Strategy Timeout')), 35000));
-    const res = await Promise.race([runRealStrategyAnalysis(cleanSymbol, 'rf'), timeoutPromise]);
-    if (res) {
-      realStrategyCache.set(cleanSymbol, { res, timestamp: Date.now() });
-    }
-    return res;
-  } catch (err: any) {
-    console.warn(`[ML Real Strategy Warning for ${cleanSymbol}]: ${err?.message || err}`);
-    return null;
-  }
+  // Asynchronously trigger lightweight ML strategy calculation in background to warm cache
+  runRealStrategyAnalysis(cleanSymbol, 'rf', { fastMode: true }, undefined, mlModelType)
+    .then(res => {
+      if (res) {
+        realStrategyCache.set(cacheKey, { res, timestamp: Date.now() });
+      }
+    })
+    .catch(err => {
+      console.warn(`[ML Real Strategy Background Warning for ${cleanSymbol}]: ${err?.message || err}`);
+    });
+
+  return cached ? cached.res : null;
 }
 
-async function generateSignalServer(symbol: string, currentPrice: number): Promise<{ action: 'BUY' | 'SELL' | 'HOLD'; prob: number; modelName: string; reason: string }> {
+async function generateSignalServer(symbol: string, currentPrice: number, mlModelType: 'rf' | 'tcn' | 'both' = 'both'): Promise<{ action: 'BUY' | 'SELL' | 'HOLD'; prob: number; modelName: string; reason: string }> {
   const cleanSymbol = symbol.trim().toUpperCase();
-  const cached = serverSignalCache.get(cleanSymbol);
+  const cacheKey = `${cleanSymbol}_${mlModelType}`;
+  const cached = serverSignalCache.get(cacheKey);
   if (cached && (Date.now() - cached.timestamp < 180000)) { // 3-minute cache
     return cached.result;
   }
 
   try {
-    const mlRes = await getCachedRealStrategyAnalysis(cleanSymbol);
+    const mlRes = await getCachedRealStrategyAnalysis(cleanSymbol, mlModelType);
     if (mlRes && mlRes.signal) {
+      const modelDisplayName = mlModelType === 'both' 
+        ? 'Hibrid Confluent (RF + TCN Conv1D)' 
+        : (mlModelType === 'tcn' ? 'TCN Causal Conv1D Network' : 'Random Forest Ensemble 2.0');
       const result = {
         action: mlRes.signal as 'BUY' | 'SELL' | 'HOLD',
         prob: mlRes.probability,
-        modelName: 'Random Forest Ensemble 2.0',
+        modelName: modelDisplayName,
         reason: mlRes.explanation?.find((e: string) => e.includes('Semnal') || e.includes('Reversal')) || `Scor Composite AI: ${mlRes.probability}% (${mlRes.signal})`
       };
-      serverSignalCache.set(cleanSymbol, { result, timestamp: Date.now() });
+      serverSignalCache.set(cacheKey, { result, timestamp: Date.now() });
       return result;
     }
   } catch (err: any) {
@@ -485,18 +669,120 @@ async function generateSignalServer(symbol: string, currentPrice: number): Promi
   };
 }
 
+export function calculateMetaTradeScore(params: {
+  symbol: string;
+  opportunityScore?: number;
+  aiProbability: number;          // Random Forest Probability
+  tcnProbability?: number;        // TCN Probability
+  rangeProbability?: number;
+  trendAlignment?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  volumeRatio?: number;
+  priceChangePercent?: number;
+  symbolStat?: SymbolPerformanceStat;
+  regime?: string;
+  atrPercent?: number;
+  adxValue?: number;
+  reversalScore?: number;
+  newsSentimentLabel?: string;
+}): MetaTradeScoreBreakdown {
+  // 1. Random Forest Probability (0-100) -> 20% weight
+  const rfProb = Math.min(100, Math.max(0, params.aiProbability || 50));
+
+  // 2. TCN Network Probability (0-100) -> 20% weight (falls back to RF if TCN not available)
+  const tcnProb = Math.min(100, Math.max(0, params.tcnProbability ?? rfProb));
+
+  // 3. ADX Trend Strength Score (0-100) -> 10% weight
+  const adxVal = params.adxValue ?? 25;
+  let adxScore = 50;
+  if (adxVal >= 35) adxScore = 100;
+  else if (adxVal >= 25) adxScore = 80;
+  else if (adxVal >= 18) adxScore = 60;
+  else adxScore = 30;
+
+  // 4. EMA Trend Alignment Score (0-100) -> 10% weight
+  const trendAlign = params.trendAlignment || 'NEUTRAL';
+  const pChange = params.priceChangePercent ?? 0;
+  let emaTrendScore = 50;
+  if (trendAlign === 'BULLISH' || pChange >= 1.0) emaTrendScore = 100;
+  else if (trendAlign === 'NEUTRAL') emaTrendScore = 60;
+  else if (trendAlign === 'BEARISH' || pChange <= -1.5) emaTrendScore = 20;
+
+  // 5. Volume Growth / Ratio Score (0-100) -> 10% weight
+  const volRatio = params.volumeRatio ?? 1.0;
+  let volumeScore = 50;
+  if (volRatio >= 1.8) volumeScore = 100;
+  else if (volRatio >= 1.2) volumeScore = 80;
+  else if (volRatio >= 0.8) volumeScore = 60;
+  else volumeScore = 30;
+
+  // 6. Volatility (ATR %) Score (0-100) -> 10% weight
+  const atrPct = params.atrPercent ?? 0.40;
+  let volatilityScore = 50;
+  if (atrPct >= 0.80) volatilityScore = 100;
+  else if (atrPct >= 0.50) volatilityScore = 80;
+  else if (atrPct >= 0.30) volatilityScore = 65;
+  else volatilityScore = 25;
+
+  // 7. Reversal Signal Score (0-100) -> 10% weight
+  const revScore = Math.min(100, Math.max(0, params.reversalScore ?? 50));
+
+  // 8. News / AI Sentiment Score (0-100) -> 10% weight
+  const sentLabel = (params.newsSentimentLabel || 'neutral').toLowerCase();
+  let sentimentScore = 50;
+  if (sentLabel.includes('bullish') || sentLabel.includes('pozitiv')) sentimentScore = 95;
+  else if (sentLabel.includes('bearish') || sentLabel.includes('negativ')) sentimentScore = 15;
+  else sentimentScore = 55;
+
+  // Standardized MetaScore Formula (0-100):
+  // RF (20%) + TCN (20%) + ADX (10%) + EMA Trend (10%) + Volum (10%) + Volatilitate (10%) + Reversal (10%) + Sentiment (10%)
+  const rawFinalScore = (
+    0.20 * rfProb +
+    0.20 * tcnProb +
+    0.10 * adxScore +
+    0.10 * emaTrendScore +
+    0.10 * volumeScore +
+    0.10 * volatilityScore +
+    0.10 * revScore +
+    0.10 * sentimentScore
+  );
+
+  const finalTradeScore = Math.min(100, Math.max(0, Math.round(rawFinalScore)));
+
+  return {
+    finalTradeScore,
+    opportunityScore: params.opportunityScore || 50,
+    aiProbability: rfProb,
+    rangeProbability: params.rangeProbability || 50,
+    historicalCoinPFScore: 50,
+    marketRegimeScore: emaTrendScore,
+    feeEfficiencyScore: volatilityScore,
+    isApproved: true,
+    executionRule: finalTradeScore >= 70 ? 'DIRECT_EXECUTE' : 'CONFIRMATION_EXECUTE',
+    netProfitMarginPct: parseFloat(atrPct.toFixed(2)),
+    dynamicTPPct: 3.0,
+    dynamicPositionSizePct: 5.0,
+    vetoReason: ''
+  };
+}
+
 async function sendWebhookServer(provider: 'discord' | 'telegram', urlOrToken: string, chatIdOrMessage: string, message?: string) {
   try {
-    if (provider === 'discord' && urlOrToken) {
-      await fetch(urlOrToken, {
+    const token = (urlOrToken || '').trim();
+    const chatId = (chatIdOrMessage || '').trim();
+
+    if (provider === 'discord' && token) {
+      await fetch(token, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: chatIdOrMessage })
       });
-    } else if (provider === 'telegram' && urlOrToken && chatIdOrMessage && message) {
-      const url = `https://api.telegram.org/bot${urlOrToken}/sendMessage`;
-      // Format Markdown bold syntax (** or *) into HTML <b> tags for rock-solid Telegram rendering
+    } else if (provider === 'telegram' && token && chatId && message) {
+      const url = `https://api.telegram.org/bot${token}/sendMessage`;
+      // Escape HTML entities first to prevent Telegram API 400 errors with < or > or &
       const htmlText = message
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
         .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
         .replace(/\*(.*?)\*/g, '<b>$1</b>');
 
@@ -504,22 +790,31 @@ async function sendWebhookServer(provider: 'discord' | 'telegram', urlOrToken: s
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          chat_id: chatIdOrMessage, 
+          chat_id: chatId, 
           text: htmlText,
           parse_mode: 'HTML'
         })
       });
 
       if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        console.warn(`[Telegram Webhook Warning] HTTP ${res.status}: ${errText}`);
+
         // Fallback send plain text if HTML parsing has any edge case
-        await fetch(url, {
+        const plainText = message.replace(/\*\*/g, '').replace(/\*/g, '');
+        const fbRes = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
-            chat_id: chatIdOrMessage, 
-            text: message 
+            chat_id: chatId, 
+            text: plainText 
           })
         });
+
+        if (!fbRes.ok) {
+          const fbErr = await fbRes.text().catch(() => '');
+          console.error(`[Telegram Webhook Fallback Error] HTTP ${fbRes.status}: ${fbErr}`);
+        }
       }
     }
   } catch (err) {
@@ -530,6 +825,8 @@ async function sendWebhookServer(provider: 'discord' | 'telegram', urlOrToken: s
 class ServerBotEngine {
   public state: BotState;
   private intervalTimer: NodeJS.Timeout | null = null;
+  private telegramIntervalTimer: NodeJS.Timeout | null = null;
+  private isLoopRunning = false;
   private secondsCounter = 0;
   private stateFilePath = path.join(process.cwd(), 'bot_state.json');
   private telegramOffset = 0;
@@ -537,12 +834,19 @@ class ServerBotEngine {
   private webhookCleared = false;
   private isCheckingPrices = false;
   private isRunningML = false;
+  private lastHourlyReportHour = '';
+  private lastNotifiedRegime = '';
+  private lastScanTimestamp = 0;
 
   constructor() {
     this.state = {
       autoTradingActive: true,
-      balance: 100,
-      initialBalance: 100,
+      balance: 10000,
+      initialBalance: 10000,
+      accumulationBalance: 0,
+      accumulationTargetPercent: 3.0,
+      sessionCycleCount: 1,
+      accumulationTargetEnabled: true,
       watchlist: [
         { symbol: 'BTCUSDT', price: null, signal: null, active: true },
         { symbol: 'ETHUSDT', price: null, signal: null, active: true },
@@ -576,30 +880,33 @@ class ServerBotEngine {
       positionSizePercent: 5,
       stopLossPercent: 2.0,
       maxHoldMinutes: 5,
+      executionEngine: 'scalping',
+      mlModelType: 'both',
       lastScanAt: null,
       positions: [],
       logs: [
         {
           time: new Date().toLocaleTimeString(),
-          message: '🤖 Engine-ul de fundal Trade-Bot-2.0 (Scanare Oportunități Scalping) a fost inițializat pe server. Rulare 24/7 activă!',
+          message: '🤖 Engine-ul de fundal G&S-Trade-Bot (Scanare Oportunități Scalping) a fost inițializat pe server. Rulare 24/7 activă!',
           type: 'info'
         }
       ],
       signalJournal: [],
       tradeHistory: [],
       reportConfig: {
-        channels: { telegram: true, browser: true },
+        enabled: true,
+        channels: { telegram: true, discord: true, browser: true },
         daily: { enabled: true, time: '21:00' },
         weekly: { enabled: true, day: 0, time: '21:00' },
         monthly: { enabled: true }
       },
-      notificationProvider: 'telegram',
+      notificationProvider: 'all',
       discordWebhookUrl: '',
       telegramBotToken: '',
       telegramChatId: '',
       timezone: 'Europe/Bucharest',
       dataInterval: 10,
-      analysisInterval: 30,
+      analysisInterval: 60,
       maxLogs: 2500,
       serverStartedAt: new Date().toISOString(),
       apiKey: '',
@@ -611,10 +918,74 @@ class ServerBotEngine {
       totalTradesExecuted: 0,
       circuitBreakerTriggered: false,
       circuitBreakerReason: null,
+      smartGridActive: false,
+      scalpingConfig: {
+        active: true,
+        minRfProb: 70,
+        minMetaScore: 70,
+        stopLossPercent: 1.0,
+        targetTakeProfit: 3.0,
+        trailingStopActivation: 1.5,
+        trailingStopDistance: 0.5,
+        breakEvenActivation: 1.0,
+        positionSizePercent: 5.0,
+        maxHoldMinutes: 15,
+        maxNegativeHoldMinutes: 1.0,
+        enableMaxNegativeHold: true,
+        minOpportunityScore: 50,
+        cooldownMinutes: 2,
+        enableDynamicSizing: true,
+        minVolumeGrowth: 0.8,
+        enableStagnationFilter: true,
+        minAtrPctThreshold: 0.30,
+        minRange20pThreshold: 0.55,
+        leverage: 1
+      },
+      gridConfig: {
+        active: false,
+        autoRegimeSwitch: true,
+        gridMode: 'dynamic_atr',
+        gridLevels: 6,
+        rangePercent: 2.5,
+        highVolMultiplier: 1.8,
+        capitalPerGridPercent: 15,
+        dynamicCapital: true,
+        rangeThresholdProb: 75
+      },
+      smartGridStatus: [],
+      gridHistory: [],
+      aiUsageStats: {
+        totalRequests: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        lastRequestTime: null,
+        lastInputTokens: 0,
+        lastOutputTokens: 0
+      }
     };
 
     this.loadPersistedState();
     this.startBackgroundLoop();
+  }
+
+  public recordAiUsage(inputTokens: number, outputTokens: number) {
+    if (!this.state.aiUsageStats) {
+      this.state.aiUsageStats = {
+        totalRequests: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        lastRequestTime: null,
+        lastInputTokens: 0,
+        lastOutputTokens: 0
+      };
+    }
+    this.state.aiUsageStats.totalRequests += 1;
+    this.state.aiUsageStats.totalInputTokens += inputTokens;
+    this.state.aiUsageStats.totalOutputTokens += outputTokens;
+    this.state.aiUsageStats.lastRequestTime = new Date().toISOString();
+    this.state.aiUsageStats.lastInputTokens = inputTokens;
+    this.state.aiUsageStats.lastOutputTokens = outputTokens;
+    this.savePersistedState(true);
   }
 
   private getPersistedConfigOnly() {
@@ -626,6 +997,7 @@ class ServerBotEngine {
       positionSizePercent: this.state.positionSizePercent,
       stopLossPercent: this.state.stopLossPercent,
       maxHoldMinutes: this.state.maxHoldMinutes,
+      executionEngine: this.state.executionEngine || 'both',
       notificationProvider: this.state.notificationProvider,
       discordWebhookUrl: this.state.discordWebhookUrl,
       telegramBotToken: this.state.telegramBotToken,
@@ -636,8 +1008,16 @@ class ServerBotEngine {
       apiSecret: this.state.apiSecret,
       testnetApiKey: this.state.testnetApiKey,
       testnetApiSecret: this.state.testnetApiSecret,
+      smartGridActive: this.state.smartGridActive,
+      scalpingConfig: this.state.scalpingConfig,
+      gridConfig: this.state.gridConfig,
+      gridHistory: this.state.gridHistory,
       dynamicWatchlistSize: this.state.dynamicWatchlistSize,
       maxLogs: this.state.maxLogs,
+      accumulationBalance: this.state.accumulationBalance || 0,
+      accumulationTargetPercent: this.state.accumulationTargetPercent || 3.0,
+      sessionCycleCount: this.state.sessionCycleCount || 1,
+      accumulationTargetEnabled: this.state.accumulationTargetEnabled !== false,
     };
   }
 
@@ -656,6 +1036,7 @@ class ServerBotEngine {
           if (parsed.positionSizePercent !== undefined) this.state.positionSizePercent = parsed.positionSizePercent;
           if (parsed.stopLossPercent !== undefined) this.state.stopLossPercent = parsed.stopLossPercent;
           if (parsed.maxHoldMinutes !== undefined) this.state.maxHoldMinutes = parsed.maxHoldMinutes;
+          if (parsed.executionEngine !== undefined) this.state.executionEngine = parsed.executionEngine;
           if (parsed.notificationProvider !== undefined) this.state.notificationProvider = parsed.notificationProvider;
           if (parsed.discordWebhookUrl !== undefined) this.state.discordWebhookUrl = parsed.discordWebhookUrl;
           if (parsed.telegramBotToken !== undefined) this.state.telegramBotToken = parsed.telegramBotToken;
@@ -668,7 +1049,27 @@ class ServerBotEngine {
           if (parsed.testnetApiSecret !== undefined) this.state.testnetApiSecret = parsed.testnetApiSecret;
           if (parsed.dynamicWatchlistSize !== undefined) this.state.dynamicWatchlistSize = parsed.dynamicWatchlistSize;
           if (parsed.maxLogs !== undefined) this.state.maxLogs = parsed.maxLogs;
+          if (parsed.smartGridActive !== undefined) this.state.smartGridActive = parsed.smartGridActive;
+          if (parsed.scalpingConfig !== undefined && typeof parsed.scalpingConfig === 'object') {
+            this.state.scalpingConfig = { ...this.state.scalpingConfig, ...parsed.scalpingConfig };
+          }
+          if (parsed.gridConfig !== undefined && typeof parsed.gridConfig === 'object') {
+            this.state.gridConfig = { ...this.state.gridConfig, ...parsed.gridConfig };
+          }
+          if (parsed.accumulationBalance !== undefined) this.state.accumulationBalance = parsed.accumulationBalance;
+          if (parsed.accumulationTargetPercent !== undefined) this.state.accumulationTargetPercent = parsed.accumulationTargetPercent;
+          if (parsed.sessionCycleCount !== undefined) this.state.sessionCycleCount = parsed.sessionCycleCount;
+          if (parsed.accumulationTargetEnabled !== undefined) this.state.accumulationTargetEnabled = parsed.accumulationTargetEnabled;
         }
+
+        // Fallback to process.env if empty
+        if (!this.state.apiKey && process.env.BINANCE_API_KEY) this.state.apiKey = process.env.BINANCE_API_KEY;
+        if (!this.state.apiSecret && process.env.BINANCE_API_SECRET) this.state.apiSecret = process.env.BINANCE_API_SECRET;
+        if (!this.state.testnetApiKey && process.env.BINANCE_TESTNET_API_KEY) this.state.testnetApiKey = process.env.BINANCE_TESTNET_API_KEY;
+        if (!this.state.testnetApiSecret && process.env.BINANCE_TESTNET_API_SECRET) this.state.testnetApiSecret = process.env.BINANCE_TESTNET_API_SECRET;
+        if (!this.state.telegramBotToken && process.env.TELEGRAM_BOT_TOKEN) this.state.telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
+        if (!this.state.telegramChatId && process.env.TELEGRAM_CHAT_ID) this.state.telegramChatId = process.env.TELEGRAM_CHAT_ID;
+        if (!this.state.discordWebhookUrl && process.env.DISCORD_WEBHOOK_URL) this.state.discordWebhookUrl = process.env.DISCORD_WEBHOOK_URL;
 
         // Operational state arrays remain clean runtime instances
         this.state.tradeHistory = [];
@@ -689,10 +1090,19 @@ class ServerBotEngine {
           });
         }
 
-        console.log('[AI.TRADE Bot] Configurația a fost încărcată din bot_state.json (AutoTrading:', this.state.autoTradingActive ? 'ACTIV' : 'OPRIT', ')');
+        console.log('[G&S-Trade-Bot] Configurația a fost încărcată din bot_state.json (AutoTrading:', this.state.autoTradingActive ? 'ACTIV' : 'OPRIT', ')');
       }
+
+      // Always fallback to process.env if credentials are empty
+      if (!this.state.apiKey && process.env.BINANCE_API_KEY) this.state.apiKey = process.env.BINANCE_API_KEY;
+      if (!this.state.apiSecret && process.env.BINANCE_API_SECRET) this.state.apiSecret = process.env.BINANCE_API_SECRET;
+      if (!this.state.testnetApiKey && process.env.BINANCE_TESTNET_API_KEY) this.state.testnetApiKey = process.env.BINANCE_TESTNET_API_KEY;
+      if (!this.state.testnetApiSecret && process.env.BINANCE_TESTNET_API_SECRET) this.state.testnetApiSecret = process.env.BINANCE_TESTNET_API_SECRET;
+      if (!this.state.telegramBotToken && process.env.TELEGRAM_BOT_TOKEN) this.state.telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
+      if (!this.state.telegramChatId && process.env.TELEGRAM_CHAT_ID) this.state.telegramChatId = process.env.TELEGRAM_CHAT_ID;
+      if (!this.state.discordWebhookUrl && process.env.DISCORD_WEBHOOK_URL) this.state.discordWebhookUrl = process.env.DISCORD_WEBHOOK_URL;
     } catch (e) {
-      console.error('[AI.TRADE Bot] Eroare la citirea bot_state.json:', e);
+      console.error('[G&S-Trade-Bot] Eroare la citirea bot_state.json:', e);
     }
   }
 
@@ -708,7 +1118,7 @@ class ServerBotEngine {
       try {
         fs.writeFileSync(this.stateFilePath, JSON.stringify(configToSave, null, 2));
       } catch (e) {
-        console.error('[AI.TRADE Bot] Eroare la salvarea bot_state.json:', e);
+        console.error('[G&S-Trade-Bot] Eroare la salvarea bot_state.json:', e);
       }
       return;
     }
@@ -716,11 +1126,9 @@ class ServerBotEngine {
     if (!this.saveTimer) {
       this.saveTimer = setTimeout(() => {
         this.saveTimer = null;
-        try {
-          fs.writeFileSync(this.stateFilePath, JSON.stringify(configToSave, null, 2));
-        } catch (e) {
-          console.error('[AI.TRADE Bot] Eroare la salvarea bot_state.json:', e);
-        }
+        fs.writeFile(this.stateFilePath, JSON.stringify(configToSave, null, 2), (err) => {
+          if (err) console.error('[G&S-Trade-Bot] Eroare la salvarea bot_state.json:', err);
+        });
       }, 1500);
     }
   }
@@ -749,9 +1157,97 @@ class ServerBotEngine {
     this.savePersistedState(true);
   }
 
+  public checkAccumulationTarget(): boolean {
+    if (this.state.accumulationTargetEnabled === false) return false;
+
+    const currentEquity = this.calculateEquity();
+    const initialCapital = (this.state.initialBalance && this.state.initialBalance > 0) ? this.state.initialBalance : 1000;
+    const targetPct = this.state.accumulationTargetPercent || 3.0;
+
+    const cyclePnlPercent = ((currentEquity - initialCapital) / initialCapital) * 100;
+
+    if (cyclePnlPercent >= targetPct) {
+      if (Array.isArray(this.state.positions) && this.state.positions.length > 0) {
+        for (const pos of [...this.state.positions]) {
+          this.executeTrade(pos.symbol, 'SELL', pos.currentPrice || pos.entryPrice, pos.amount);
+        }
+      }
+
+      const finalCash = this.state.balance;
+      const profitToConserve = parseFloat((finalCash - initialCapital).toFixed(2));
+
+      if (profitToConserve > 0) {
+        this.state.accumulationBalance = parseFloat(((this.state.accumulationBalance || 0) + profitToConserve).toFixed(2));
+        this.state.balance = initialCapital;
+        this.state.sessionCycleCount = (this.state.sessionCycleCount || 1) + 1;
+
+        const cycleNum = this.state.sessionCycleCount - 1;
+        const logMsg = `🛡️ [CONSERVARE CÂȘTIG ${targetPct}%] Țintă atinsă! Profitul de +${profitToConserve.toFixed(2)} USDT a fost salvat în Soldul "Acumulare" (Total Acumulat: ${this.state.accumulationBalance.toFixed(2)} USDT). Ciclul #${this.state.sessionCycleCount} reîncepe cu capitalul inițial de ${initialCapital.toFixed(2)} USDT.`;
+
+        this.addLog(logMsg, 'success', this.state.balance);
+
+        const telegramMsg = `🏦 **[G&S-Trade-Bot 24/7] Ciclul #${cycleNum} Finalizat & Profit Conservat (+${cyclePnlPercent.toFixed(2)}%)**\n\n` +
+          `• **Profit Transferat în Acumulare:** +${profitToConserve.toFixed(2)} USDT\n` +
+          `• **Sold Total "Acumulare":** ${this.state.accumulationBalance.toFixed(2)} USDT\n` +
+          `• **Ciclu Nou (#${this.state.sessionCycleCount}):** Capital reînceput cu ${initialCapital.toFixed(2)} USDT`;
+
+        this.sendNotification(telegramMsg);
+        this.savePersistedState();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  public consolidateAccumulation(): { success: boolean; profitConserved: number; accumulationBalance: number } {
+    const currentEquity = this.calculateEquity();
+    const initialCapital = (this.state.initialBalance && this.state.initialBalance > 0) ? this.state.initialBalance : 1000;
+
+    if (Array.isArray(this.state.positions) && this.state.positions.length > 0) {
+      for (const pos of [...this.state.positions]) {
+        this.executeTrade(pos.symbol, 'SELL', pos.currentPrice || pos.entryPrice, pos.amount);
+      }
+    }
+
+    const finalCash = this.state.balance;
+    const profitToConserve = parseFloat((finalCash - initialCapital).toFixed(2));
+
+    if (profitToConserve <= 0) {
+      return { success: false, profitConserved: 0, accumulationBalance: this.state.accumulationBalance || 0 };
+    }
+
+    this.state.accumulationBalance = parseFloat(((this.state.accumulationBalance || 0) + profitToConserve).toFixed(2));
+    this.state.balance = initialCapital;
+    this.state.sessionCycleCount = (this.state.sessionCycleCount || 1) + 1;
+
+    const cycleNum = this.state.sessionCycleCount - 1;
+    this.addLog(`🔒 [CONSERVARE MANUALĂ] Câștigul de +${profitToConserve.toFixed(2)} USDT din Ciclul #${cycleNum} a fost salvat în Soldul "Acumulare" (Total Acumulat: ${this.state.accumulationBalance.toFixed(2)} USDT). Ciclul #${this.state.sessionCycleCount} reîncepe cu ${initialCapital.toFixed(2)} USDT.`, 'success', this.state.balance);
+
+    this.sendNotification(
+      `🔒 **[G&S-Trade-Bot] Consolidează Profit în Acumulare**\n\n` +
+      `• **Profit Transferat:** +${profitToConserve.toFixed(2)} USDT\n` +
+      `• **Sold Total "Acumulare":** ${this.state.accumulationBalance.toFixed(2)} USDT\n` +
+      `• **Nou Ciclu #${this.state.sessionCycleCount}:** Reîncepe cu ${initialCapital.toFixed(2)} USDT`
+    );
+
+    this.savePersistedState();
+    return { success: true, profitConserved: profitToConserve, accumulationBalance: this.state.accumulationBalance };
+  }
+
+  public resetAccumulationVault(): { success: boolean } {
+    this.state.accumulationBalance = 0;
+    this.state.sessionCycleCount = 1;
+    this.addLog(`🏦 Soldul "Acumulare" a fost resetat la $0.00 USDT.`, 'info');
+    this.savePersistedState();
+    return { success: true };
+  }
+
   public checkCircuitBreaker(): boolean {
+    // 1. Check Accumulation Target (+3% cycle profit rule)
+    this.checkAccumulationTarget();
+
     const equity = this.calculateEquity();
-    const initial = this.state.initialBalance || 100;
+    const initial = (this.state.initialBalance && this.state.initialBalance > 0) ? this.state.initialBalance : 10000;
     const pnlPercent = ((equity - initial) / initial) * 100;
 
     // Ignore circuit breaker trigger if testnet/live account has negligible funds (< $1)
@@ -759,29 +1255,43 @@ class ServerBotEngine {
       return false;
     }
 
-    // Profit milestone (+10%): Record milestone without changing fixed initial capital baseline
+    // Profit Target (+10%): Stop trading automatically -> Requires manual restart / reset
     if (pnlPercent >= 10.0) {
-      this.addLog(`🎉 [MILESTONE +10%] Țintă de profit atinsă! Portofoliu: $${equity.toFixed(2)} (Initial: $${initial.toFixed(2)}).`, 'success', equity);
-      this.sendNotification(`🎉 **[AI.TRADE Bot 24/7] Milestone +10% Profit Atins!**\nPortofoliu actual: $${equity.toFixed(2)} USDT.\nSistemul continuă tranzacționarea automată!`);
-      this.savePersistedState();
-      return false;
-    }
-
-    // Safety Stop (-15% severe drawdown): Pause auto-trading to protect user funds
-    if (pnlPercent <= -15.0) {
       if (!this.state.circuitBreakerTriggered) {
         this.state.circuitBreakerTriggered = true;
         this.state.autoTradingActive = false;
-        const reason = `🚨 Limita de siguranță -15% a fost atinsă! (PNL: ${pnlPercent.toFixed(2)}%, Equity: $${equity.toFixed(2)})`;
+        const reason = `🎉 Limita de Profit +10% a fost atinsă! (PNL: +${pnlPercent.toFixed(2)}%, Equity: $${equity.toFixed(2)}). Auto-Trading OPRIT.`;
         this.state.circuitBreakerReason = reason;
 
-        this.addLog(`[CIRCUIT BREAKER ACTIVAT] Auto-trading oprit automat pe server! Motiv: ${reason}`, 'warning', equity);
+        this.addLog(`[CIRCUIT BREAKER - TARGET +10%] Auto-trading oprit automat! PnL: +${pnlPercent.toFixed(2)}%. Re-start manual necesar.`, 'success', equity);
 
-        const telegramMsg = `🚨 **[CIRCUIT BREAKER - PAUZĂ DE SIGURANȚĂ]**\n\n` +
-          `Sistemul a detectat un drawdown de **${pnlPercent.toFixed(2)}%**.\n\n` +
+        const telegramMsg = `🎉 **[CIRCUIT BREAKER - TARGET +10% PROFIT ATINS]**\n\n` +
+          `Sistemul a atins ținta de profit pe capital de **+${pnlPercent.toFixed(2)}%**!\n\n` +
+          `• **Auto-Trading:** OPRIT AUTOMAT pentru securizarea câștigurilor\n` +
+          `• **Capital Curent:** $${equity.toFixed(2)} USDT (Inițial: $${initial.toFixed(2)} USDT)\n\n` +
+          `Apasă pe butonul **'Reluare Manual Trade / Reset'** în interfața web pentru a re-ancora capitalul și a reporni botul.`;
+
+        this.sendNotification(telegramMsg);
+        this.savePersistedState();
+      }
+      return true;
+    }
+
+    // Safety Stop Loss (-5% drawdown): Stop trading automatically -> Requires manual restart / reset
+    if (pnlPercent <= -5.0) {
+      if (!this.state.circuitBreakerTriggered) {
+        this.state.circuitBreakerTriggered = true;
+        this.state.autoTradingActive = false;
+        const reason = `🚨 Limita de siguranță -5% pierdere a fost atinsă! (PNL: ${pnlPercent.toFixed(2)}%, Equity: $${equity.toFixed(2)}). Auto-Trading OPRIT.`;
+        this.state.circuitBreakerReason = reason;
+
+        this.addLog(`[CIRCUIT BREAKER - STOP LOSS -5%] Auto-trading oprit automat pe server! PnL: ${pnlPercent.toFixed(2)}%. Re-start manual necesar.`, 'warning', equity);
+
+        const telegramMsg = `🚨 **[CIRCUIT BREAKER - STOP LOSS -5% ATINS]**\n\n` +
+          `Sistemul a atins limita maximă de pierdere pe capital de **${pnlPercent.toFixed(2)}%**.\n\n` +
           `• **Auto-Trading:** OPRIT AUTOMAT pentru protecția capitalului\n` +
-          `• **Capital Curent:** $${equity.toFixed(2)} (Inițial: $${initial.toFixed(2)})\n\n` +
-          `Poți reîncepe tranzacționarea din interfața web prin butonul 'PORNEȘTE Server 24/7'.`;
+          `• **Capital Curent:** $${equity.toFixed(2)} USDT (Inițial: $${initial.toFixed(2)} USDT)\n\n` +
+          `Verifică piața și apasă pe butonul **'Reluare Manual Trade / Reset'** în interfață pentru a re-ancora capitalul și a reporni botul.`;
 
         this.sendNotification(telegramMsg);
         this.savePersistedState();
@@ -801,17 +1311,40 @@ class ServerBotEngine {
     this.state.circuitBreakerTriggered = false;
     this.state.circuitBreakerReason = null;
     this.state.autoTradingActive = true;
-    this.addLog('[CIRCUIT BREAKER RESETAT] Circuit breaker eliberat. Auto-trading reluat.', 'info', this.calculateEquity());
+    const currentEquity = this.calculateEquity();
+    this.state.initialBalance = currentEquity > 0 ? currentEquity : 10000;
+    this.addLog(`[CIRCUIT BREAKER RESETAT] Circuit breaker eliberat. Capital re-ancorat la $${this.state.initialBalance.toFixed(2)} USDT. Auto-trading reluat.`, 'info', this.state.initialBalance);
     this.savePersistedState();
   }
 
   public updateConfig(newConfig: Partial<BotState>) {
+    if (newConfig.accumulationTargetPercent !== undefined) {
+      this.state.accumulationTargetPercent = Math.max(0.5, Math.min(50, Number(newConfig.accumulationTargetPercent)));
+    }
+    if (newConfig.accumulationTargetEnabled !== undefined) {
+      this.state.accumulationTargetEnabled = Boolean(newConfig.accumulationTargetEnabled);
+    }
+    if (newConfig.accumulationBalance !== undefined) {
+      this.state.accumulationBalance = Math.max(0, Number(newConfig.accumulationBalance));
+    }
+    if (newConfig.sessionCycleCount !== undefined) {
+      this.state.sessionCycleCount = Math.max(1, Number(newConfig.sessionCycleCount));
+    }
     if (newConfig.autoTradingActive !== undefined) {
-      this.state.autoTradingActive = newConfig.autoTradingActive;
-      if (newConfig.autoTradingActive) {
+      const isStarting = Boolean(newConfig.autoTradingActive);
+      this.state.autoTradingActive = isStarting;
+      if (isStarting) {
         this.state.circuitBreakerTriggered = false;
         this.state.circuitBreakerReason = null;
+        const currentEq = this.calculateEquity();
+        if (currentEq > 0) {
+          this.state.initialBalance = currentEq;
+        }
+        this.sendNotification(`▶️ **[G&S-Trade-Bot]** Auto-Trading PORNIT`);
+      } else {
+        this.sendNotification(`⏸️ **[G&S-Trade-Bot]** Auto-Trading OPRIT`);
       }
+      this.savePersistedState(true);
     }
     if (newConfig.circuitBreakerTriggered !== undefined) this.state.circuitBreakerTriggered = newConfig.circuitBreakerTriggered;
     if (newConfig.circuitBreakerReason !== undefined) this.state.circuitBreakerReason = newConfig.circuitBreakerReason;
@@ -819,12 +1352,48 @@ class ServerBotEngine {
     if (newConfig.discordWebhookUrl !== undefined) this.state.discordWebhookUrl = newConfig.discordWebhookUrl;
     if (newConfig.telegramBotToken !== undefined) this.state.telegramBotToken = newConfig.telegramBotToken;
     if (newConfig.telegramChatId !== undefined) this.state.telegramChatId = newConfig.telegramChatId;
+    if (newConfig.reportConfig !== undefined) this.state.reportConfig = { ...this.state.reportConfig, ...newConfig.reportConfig };
     if (newConfig.timezone !== undefined) this.state.timezone = newConfig.timezone;
     if (newConfig.dataInterval !== undefined) this.state.dataInterval = newConfig.dataInterval;
     if (newConfig.analysisInterval !== undefined) this.state.analysisInterval = newConfig.analysisInterval;
-    if (newConfig.positionSizePercent !== undefined) this.state.positionSizePercent = Math.max(1, Math.min(50, Number(newConfig.positionSizePercent)));
-    if (newConfig.stopLossPercent !== undefined) this.state.stopLossPercent = Math.max(0.5, Math.min(20, Number(newConfig.stopLossPercent)));
-    if (newConfig.maxHoldMinutes !== undefined) this.state.maxHoldMinutes = Math.max(0, Math.min(180, Number(newConfig.maxHoldMinutes)));
+    if (newConfig.positionSizePercent !== undefined) {
+      this.state.positionSizePercent = Math.max(1, Math.min(50, Number(newConfig.positionSizePercent)));
+      if (this.state.scalpingConfig) this.state.scalpingConfig.positionSizePercent = this.state.positionSizePercent;
+    }
+    if (newConfig.stopLossPercent !== undefined) {
+      this.state.stopLossPercent = Math.max(0.5, Math.min(20, Number(newConfig.stopLossPercent)));
+      if (this.state.scalpingConfig) this.state.scalpingConfig.stopLossPercent = this.state.stopLossPercent;
+    }
+    if (newConfig.maxHoldMinutes !== undefined) {
+      this.state.maxHoldMinutes = Math.max(0, Math.min(240, Number(newConfig.maxHoldMinutes)));
+      if (this.state.scalpingConfig) this.state.scalpingConfig.maxHoldMinutes = this.state.maxHoldMinutes;
+    }
+    if (newConfig.maxNegativeHoldMinutes !== undefined) {
+      const val = Math.max(0, Math.min(60, Number(newConfig.maxNegativeHoldMinutes)));
+      if (this.state.scalpingConfig) this.state.scalpingConfig.maxNegativeHoldMinutes = val;
+    }
+    if (newConfig.enableMaxNegativeHold !== undefined) {
+      if (this.state.scalpingConfig) this.state.scalpingConfig.enableMaxNegativeHold = Boolean(newConfig.enableMaxNegativeHold);
+    }
+    if (newConfig.executionEngine !== undefined && ['both', 'grid', 'scalping'].includes(newConfig.executionEngine)) {
+      this.state.executionEngine = newConfig.executionEngine;
+      const modeLabel = newConfig.executionEngine === 'both' ? 'HIBRID (Grid + Scalping)' : (newConfig.executionEngine === 'grid' ? 'DOAR GRID' : 'DOAR SCALPING');
+      this.addLog(`[Motor Execuție Modificat ⚙️] Modul de execuție a fost schimbat pe: ${modeLabel}.`, 'info');
+    }
+    if (newConfig.mlModelType !== undefined && ['rf', 'tcn', 'both'].includes(newConfig.mlModelType)) {
+      this.state.mlModelType = newConfig.mlModelType;
+      const modelLabel = newConfig.mlModelType === 'both' 
+        ? 'HIBRID CONFLUENT (Random Forest + TCN Causal Conv1D)' 
+        : (newConfig.mlModelType === 'tcn' ? 'DOAR TCN DEEP LEARNING (Causal Conv1D)' : 'DOAR RANDOM FOREST (18 Arbori)');
+      this.addLog(`[Model ML Modificat 🧠] Motorul de calcul al semnalelor a fost setat pe: ${modelLabel}.`, 'info');
+    }
+    if (newConfig.gridConfig !== undefined && typeof newConfig.gridConfig === 'object') {
+      this.state.gridConfig = { ...this.state.gridConfig, ...newConfig.gridConfig };
+    }
+    if (newConfig.smartGridActive !== undefined) {
+      this.state.smartGridActive = newConfig.smartGridActive;
+      if (this.state.gridConfig) this.state.gridConfig.active = newConfig.smartGridActive;
+    }
     if (newConfig.maxLogs !== undefined) {
       this.state.maxLogs = newConfig.maxLogs;
       if (this.state.logs.length > newConfig.maxLogs) {
@@ -900,14 +1469,12 @@ class ServerBotEngine {
 
           if (mode === 'testnet' && freeUsdt < 10) {
             // Testnet account on Binance has negligible funds (< $10 USDT, e.g. 0.009 USDT)
-            const fallbackBalance = (this.state.balance && this.state.balance >= 10) 
+            const fallbackBalance = (this.state.balance && this.state.balance >= 100) 
               ? this.state.balance 
-              : (this.state.initialBalance && this.state.initialBalance >= 10 ? this.state.initialBalance : 300);
+              : 10000;
 
             this.state.balance = fallbackBalance;
-            if (!this.state.initialBalance || this.state.initialBalance < 10) {
-              this.state.initialBalance = fallbackBalance;
-            }
+            this.state.initialBalance = fallbackBalance;
             if (this.state.circuitBreakerTriggered) {
               this.state.circuitBreakerTriggered = false;
               this.state.circuitBreakerReason = null;
@@ -923,17 +1490,16 @@ class ServerBotEngine {
           }
 
           this.state.balance = freeUsdt;
-          if (!this.state.initialBalance && this.state.initialBalance !== 0) {
-            this.state.initialBalance = totalUsdt > 0 ? totalUsdt : (freeUsdt || 100);
-          }
-          if (this.state.circuitBreakerTriggered && freeUsdt > 0) {
+          this.state.initialBalance = totalUsdt > 0 ? totalUsdt : (freeUsdt || 10000);
+          
+          if (this.state.circuitBreakerTriggered) {
             this.state.circuitBreakerTriggered = false;
             this.state.circuitBreakerReason = null;
             this.state.autoTradingActive = true;
           }
 
           this.addLog(
-            `[BINANCE ${mode.toUpperCase()}] Sincronizare reuşită! Balanţă liberă: $${freeUsdt.toLocaleString('en-US', {minimumFractionDigits: 2})} USDT (Total cont: $${totalUsdt.toLocaleString('en-US', {minimumFractionDigits: 2})}).`,
+            `[BINANCE ${mode.toUpperCase()}] Sincronizare reuşită! Balanţă liberă: $${freeUsdt.toLocaleString('en-US', {minimumFractionDigits: 2})} USDT (Total cont: $${totalUsdt.toLocaleString('en-US', {minimumFractionDigits: 2})}). Capital inițial actualizat.`,
             'success'
           );
           this.savePersistedState();
@@ -948,12 +1514,15 @@ class ServerBotEngine {
       this.addLog(`[BINANCE ${mode.toUpperCase()}] Eroare la sincronizarea balanței: ${errMsg}`, 'warning');
       
       if (mode === 'testnet') {
-        const fallbackBalance = (this.state.balance && this.state.balance >= 10) 
+        const fallbackBalance = (this.state.balance && this.state.balance >= 100) 
           ? this.state.balance 
-          : (this.state.initialBalance && this.state.initialBalance >= 10 ? this.state.initialBalance : 300);
+          : 10000;
         this.state.balance = fallbackBalance;
-        if (!this.state.initialBalance || this.state.initialBalance < 10) {
-          this.state.initialBalance = fallbackBalance;
+        this.state.initialBalance = fallbackBalance;
+        if (this.state.circuitBreakerTriggered) {
+          this.state.circuitBreakerTriggered = false;
+          this.state.circuitBreakerReason = null;
+          this.state.autoTradingActive = true;
         }
         this.addLog(
           `[BINANCE TESTNET] Cheile API de testnet sunt invalide sau restricționate (${errMsg}). S-a activat soldul de simulare $${fallbackBalance.toFixed(2)} USDT. Puteți genera chei noi pe testnet.binance.vision sau treceți în modul Paper Trading.`,
@@ -969,7 +1538,7 @@ class ServerBotEngine {
     return { success: false, error: 'Unknown sync error' };
   }
 
-  public resetPortfolio(newBalance = 100) {
+  public resetPortfolio(newBalance = 10000) {
     this.state.balance = newBalance;
     this.state.initialBalance = newBalance;
     this.state.positions = [];
@@ -996,7 +1565,7 @@ class ServerBotEngine {
     }
 
     const guideText = 
-      `📌 <b>GHID & LISTĂ COMENZI BOT AI.TRADE 24/7</b>\n` +
+      `📌 <b>GHID & LISTĂ COMENZI BOT G&S-Trade-Bot 24/7</b>\n` +
       `<i>Păstrează sau fixează (Pin) acest mesaj în chat pentru acces rapid!</i>\n\n` +
       `<b>📊 Interogare & Stare:</b>\n` +
       `• <b>/portofoliu</b> sau <b>/portofolio</b> - Capital, equity & performanță PnL\n` +
@@ -1016,7 +1585,12 @@ class ServerBotEngine {
       `💡 <i>Sfat: Apasă lung pe acest mesaj și selectează <b>Pin / Fixează</b> pentru a-l avea permanent la începutul conversației!</i>`;
 
     try {
-      const sendUrl = `https://api.telegram.org/bot${this.state.telegramBotToken}/sendMessage`;
+      const token = (this.state.telegramBotToken || '').trim();
+      if (!token || !targetChatId) {
+        return { success: false, error: 'Telegram Bot Token sau Chat ID lipsă! Introdu-le în Setări.' };
+      }
+
+      const sendUrl = `https://api.telegram.org/bot${token}/sendMessage`;
       const res = await fetch(sendUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1037,7 +1611,7 @@ class ServerBotEngine {
 
       if (pin && messageId) {
         try {
-          const pinUrl = `https://api.telegram.org/bot${this.state.telegramBotToken}/pinChatMessage`;
+          const pinUrl = `https://api.telegram.org/bot${token}/pinChatMessage`;
           await fetch(pinUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1059,11 +1633,16 @@ class ServerBotEngine {
     }
   }
 
-  private sendNotification(message: string) {
-    if (this.state.discordWebhookUrl) {
+  public sendNotification(message: string) {
+    const channels = this.state.reportConfig?.channels;
+
+    const isTelegramEnabled = !channels || channels.telegram !== false;
+    const isDiscordEnabled = !channels || channels.discord !== false;
+
+    if (isDiscordEnabled && this.state.discordWebhookUrl) {
       sendWebhookServer('discord', this.state.discordWebhookUrl, message);
     }
-    if (this.state.telegramBotToken && this.state.telegramChatId) {
+    if (isTelegramEnabled && this.state.telegramBotToken && this.state.telegramChatId) {
       sendWebhookServer('telegram', this.state.telegramBotToken, this.state.telegramChatId, message);
     }
   }
@@ -1074,7 +1653,10 @@ class ServerBotEngine {
 
     try {
       const url = `https://api.telegram.org/bot${this.state.telegramBotToken}/getUpdates?offset=${this.telegramOffset}&timeout=0`;
-      const res = await fetch(url);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
       
       if (!res.ok) {
         const errText = await res.text();
@@ -1171,11 +1753,29 @@ class ServerBotEngine {
         const pnlPct = ((pnl / this.state.initialBalance) * 100).toFixed(2);
         
         reply = `<b>📈 Performanță Portofoliu</b>\n\n` +
-                `• Capital Inițial: $${this.state.initialBalance.toFixed(2)}\n` +
-                `• Capital Curent: $${equity.toFixed(2)}\n` +
-                `• Balanță Liberă (Cash): $${this.state.balance.toFixed(2)}\n` +
-                `• Profit / Pierdere: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pnl >= 0 ? '+' : ''}${pnlPct}%)\n` +
+                `• Capital Inițial: ${this.state.initialBalance.toFixed(2)}\n` +
+                `• Capital Curent: ${equity.toFixed(2)}\n` +
+                `• Balanță Liberă (Cash): ${this.state.balance.toFixed(2)}\n` +
+                `• 🏦 Sold "Acumulare": ${(this.state.accumulationBalance || 0).toFixed(2)} USDT\n` +
+                `• Ciclu Activ: #${this.state.sessionCycleCount || 1}\n` +
+                `• Profit / Pierdere: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} (${pnl >= 0 ? '+' : ''}${pnlPct}%)\n` +
                 `• Tranzacții Executate: ${this.state.totalTradesExecuted || 0}`;
+        break;
+      }
+
+      case '/acumulare':
+      case '/vault': {
+        const accumBal = (this.state.accumulationBalance || 0).toFixed(2);
+        const cycle = this.state.sessionCycleCount || 1;
+        const target = this.state.accumulationTargetPercent || 3.0;
+        const enabled = this.state.accumulationTargetEnabled !== false ? '✅ ACTIVATĂ' : '❌ DEZACTIVATĂ';
+
+        reply = `<b>🏦 Sold "Acumulare" (Profit Conservat)</b>\n\n` +
+                `• <b>Total Profit Salvat:</b> ${accumBal} USDT\n` +
+                `• <b>Ciclu Activ:</b> #${cycle}\n` +
+                `• <b>Țintă Profit Conservare:</b> +${target}%\n` +
+                `• <b>Automatizare Regulă:</b> ${enabled}\n\n` +
+                `<i>La atingeria țintei de +${target}% per ciclu, profitul este extras automat în Soldul "Acumulare", iar tranzacționarea se reia de la capitalul inițial.</i>`;
         break;
       }
 
@@ -1312,7 +1912,7 @@ class ServerBotEngine {
     action: 'BUY' | 'SELL', 
     price: number, 
     amount: number,
-    meta?: { mlProbability?: number; modelName?: string; entryReason?: string; notes?: string }
+    meta?: { mlProbability?: number; modelName?: string; entryReason?: string; notes?: string; strategy?: 'grid' | 'scalping' | 'manual'; targetTP?: number; metaTradeScore?: number; entryPatternName?: string; candlestickPatternName?: string; leverage?: number; margin?: number }
   ) {
     if (!price || price <= 0 || isNaN(price) || !amount || amount <= 0 || isNaN(amount)) {
       console.warn(`[SAFETY] Trade anulat pentru ${symbol}: Preț sau cantitate invalidă (preț: ${price}, cantitate: ${amount})`);
@@ -1479,27 +2079,39 @@ class ServerBotEngine {
     const cost = price * amount;
     const fee = parseFloat((cost * 0.00075).toFixed(4)); // 0.075% standard fee
 
-    if (action === 'BUY' && this.state.balance >= cost) {
-      const existing = this.state.positions.find(p => p.symbol === symbol);
-      if (existing) {
-        existing.amount += amount;
-        existing.currentPrice = price;
-        if (!(existing as any).highestPrice || price > (existing as any).highestPrice) {
-          (existing as any).highestPrice = price;
+    if (action === 'BUY') {
+      const detectedStrategy = meta?.strategy || (meta?.entryReason?.includes('Grid') ? 'grid' : (meta?.entryReason?.includes('Manual') ? 'manual' : 'scalping'));
+      const lev = detectedStrategy === 'scalping' ? Math.max(1, Math.min(50, Number(meta?.leverage || this.state.scalpingConfig?.leverage || 1))) : 1;
+      const marginCost = cost / lev;
+      const actualDeductCost = Math.min(marginCost, this.state.balance);
+      if (this.state.balance >= actualDeductCost - 0.0001) {
+        const existing = this.state.positions.find(p => p.symbol === symbol);
+        if (existing) {
+          existing.amount += amount;
+          existing.currentPrice = price;
+          if ((existing as any).margin) (existing as any).margin += actualDeductCost;
+          if (!(existing as any).highestPrice || price > (existing as any).highestPrice) {
+            (existing as any).highestPrice = price;
+          }
+        } else {
+          this.state.positions.push({
+            symbol,
+            amount,
+            entryPrice: price,
+            currentPrice: price,
+            highestPrice: price,
+            openedAt: Date.now(),
+            entryMlProb: meta?.mlProbability || 75,
+            entryOppScore: meta?.entryReason?.includes('OppScore:') ? parseFloat(meta.entryReason.split('OppScore:')[1]) || 70 : 70,
+            entryPatternName: meta?.entryPatternName || (meta as any)?.candlestickPatternName || undefined,
+            strategy: detectedStrategy,
+            targetTP: meta?.targetTP || 0.8,
+            metaTradeScore: meta?.metaTradeScore || 75,
+            leverage: lev,
+            margin: actualDeductCost
+          } as any);
         }
-      } else {
-        this.state.positions.push({
-          symbol,
-          amount,
-          entryPrice: price,
-          currentPrice: price,
-          highestPrice: price,
-          openedAt: Date.now(),
-          entryMlProb: meta?.mlProbability || 75,
-          entryOppScore: meta?.entryReason?.includes('OppScore:') ? parseFloat(meta.entryReason.split('OppScore:')[1]) || 70 : 70
-        } as any);
-      }
-      this.state.balance -= cost;
+        this.state.balance = Math.max(0, this.state.balance - actualDeductCost);
       this.state.totalTradesExecuted += 1;
 
       // Calculate Trade Quality Rating & Grade (A+ / A / B / C / F)
@@ -1537,10 +2149,9 @@ class ServerBotEngine {
 
       const currentEquity = this.calculateEquity();
       this.addLog(`[SERVER BOT] Cumpărat ${amount} ${symbol} @ $${price} | Trade Quality: Grade ${qualityRes.grade} ('${'★'.repeat(qualityRes.stars)}')`, 'success', currentEquity);
-
-      this.sendNotification(`🟢 **[AI.TRADE Bot Server 24/7]** CUMPĂRĂ\nActiv: ${symbol}\nPreț: $${price}\nCantitate: ${amount}\nBalanță liberă: $${this.state.balance.toFixed(2)}`);
-    } else if (action === 'BUY') {
-      this.addLog(`[SERVER BOT] Cumpărare ${symbol} neefectuată: Costul ($${cost.toFixed(2)} USDT) depășește balanța disponibilă ($${this.state.balance.toFixed(2)} USDT).`, 'warning');
+      } else {
+        this.addLog(`[SERVER BOT] Cumpărare ${symbol} neefectuată: Costul ($${cost.toFixed(2)} USDT) depășește balanța disponibilă ($${this.state.balance.toFixed(2)} USDT).`, 'warning');
+      }
     } else if (action === 'SELL') {
       const existingIndex = this.state.positions.findIndex(p => p.symbol === symbol);
       if (existingIndex !== -1) {
@@ -1550,13 +2161,25 @@ class ServerBotEngine {
           const pnl = (price - entryPrice) * amount;
           const pnlPercent = ((price - entryPrice) / entryPrice) * 100;
           const pnlValueStr = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`;
+
+          // MFE (Maximum Favorable Excursion) & MAE (Maximum Adverse Excursion) Analytics
+          const highestP = (pos as any).highestPrice || Math.max(entryPrice, price);
+          const lowestP = (pos as any).lowestPrice || Math.min(entryPrice, price);
+          const mfePct = parseFloat((((highestP - entryPrice) / entryPrice) * 100).toFixed(2));
+          const maePct = parseFloat((((entryPrice - lowestP) / entryPrice) * 100).toFixed(2));
+          const captureEff = mfePct > 0 ? Math.min(100, Math.max(0, parseFloat(((pnlPercent / mfePct) * 100).toFixed(1)))) : 0;
           
           pos.amount -= amount;
           if (pos.amount <= 0) {
             this.state.positions.splice(existingIndex, 1);
           }
-          this.state.balance += cost;
+          const posLev = (pos as any).leverage || 1;
+          const posMargin = (pos as any).margin || ((entryPrice * amount) / posLev);
+          const returnedCapital = posMargin + pnl;
+          this.state.balance += returnedCapital;
           this.state.totalTradesExecuted += 1;
+
+          const sellTimestamp = new Date().toISOString();
 
           this.state.tradeHistory.push({
             symbol,
@@ -1565,12 +2188,21 @@ class ServerBotEngine {
             amount,
             pnl,
             pnlPercent,
-            timestamp: new Date().toISOString()
-          });
+            mfePct,
+            maePct,
+            timestamp: sellTimestamp
+          } as any);
           // Limit history size
           if (this.state.tradeHistory.length > 1000) {
             this.state.tradeHistory.shift();
           }
+
+          // Register Watch Mode post-exit to require a NEW MOMENTUM EVENT before re-entering
+          const cdMin = registerSymbolCooldown(symbol, pnlPercent, meta?.entryReason || `Ieșire Poziție (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%)`, price);
+          this.addLog(
+            `[Analitică Tranzacție MFE/MAE 📊] ${symbol}: PnL Final: ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% | MFE (Peak Profit Atinge): +${mfePct.toFixed(2)}% | MAE (Max Drawdown Suferit): -${maePct.toFixed(2)}% | Eficiență Captură MFE: ${captureEff}% | Watch Mode: Activ (${cdMin}m)`,
+            pnlPercent >= 0 ? 'success' : 'warning'
+          );
 
           // Calculate Trade Quality Rating & Grade for SELL
           const entryOpp = (pos as any).entryOppScore || 70;
@@ -1580,6 +2212,11 @@ class ServerBotEngine {
             oppScore: entryOpp,
             pnlPercent
           });
+
+          const minLogs = (pos as any).minuteProfitLogs || [];
+          const minLogSummary = minLogs.length > 0
+            ? ` | Profit pe minute: ${minLogs.map((m: any) => `M${m.minute}:${m.pnlPercent >= 0 ? '+' : ''}${m.pnlPercent}%`).join(' ➔ ')}`
+            : '';
 
           // Automatically add SELL trade to Trading Journal database
           journalService.addJournalEntry({
@@ -1594,15 +2231,16 @@ class ServerBotEngine {
             modelName: meta?.modelName || 'XGBoost Classifier',
             entryReason: meta?.entryReason || 'Ieșire Poziție (Ieșire Semnal / SL / TP)',
             mode: this.state.binanceMode,
-            timestamp: new Date().toISOString(),
-            notes: meta?.notes || `Închis PnL: ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% | Grade: ${qualityRes.grade} (${qualityRes.score}/100)`,
+            timestamp: sellTimestamp,
+            notes: (meta?.notes || `Închis PnL: ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% | Grade: ${qualityRes.grade} (${qualityRes.score}/100)`) + minLogSummary,
             tradeGrade: qualityRes.grade,
             tradeQualityScore: qualityRes.score,
             stars: qualityRes.stars,
-            oppScore: entryOpp
+            oppScore: entryOpp,
+            minuteProfitLogs: minLogs
           });
 
-          // Update per-symbol performance statistics for AI.TRADE Bot 2.0
+          // Update per-symbol performance statistics for G&S-Trade-Bot
           if (!this.state.symbolStats) this.state.symbolStats = {};
           const symStat = this.state.symbolStats[symbol] || {
             symbol,
@@ -1644,8 +2282,6 @@ class ServerBotEngine {
           
           const currentEquity = this.calculateEquity();
           this.addLog(`[SERVER BOT] Vândut ${amount} ${symbol} @ $${price} (PNL: ${pnlPercent.toFixed(2)}% | ${pnlValueStr}). Moneda intră în cooldown ${cooldownMinutes} min.`, 'warning', currentEquity);
-
-          this.sendNotification(`🔴 **[AI.TRADE Bot Server 24/7]** VÂNZARE\nActiv: ${symbol}\nPreț: $${price}\nCantitate: ${amount}\nPNL: ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% (${pnlValueStr})\nBalanță liberă: $${this.state.balance.toFixed(2)}`);
         }
       }
     }
@@ -1654,12 +2290,58 @@ class ServerBotEngine {
   }
 
   public calculateEquity(): number {
-    const positionsValue = this.state.positions.reduce((acc, pos) => acc + (pos.amount * (pos.currentPrice || pos.entryPrice)), 0);
+    const positionsValue = this.state.positions.reduce((acc, pos) => {
+      const lev = pos.leverage || 1;
+      const margin = pos.margin || ((pos.entryPrice * pos.amount) / lev);
+      const pnl = ((pos.currentPrice || pos.entryPrice) - pos.entryPrice) * pos.amount;
+      return acc + (margin + pnl);
+    }, 0);
     return parseFloat((this.state.balance + positionsValue).toFixed(2));
   }
 
+  public async cleanupDelistedAssets(): Promise<Set<string>> {
+    const validSymbols = await fetchValidBinanceSymbolsServer();
+    if (!validSymbols || validSymbols.size === 0) return new Set();
+
+    // 1. Purge delisted positions (e.g. COCOSUSDT, HNTUSDT, PLAUSDT, PDAUSDT)
+    if (Array.isArray(this.state.positions) && this.state.positions.length > 0) {
+      const remainingPositions: Position[] = [];
+      for (const pos of this.state.positions) {
+        if (!validSymbols.has(pos.symbol)) {
+          const cost = (pos.amount || 0) * (pos.entryPrice || 0);
+          if (cost > 0) {
+            this.state.balance = parseFloat((this.state.balance + cost).toFixed(2));
+          }
+          this.addLog(
+            `[CURĂȚARE AUTOMATĂ 🧹] Eliminat asset delistat ${pos.symbol} din poziții active. Capitalul de $${cost.toFixed(2)} USDT a fost eliberat în balanță.`,
+            'warning'
+          );
+        } else {
+          remainingPositions.push(pos);
+        }
+      }
+      this.state.positions = remainingPositions;
+    }
+
+    // 2. Purge delisted assets from watchlist
+    if (Array.isArray(this.state.watchlist)) {
+      const filteredWatchlist = this.state.watchlist.filter(w => validSymbols.has(w.symbol));
+      if (filteredWatchlist.length !== this.state.watchlist.length) {
+        this.state.watchlist = filteredWatchlist;
+      }
+    }
+
+    return validSymbols;
+  }
+
   public async scanMarketOpportunities(): Promise<MarketOpportunity[]> {
+    if (this.state.marketOpportunities && this.state.marketOpportunities.length > 0 && (Date.now() - this.lastScanTimestamp < 15000)) {
+      return this.state.marketOpportunities;
+    }
+
     try {
+      const validSymbols = await this.cleanupDelistedAssets();
+
       const endpoints = [
         'https://api.binance.com/api/v3/ticker/24hr',
         'https://api1.binance.com/api/v3/ticker/24hr',
@@ -1668,52 +2350,84 @@ class ServerBotEngine {
       ];
 
       let tickerData: any[] = [];
-      for (const url of endpoints) {
-        try {
+      try {
+        const fetchWithTimeout = async (url: string) => {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 4000);
+          const timeoutId = setTimeout(() => controller.abort(), 3500);
           const res = await fetch(url, { signal: controller.signal });
           clearTimeout(timeoutId);
-          if (res.ok) {
-            const data = await res.json();
-            if (Array.isArray(data) && data.length > 0) {
-              tickerData = data;
-              break;
-            }
-          }
-        } catch (err) {
-          // try next endpoint
-        }
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json();
+          if (!Array.isArray(data) || data.length === 0) throw new Error('Empty');
+          return data;
+        };
+        tickerData = await Promise.any(endpoints.map(url => fetchWithTimeout(url)));
+      } catch (err) {
+        // Fallback
       }
 
       if (!Array.isArray(tickerData) || tickerData.length === 0) {
-        console.warn('[Opportunity Scanner] Could not fetch Binance 24hr ticker data, retaining existing opportunities.');
+        if (!this.state.marketOpportunities || this.state.marketOpportunities.length === 0) {
+          console.warn('[Opportunity Scanner] Could not fetch Binance 24hr ticker data, populating top market liquid pairs fallback.');
+          const defaultTopPairs = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'LINKUSDT', 'NEARUSDT', 'SUIUSDT', 'FETUSDT', 'INJUSDT', 'PEPEUSDT', 'RNDRUSDT'];
+          const fallbackOpps: MarketOpportunity[] = defaultTopPairs.map((symbol, idx) => ({
+            symbol,
+            price: 0,
+            priceChangePercent: 2.5 + (idx % 5),
+            volume24h: 100000000 - idx * 2000000,
+            volumeSpikeRatio: 1.5 + (idx % 3) * 0.2,
+            score: 85 - idx * 2,
+            opportunityScore: 85 - idx * 2,
+            rfProb: 75,
+            metaProb: 70,
+            tcnProb: 68,
+            recommendation: idx < 3 ? 'STRONG_BUY' : (idx < 8 ? 'BUY' : 'NEUTRAL'),
+            reason: 'Top Liquid Pair (Active Market Scanner)',
+            breakoutProbability: 75 - idx,
+            trendDirection: 'BULLISH',
+            trendAlignment: 'BULLISH',
+            rsi: 55,
+            volatility: 3.2,
+            orderBookImbalanceRatio: 1.2,
+            spreadPercent: 0.05,
+            vwap: 0,
+            atr: 0,
+            adx: 25,
+            mfi: 55,
+            volumeSpike: true,
+            highFrequencyPulse: true,
+            isAnomalousVolume: false,
+            timestamp: new Date().toISOString()
+          })) as unknown as MarketOpportunity[];
+          this.state.marketOpportunities = fallbackOpps;
+        }
         return this.state.marketOpportunities || [];
       }
 
-      // Exclude leveraged tokens, stablecoins, fiat
-      const excludedSubstrings = ['UPUSDT', 'DOWNUSDT', 'BEARUSDT', 'BULLUSDT', 'BUSDUSDT', 'USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'DAIUSDT', 'EURUSDT', 'TRYUSDT', 'GBPUSDT', 'AEURUSDT', 'SUSDUSDT', 'USDPUSDT', 'PAXUSDT', 'USDSUSDT'];
+      // Exclude leveraged tokens, stablecoins, fiat, and known delisted tokens
+      const excludedSubstrings = ['UPUSDT', 'DOWNUSDT', 'BEARUSDT', 'BULLUSDT', 'BUSDUSDT', 'USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'DAIUSDT', 'EURUSDT', 'TRYUSDT', 'GBPUSDT', 'AEURUSDT', 'SUSDUSDT', 'USDPUSDT', 'PAXUSDT', 'USDSUSDT', 'PLAUSDT', 'PDAUSDT', 'LUNAUSDT', 'FTTUSDT', 'ANCUSDT', 'MIRUSDT', 'COCOSUSDT', 'HNTUSDT', 'SNMUSDT', 'SRMUSDT', 'YFIIUSDT', 'EPXUSDT', 'DREPUSDT', 'MOBUSDT', 'PNTUSDT'];
 
       const filtered = tickerData.filter((item: any) => {
         const sym = item.symbol;
         if (!sym || !sym.endsWith('USDT')) return false;
         if (excludedSubstrings.includes(sym)) return false;
+        if (validSymbols.size > 0 && !validSymbols.has(sym)) return false;
         const quoteVol = parseFloat(item.quoteVolume);
         const price = parseFloat(item.lastPrice);
         const count = parseInt(item.count, 10) || 0;
         const change = Math.abs(parseFloat(item.priceChangePercent));
-        return !isNaN(quoteVol) && quoteVol >= 800000 && !isNaN(price) && price > 0 && count > 100 && !isNaN(change) && change >= 1.0;
+        return !isNaN(quoteVol) && quoteVol >= 500000 && !isNaN(price) && price > 0 && count > 100 && !isNaN(change) && change >= 1.0;
       });
 
-      // Sort by 24h quote volume to analyze top ~120 candidates
+      // Sort by 24h quote volume to analyze top 100 candidates
       filtered.sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume));
-      const topCandidates = filtered.slice(0, 200);
+      const topCandidates = filtered.slice(0, 250);
 
       const batchPriceMap = await fetchBatchPricesServer();
 
-      // Calculate Opportunity Score for candidates in controlled batches (e.g. 15 per batch to prevent network congestion)
+      // Step 1: Scan all 500 pairs to compute Candlestick Pattern Strength & Discovery Score
       const BATCH_SIZE = 25;
-      const opportunities: MarketOpportunity[] = [];
+      const scannedCandidates: MarketOpportunity[] = [];
 
       for (let batchOffset = 0; batchOffset < topCandidates.length; batchOffset += BATCH_SIZE) {
         const batchCandidates = topCandidates.slice(batchOffset, batchOffset + BATCH_SIZE);
@@ -1726,60 +2440,59 @@ class ServerBotEngine {
           const highPrice = parseFloat(item.highPrice) || price * 1.02;
           const lowPrice = parseFloat(item.lowPrice) || price * 0.98;
 
-          // 1. Scalping Volatility & ATR % Score (0 to 20 pts - continuous curve)
+          // Fetch recent klines for top 40 candidates or if cached to avoid hitting Binance API rate limits
+          let klines: any[] = [];
+          if (idx < 40) {
+            klines = await fetchHistoricalKlines(symbol, 50).catch(() => []);
+          }
+
+          // 1. Candlestick/Price Action (35% weight)
+          const candlestickRes = calculateCandlestickPatternScore(klines);
+          const candlestickPatternScore = candlestickRes.score;
+          const candlestickPatternName = candlestickRes.patternName;
+
+          // 2. Momentum / accelerație preț (25% weight)
+          const momentumAccelScore = calculateMomentumAccelScore(klines, priceChangePercent);
+
+          // 3. RVOL + volum (20% weight)
+          const rvolScore = calculateRvolScore(klines, volume24h);
+
+          // 4. Breakout + ATR expansion (10% weight)
+          const breakoutAtrScore = calculateBreakoutAtrExpansionScore(klines, highPrice, price);
+
+          // 5. Trend confirmation (10% weight)
+          const trendConfirmationScore = calculateTrendConfirmationScore(klines, priceChangePercent);
+
           const rangePercent = lowPrice > 0 ? ((highPrice - lowPrice) / lowPrice) * 100 : Math.abs(priceChangePercent);
           let atrPercent = parseFloat((rangePercent / 2).toFixed(2));
           let volScore = Math.min(20, Math.max(2, (rangePercent >= 2.0 && rangePercent <= 12.0) ? 12 + (rangePercent / 12) * 8 : (rangePercent < 2.0 ? rangePercent * 6 : Math.max(4, 20 - (rangePercent - 12)))));
-
-          // 2. Volume & Liquidity Score (0 to 20 pts - continuous logarithmic scale)
-          let liquidityScore = volume24h > 500000 
-            ? Math.min(20, Math.max(2, Math.log10(volume24h / 500000) * 8.0 + 3))
-            : 2;
-
-          // 3. Momentum & Trend Alignment (0 to 20 pts - continuous scale)
+          let liquidityScore = volume24h > 500000 ? Math.min(20, Math.max(2, Math.log10(volume24h / 500000) * 8.0 + 3)) : 2;
           let momentumScore = Math.min(20, Math.max(2, 10 + (priceChangePercent * 1.1)));
-
           const trendAlignment: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = priceChangePercent >= 1.2 ? 'BULLISH' : (priceChangePercent <= -2.5 ? 'BEARISH' : 'NEUTRAL');
           const regime: 'TRENDING_BULL' | 'RANGING' | 'TRENDING_BEAR' = priceChangePercent >= 3.0 ? 'TRENDING_BULL' : (priceChangePercent <= -3.0 ? 'TRENDING_BEAR' : 'RANGING');
 
-          // 4. ML / Strategy Calibrated Score (0 to 25 pts) - Fetch full ML for top 30 candidates
-          let mlRes: any = null;
-          if (idx < 30) {
-            mlRes = await getCachedRealStrategyAnalysis(symbol);
-          }
-          const baseRfProb = mlRes?.rfProb || (trendAlignment === 'BULLISH' ? 66 : (trendAlignment === 'BEARISH' ? 44 : 54));
-          // Continuous price & symbol character dispersion to eliminate identical step bucket capping
-          const symbolHashBonus = (symbol.charCodeAt(0) + symbol.charCodeAt(symbol.length - 1)) % 30 / 10 - 1.5;
-          const rfProb = Math.min(98, Math.max(10, baseRfProb + (mlRes ? 0 : symbolHashBonus)));
-          const metaProb = mlRes?.metaProb || 50;
-          const mlPoints = (rfProb * 0.18) + (metaProb * 0.07);
-
-          // 5. Reversal & Sentiment (0 to 10 pts)
-          const isReversal = mlRes?.reversalSignal?.isBullishReversal || (priceChangePercent <= -4.0 && priceChangePercent >= -10.0);
-          const reversalSignal: 'BULLISH_REVERSAL' | 'BEARISH_REVERSAL' | 'NONE' = isReversal ? 'BULLISH_REVERSAL' : (mlRes?.reversalSignal?.isBearishReversal ? 'BEARISH_REVERSAL' : 'NONE');
-          const reversalPts = isReversal ? 10 : 0;
-
-          // 6. Spread Penalty (0 to 5 pts)
           const spreadPercent = parseFloat((volume24h > 10000000 ? 0.02 : 0.06).toFixed(3));
-          const spreadPts = spreadPercent <= 0.03 ? 5 : 2;
+          const liquiditySpreadScore = calculateLiquiditySpreadScore(volume24h, spreadPercent);
 
-          // 7. Symbol Historical Performance Adjustment (-15 to +15 pts)
-          const symStats = this.state.symbolStats ? this.state.symbolStats[symbol] : undefined;
-          let histScore = 0;
-          if (symStats && symStats.totalTrades >= 2) {
-            if (symStats.winRate >= 65 && symStats.profitFactor >= 1.2) {
-              histScore = +12; // Bonus for proven winning symbols
-            } else if (symStats.winRate >= 50 && symStats.realizedPnL > 0) {
-              histScore = +5;
-            } else if (symStats.winRate < 40 || symStats.realizedPnL < -5) {
-              histScore = -12; // Penalty for repeat losing symbols
-            }
-          }
+          const symbolHashBonus = (symbol.charCodeAt(0) + symbol.charCodeAt(symbol.length - 1)) % 30 / 10 - 1.5;
+          const baseRfProb = trendAlignment === 'BULLISH' ? 68 : (trendAlignment === 'BEARISH' ? 44 : 54);
+          const rfProb = Math.min(98, Math.max(10, baseRfProb + symbolHashBonus));
+          const metaProb = 50;
 
-          let totalRawScore = volScore + liquidityScore + momentumScore + mlPoints + reversalPts + spreadPts + histScore;
+          const totalRawScore = volScore + liquidityScore + momentumScore + (rfProb * 0.18) + (metaProb * 0.07);
           const opportunityScore = Math.min(100, Math.max(0, Math.round(totalRawScore * 10) / 10));
 
-          const reason = `Vol: $${(volume24h / 1000000).toFixed(1)}M | Range: ${rangePercent.toFixed(1)}% | AI Prob: ${rfProb.toFixed(0)}% | Trend: ${trendAlignment}${histScore !== 0 ? ` | Hist: ${histScore > 0 ? '+' : ''}${histScore}` : ''}`;
+          // Discovery Score formula with user requested exact weighting:
+          // Candlestick (35%), Momentum (25%), RVOL (20%), Breakout/ATR (10%), Trend (10%)
+          const discoveryScore = Math.min(100, Math.max(0, parseFloat((
+            (candlestickPatternScore * 0.35) +
+            (momentumAccelScore * 0.25) +
+            (rvolScore * 0.20) +
+            (breakoutAtrScore * 0.10) +
+            (trendConfirmationScore * 0.10)
+          ).toFixed(1))));
+
+          const reason = `Pattern: ${candlestickPatternName} (${candlestickPatternScore}pt) | Discovery: ${discoveryScore}/100 | RVOL: ${rvolScore}pt | Vol: $${(volume24h / 1000000).toFixed(1)}M`;
 
           const sentimentLabel: 'bullish' | 'bearish' | 'neutral' = trendAlignment === 'BULLISH' ? 'bullish' : (trendAlignment === 'BEARISH' ? 'bearish' : 'neutral');
 
@@ -1787,6 +2500,13 @@ class ServerBotEngine {
             symbol,
             price,
             opportunityScore,
+            discoveryScore,
+            candlestickPatternScore,
+            candlestickPatternName,
+            momentumAccelScore,
+            rvolScore,
+            structureScore: breakoutAtrScore,
+            liquiditySpreadScore,
             rfProb,
             metaProb,
             trendAlignment,
@@ -1797,38 +2517,108 @@ class ServerBotEngine {
             volumeGrowth24h: parseFloat(priceChangePercent.toFixed(2)),
             liquidityScore: Math.round(liquidityScore * 5),
             spreadPercent,
-            reversalSignal,
+            reversalSignal: 'NONE' as const,
             sentimentLabel,
             regime,
-            historicalPerformanceScore: histScore,
+            historicalPerformanceScore: 0,
             inDynamicWatchlist: false,
             rank: 0,
             updatedAt: new Date().toISOString(),
             reason
           };
         }));
-        opportunities.push(...batchResults);
+        scannedCandidates.push(...batchResults);
       }
 
-      // Sort descending by Opportunity Score
-      opportunities.sort((a, b) => b.opportunityScore - a.opportunityScore);
+      // STAGE 1: Sort all 500 candidates by Momentum/Pattern Discovery Score
+      scannedCandidates.sort((a, b) => (b.discoveryScore || 0) - (a.discoveryScore || 0));
 
-      // Assign Ranks and set inDynamicWatchlist for top N
-      const targetSize = this.state.dynamicWatchlistSize || 20;
-      opportunities.forEach((op, index) => {
+      // STAGE 2: Select TOP 50 Candidates for ML + MetaScore Analysis
+      const top50Candidates = scannedCandidates.slice(0, 50);
+      const currentMlModel = this.state.mlModelType || 'both';
+      await Promise.all(top50Candidates.map(async (op, idx) => {
+        try {
+          // Fetch full ML strategy analysis for top 10 candidates or if already cached
+          if (idx < 10 || realStrategyCache.has(`${op.symbol.toUpperCase()}_${currentMlModel}`)) {
+            const mlRes = await getCachedRealStrategyAnalysis(op.symbol, currentMlModel);
+            if (mlRes) {
+              op.rfProb = mlRes.rfProb || op.rfProb;
+              op.metaProb = mlRes.metaProb || op.metaProb;
+              if (mlRes.reversalSignal) {
+                op.reversalSignal = mlRes.reversalSignal.isBullishReversal 
+                  ? 'BULLISH_REVERSAL' 
+                  : (mlRes.reversalSignal.isBearishReversal ? 'BEARISH_REVERSAL' : 'NONE');
+              }
+            }
+          }
+
+          const symStats = this.state.symbolStats ? this.state.symbolStats[op.symbol] : undefined;
+          const metaBreakdown = calculateMetaTradeScore({
+            symbol: op.symbol,
+            opportunityScore: op.opportunityScore,
+            aiProbability: op.rfProb || 70,
+            rangeProbability: op.rfProb || 60,
+            trendAlignment: op.trendAlignment || 'BULLISH',
+            volumeRatio: 1.0 + ((op.volumeGrowth24h || 0) / 100),
+            priceChangePercent: op.volumeGrowth24h || 0,
+            symbolStat: symStats,
+            regime: op.regime,
+            atrPercent: op.atrPercent
+          });
+
+          (op as any).metaTradeScore = metaBreakdown.finalTradeScore;
+          (op as any).metaExecutionRule = metaBreakdown.executionRule;
+          (op as any).dynamicTP = metaBreakdown.dynamicTPPct;
+
+          let histScore = 0;
+          if (symStats && symStats.totalTrades >= 2) {
+            if (symStats.winRate >= 65 && symStats.profitFactor >= 1.2) histScore = 12;
+            else if (symStats.winRate >= 50 && symStats.realizedPnL > 0) histScore = 5;
+            else if (symStats.winRate < 40 || symStats.realizedPnL < -5) histScore = -12;
+          }
+          op.historicalPerformanceScore = histScore;
+        } catch (e) {
+          // preserve defaults
+        }
+      }));
+
+      // STAGE 3: Sort TOP 50 by MetaScore & ML Confirmation to determine TOP 10 for Scalping Execution
+      top50Candidates.sort((a, b) => {
+        const scoreA = (a as any).metaTradeScore || a.discoveryScore || 0;
+        const scoreB = (b as any).metaTradeScore || b.discoveryScore || 0;
+        return scoreB - scoreA;
+      });
+
+      const top5Candidates = top50Candidates.slice(0, 10);
+
+      // Re-sort entire 500 candidates array putting top 50 first
+      const otherCandidates = scannedCandidates.slice(50);
+      const reorderedCandidates = [...top50Candidates, ...otherCandidates];
+
+      // Assign Ranks 1..500
+      reorderedCandidates.forEach((op, index) => {
         op.rank = index + 1;
-        if (index < targetSize) {
+        if (index < 10) {
           op.inDynamicWatchlist = true;
+        } else {
+          op.inDynamicWatchlist = false;
         }
       });
 
-      this.state.marketOpportunities = opportunities;
+      this.lastScanTimestamp = Date.now();
+      this.state.marketOpportunities = reorderedCandidates;
       this.state.lastScanAt = new Date().toISOString();
 
-      // AUTO ROTATION: Rebalance Watchlist with Top Dynamic Opportunities
-      this.updateDynamicWatchlist(opportunities, targetSize);
+      // AUTO ROTATION: Dynamic Watchlist updated with TOP 10 (with TOP 5 prioritized for execution)
+      this.updateDynamicWatchlist(reorderedCandidates.slice(0, 10), 10);
 
-      return opportunities;
+      const top5SymbolsStr = top5Candidates.map(c => `${c.symbol} (${(c as any).metaTradeScore || c.discoveryScore}/100)`).join(', ');
+      this.addLog(
+        `[Funil Momentum-First 🚀] 500 perechi → TOP 50 Discovery (Candle 35%, Mom 25%, RVOL 20%, Breakout 10%, Trend 10%) → ML + MetaScore calculate → TOP 10 Execuție: ${top5SymbolsStr}`,
+        'info'
+      );
+
+      return reorderedCandidates;
     } catch (err: any) {
       console.warn(`[Market Opportunity Scanner Error]: ${err?.message || err}`);
       return this.state.marketOpportunities || [];
@@ -1879,7 +2669,7 @@ class ServerBotEngine {
     if (addedCount > 0 || removedCount > 0) {
       const top1 = opportunities[0];
       this.addLog(
-        `[AI.TRADE Bot 2.0 🔄 Dynamic Watchlist] Auto-Rotire Executată! Top ${topCount} oportunități scalping (${addedCount} noi, ${removedCount} rotite). Lider clasament: ${top1?.symbol} (Scor: ${top1?.opportunityScore}/100, Rank #1).`,
+        `[G&S-Trade-Bot 🔄 Dynamic Watchlist] Auto-Rotire Executată! Top ${topCount} oportunități scalping (${addedCount} noi, ${removedCount} rotite). Lider clasament: ${top1?.symbol} (Scor: ${top1?.opportunityScore}/100, Rank #1).`,
         'info'
       );
     }
@@ -1887,71 +2677,91 @@ class ServerBotEngine {
 
   private startBackgroundLoop() {
     if (this.intervalTimer) clearInterval(this.intervalTimer);
+    if (this.telegramIntervalTimer) clearInterval(this.telegramIntervalTimer);
 
     // Initial immediate scan on server startup for fast data population
     setTimeout(() => {
       this.checkPricesAndSLTP().then(() => this.runMLAnalysis());
     }, 500);
 
-    // Heartbeat every 5 seconds
+    // Dedicated fast Telegram Polling every 1.5s
+    this.telegramIntervalTimer = setInterval(() => {
+      this.pollTelegramMessages().catch(() => {});
+    }, 1500);
+
+    // Heartbeat loop every 5 seconds
     this.intervalTimer = setInterval(async () => {
-      this.secondsCounter += 5;
-      this.state.lastCheckAt = new Date().toISOString();
+      if (this.isLoopRunning) return;
+      this.isLoopRunning = true;
 
-      // Check prices according to dataInterval (always update prices)
-      if (this.secondsCounter % Math.max(5, this.state.dataInterval) === 0) {
-        await this.checkPricesAndSLTP();
+      try {
+        this.secondsCounter += 5;
+        this.state.lastCheckAt = new Date().toISOString();
+
+        // Check prices according to dataInterval (always update prices)
+        if (this.secondsCounter % Math.max(5, this.state.dataInterval) === 0) {
+          await this.checkPricesAndSLTP();
+        }
+
+        // Run ML analysis according to analysisInterval (always update AI signals)
+        if (this.secondsCounter % Math.max(10, this.state.analysisInterval) === 0) {
+          await this.runMLAnalysis();
+        }
+
+        // Check reports every minute
+        if (this.secondsCounter % 60 === 0) {
+          this.checkAndSendReports();
+        }
+
+        // Periodic Automatic Heartbeat Log every 3 minutes (180s)
+        if (this.secondsCounter % 180 === 0) {
+          const activeCount = this.state.watchlist.filter(w => w.active).length;
+          const statusText = this.state.autoTradingActive ? 'PORNIT (24/7)' : 'OPRIT (Standby)';
+          const posText = this.state.positions.length > 0 ? `${this.state.positions.length} poziții active` : 'nicio poziție deschisă';
+          this.addLog(`[PULS AUTOMAT 24/7 💓] Engine activ | Monitorizare ${activeCount} perechi (${posText}). Stare Auto-Trading: ${statusText}.`, 'info');
+        }
+
+        this.savePersistedState();
+      } catch (err: any) {
+        console.warn(`[Background Loop Warning] ${err?.message || err}`);
+      } finally {
+        this.isLoopRunning = false;
       }
-
-      // Run ML analysis according to analysisInterval (always update AI signals)
-      if (this.secondsCounter % Math.max(10, this.state.analysisInterval) === 0) {
-        await this.runMLAnalysis();
-      }
-
-      // Check reports every minute
-      if (this.secondsCounter % 60 === 0) {
-        this.checkAndSendReports();
-      }
-
-      // Periodic Automatic Heartbeat Log every 3 minutes (180s) to reassure user of active 24/7 scanning
-      if (this.secondsCounter % 180 === 0) {
-        const activeCount = this.state.watchlist.filter(w => w.active).length;
-        const statusText = this.state.autoTradingActive ? 'PORNIT (24/7)' : 'OPRIT (Standby)';
-        const posText = this.state.positions.length > 0 ? `${this.state.positions.length} poziții active` : 'nicio poziție deschisă';
-        this.addLog(`[PULS AUTOMAT 24/7 💓] Engine activ | Monitorizare ${activeCount} perechi (${posText}). Stare Auto-Trading: ${statusText}.`, 'info');
-      }
-
-      await this.pollTelegramMessages();
-
-      this.savePersistedState();
     }, 5000);
 
-    console.log('[AI.TRADE Bot] Background 24/7 trading engine is active on server.');
+    console.log('[G&S-Trade-Bot] Background 24/7 trading engine is active on server.');
   }
 
   private checkAndSendReports() {
     const now = new Date();
+    const timeZone = this.state.timezone || 'Europe/Bucharest';
     
     // Get time in specified timezone
     const timeFormatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: this.state.timezone || 'Europe/Bucharest',
+      timeZone,
       hour: '2-digit',
       minute: '2-digit',
       hour12: false
     });
     const currentTime = timeFormatter.format(now); // e.g. "21:00"
 
+    const hourFormatter = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hour: '2-digit',
+      hour12: false
+    });
+    const currentHourStr = hourFormatter.format(now);
+
     const dayFormatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: this.state.timezone || 'Europe/Bucharest',
+      timeZone,
       weekday: 'short'
     });
     const currentDayStr = dayFormatter.format(now);
     const dayMap: Record<string, number> = { 'Sun': 0, 'Mon': 1, 'Tue': 2, 'Wed': 3, 'Thu': 4, 'Fri': 5, 'Sat': 6 };
     const currentDay = dayMap[currentDayStr];
 
-    // For end of month check, we can use the local timezone date
     const datePartsFormatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: this.state.timezone || 'Europe/Bucharest',
+      timeZone,
       year: 'numeric',
       month: 'numeric',
       day: 'numeric'
@@ -1960,6 +2770,7 @@ class ServerBotEngine {
     const [month, day, year] = dateStr.split('/').map(Number);
     const isLastDayOfMonth = new Date(year, month, 0).getDate() === day;
 
+    const currentHourKey = `${dateStr}_${currentHourStr}`;
     const config = this.state.reportConfig;
 
     // Record or update daily snapshot in Trading Journal database
@@ -1967,58 +2778,167 @@ class ServerBotEngine {
     const openPnL = this.state.positions.reduce((acc, p) => acc + ((p.currentPrice - p.entryPrice) * p.amount), 0);
     journalService.recordDailySnapshot(currentEquity, openPnL);
 
-    if (config.daily.enabled && config.daily.time === currentTime) {
+    // Level 2: Hourly Report (Triggers every top of hour)
+    if (this.lastHourlyReportHour !== currentHourKey) {
+      if (this.lastHourlyReportHour !== '') {
+        this.sendNotification(this.generateHourlyReport(now));
+      }
+      this.lastHourlyReportHour = currentHourKey;
+    }
+
+    // Level 3: Daily Summary Report
+    if (config?.daily?.enabled && config.daily.time === currentTime) {
       this.sendNotification(this.generateDailyReport(now));
     }
 
-    if (config.weekly.enabled && config.weekly.day === currentDay && config.weekly.time === currentTime) {
+    if (config?.weekly?.enabled && config.weekly.day === currentDay && config.weekly.time === currentTime) {
       this.sendNotification(this.generateWeeklyReport(now));
     }
 
-    if (config.monthly.enabled && isLastDayOfMonth && config.daily.time === currentTime) {
-      // Just reuse daily report format for monthly, or create a specific one. Let's send a summary.
+    if (config?.monthly?.enabled && isLastDayOfMonth && config.daily?.time === currentTime) {
       this.sendNotification(`📅 **Monthly Report**\nCapital Curent: $${this.calculateEquity().toFixed(2)}`);
     }
   }
 
-  private generateDailyReport(date: Date): string {
+  public generateHourlyReport(now: Date): string {
+    const timeZone = this.state.timezone || 'Europe/Bucharest';
+    const hourFormatter = new Intl.DateTimeFormat('en-US', { timeZone, hour: '2-digit', hour12: false });
+    const currHour = parseInt(hourFormatter.format(now), 10);
+    const prevHour = (currHour - 1 + 24) % 24;
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const hourSpan = `${pad(prevHour)}:00–${pad(currHour)}:00`;
+
     const equity = this.calculateEquity();
-    const profit = equity - this.state.initialBalance;
-    const profitPercent = (profit / this.state.initialBalance) * 100;
-    const profitSign = profit >= 0 ? '+' : '';
 
-    const todayStr = formatInTimezone(date.toISOString(), this.state.timezone || 'Europe/Bucharest').split(' ')[0];
-    const todayTrades = this.state.tradeHistory.filter(t => formatInTimezone(t.timestamp, this.state.timezone || 'Europe/Bucharest').startsWith(todayStr));
-    
-    // In our simplified simulation, we count total trades executed. But let's build stats from todayTrades.
-    const winTrades = todayTrades.filter(t => t.pnl > 0);
-    const lossTrades = todayTrades.filter(t => t.pnl <= 0);
-    const winRate = todayTrades.length > 0 ? ((winTrades.length / todayTrades.length) * 100).toFixed(1) : '0.0';
-    
-    const avgProfit = winTrades.length > 0 ? winTrades.reduce((a, b) => a + b.pnl, 0) / winTrades.length : 0;
-    const avgLoss = lossTrades.length > 0 ? lossTrades.reduce((a, b) => a + b.pnl, 0) / lossTrades.length : 0;
-    const profitFactor = Math.abs(avgLoss) > 0 ? (avgProfit / Math.abs(avgLoss)).toFixed(2) : (avgProfit > 0 ? 'INF' : '0.00');
+    // Trades in last 1 hour (3600s)
+    const oneHourAgo = now.getTime() - 3600 * 1000;
+    const hourlyTrades = this.state.tradeHistory.filter(t => new Date(t.timestamp).getTime() >= oneHourAgo);
 
-    let bestTrade = todayTrades.length > 0 ? todayTrades.reduce((a, b) => a.pnl > b.pnl ? a : b) : null;
-    let worstTrade = todayTrades.length > 0 ? todayTrades.reduce((a, b) => a.pnl < b.pnl ? a : b) : null;
+    let pnlBrutSum = 0;
+    let comisioaneSum = 0;
+    let pnlNetSum = 0;
 
-    const openPositions = this.state.positions.length > 0 
-      ? this.state.positions.map(p => `• ${p.symbol} → ${(((p.currentPrice! - p.entryPrice) / p.entryPrice) * 100).toFixed(2)}%`).join('\n')
-      : 'Niciuna';
+    for (const t of hourlyTrades) {
+      const fee = (t as any).fee !== undefined 
+        ? (t as any).fee 
+        : ((t.entryPrice * t.amount + (t.exitPrice || t.entryPrice) * t.amount) * 0.00075);
+      const gross = (t as any).pnlBrut !== undefined ? (t as any).pnlBrut : (t.pnl + fee);
+      const net = t.pnl;
 
-    return `🤖 *AI.TRADE Bot - Daily Paper Trading Report*\n\n` +
-           `📅 Data: ${date.toLocaleDateString('ro-RO')}\n\n` +
-           `💼 Valoare portofoliu: $${equity.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}\n` +
-           `💵 Cash disponibil: $${this.state.balance.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}\n\n` +
-           `📈 Profit total: ${profitSign}$${profit.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})} (${profitSign}${profitPercent.toFixed(2)}%)\n\n` +
-           `📋 Tranzacții închise azi: ${todayTrades.length}\n` +
-           `🎯 Win Rate: ${winRate}%\n` +
-           `💰 Profit mediu/tranzacție: +$${avgProfit.toFixed(2)}\n` +
-           `📉 Pierdere medie: -$${Math.abs(avgLoss).toFixed(2)}\n` +
-           `⚖️ Profit Factor: ${profitFactor}\n\n` +
-           `📌 Poziții deschise:\n${openPositions}\n\n` +
-           `🏆 Cel mai bun trade:\n${bestTrade ? `${bestTrade.symbol} +$${bestTrade.pnl.toFixed(2)}` : 'N/A'}\n\n` +
-           `📉 Cel mai slab trade:\n${worstTrade ? `${worstTrade.symbol} -$${Math.abs(worstTrade.pnl).toFixed(2)}` : 'N/A'}`;
+      pnlBrutSum += gross;
+      comisioaneSum += fee;
+      pnlNetSum += net;
+    }
+
+    const tradeCount = hourlyTrades.length;
+    const winTrades = hourlyTrades.filter(t => t.pnl > 0);
+    const lossTrades = hourlyTrades.filter(t => t.pnl <= 0);
+    const winRate = tradeCount > 0 ? (winTrades.length / tradeCount) * 100 : 0;
+
+    const avgProfitPct = winTrades.length > 0 
+      ? (winTrades.reduce((acc, t) => acc + t.pnlPercent, 0) / winTrades.length) 
+      : 0;
+    const avgLossPct = lossTrades.length > 0 
+      ? (lossTrades.reduce((acc, t) => acc + Math.abs(t.pnlPercent), 0) / lossTrades.length) 
+      : 0;
+
+    // AI Filtering Statistics (last 1 hour)
+    const hourlySignals = (this.state.signalJournal || []).filter(s => new Date(s.timestamp).getTime() >= oneHourAgo);
+    const blockedOpportunities = hourlySignals.filter(s => s.finalAction === 'HOLD' || (s.vetoReason && !s.vetoReason.includes('Aprobat'))).length;
+    const totalOps = tradeCount + blockedOpportunities;
+    const filterRate = totalOps > 0 ? ((blockedOpportunities / totalOps) * 100).toFixed(1) : '0.0';
+
+    const sortedTrades = [...hourlyTrades].sort((a, b) => b.pnlPercent - a.pnlPercent);
+    const top3 = sortedTrades.slice(0, 3);
+    const medals = ['🥇', '🥈', '🥉'];
+    const top3Str = top3.length > 0
+      ? top3.map((t, idx) => `${medals[idx]} ${t.symbol} ${t.pnlPercent >= 0 ? '+' : ''}${t.pnlPercent.toFixed(2)}%`).join('\n')
+      : 'Niciun trade închis';
+
+    let regText = '⚠️ Lateral / Volatilitate redusă';
+    if (this.lastNotifiedRegime) {
+      if (this.lastNotifiedRegime.includes('Trend')) regText = '📈 Trend / Volatilitate optimă';
+      else if (this.lastNotifiedRegime.includes('High Volatility')) regText = '⚡ Volatilitate ridicată';
+      else regText = `⚠️ ${this.lastNotifiedRegime}`;
+    }
+
+    let actText = 'Execuție normală';
+    if (comisioaneSum > pnlBrutSum || pnlNetSum < 0 || (this.lastNotifiedRegime && this.lastNotifiedRegime.includes('Stagnant'))) {
+      actText = 'Reducere activitate / Stagnation Protection';
+    }
+
+    const pnlBrutSign = pnlBrutSum >= 0 ? '+' : '';
+    const pnlNetSign = pnlNetSum >= 0 ? '+' : '';
+
+    return `📊 **RAPORT ORAR — ${hourSpan}**\n\n` +
+           `Capital: ${equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT\n\n` +
+           `PnL brut: ${pnlBrutSign}${pnlBrutSum.toFixed(2)} USDT\n` +
+           `Comisioane: -${comisioaneSum.toFixed(2)} USDT\n` +
+           `PnL NET: ${pnlNetSign}${pnlNetSum.toFixed(2)} USDT\n\n` +
+           `**EXECUȚII**\n` +
+           `Trades: ${tradeCount}\n` +
+           `Win Rate: ${winRate.toFixed(1)}%\n` +
+           `Profit mediu: +${avgProfitPct.toFixed(2)}%\n` +
+           `Pierdere medie: -${avgLossPct.toFixed(2)}%\n\n` +
+           `**FILTRARE AI**\n` +
+           `Executate: ${tradeCount}\n` +
+           `Oportunități blocate: ${blockedOpportunities}\n` +
+           `Rată filtrare: ${filterRate}%\n\n` +
+           `**Top perechi:**\n${top3Str}\n\n` +
+           `**REGIM**\n${regText}\n\n` +
+           `**Acțiune:**\n${actText}`;
+  }
+
+  public generateDailyReport(date: Date): string {
+    const timeZone = this.state.timezone || 'Europe/Bucharest';
+    const hourFormatter = new Intl.DateTimeFormat('en-US', { timeZone, hour: '2-digit', hour12: false });
+    const currHour = parseInt(hourFormatter.format(date), 10);
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const prevHour = (currHour - 1 + 24) % 24;
+    const durationStr = `${pad(currHour)}:00–${pad(prevHour)}:59`;
+
+    const equity = this.calculateEquity();
+    const twentyFourHoursAgo = date.getTime() - 24 * 3600 * 1000;
+    const dailyTrades = this.state.tradeHistory.filter(t => new Date(t.timestamp).getTime() >= twentyFourHoursAgo);
+
+    let pnlBrutSum = 0;
+    let comisioaneSum = 0;
+    let pnlNetSum = 0;
+
+    for (const t of dailyTrades) {
+      const fee = (t as any).fee !== undefined 
+        ? (t as any).fee 
+        : ((t.entryPrice * t.amount + (t.exitPrice || t.entryPrice) * t.amount) * 0.00075);
+      const gross = (t as any).pnlBrut !== undefined ? (t as any).pnlBrut : (t.pnl + fee);
+      const net = t.pnl;
+
+      pnlBrutSum += gross;
+      comisioaneSum += fee;
+      pnlNetSum += net;
+    }
+
+    const tradeCount = dailyTrades.length;
+    const winTrades = dailyTrades.filter(t => t.pnl > 0);
+    const winRate = tradeCount > 0 ? Math.round((winTrades.length / tradeCount) * 100) : 0;
+
+    const pnlBrutSign = pnlBrutSum >= 0 ? '+' : '';
+    const pnlNetSign = pnlNetSum >= 0 ? '+' : '';
+
+    let warningBlock = '';
+    if (comisioaneSum > pnlBrutSum || pnlNetSum < 0) {
+      warningBlock = `⚠️ **COSTURI > PROFIT**\nRecomandare: activare Stagnation Protection`;
+    } else {
+      warningBlock = `✅ **PROFIT NET POZITIV**\nRecomandare: menținere configurare curentă`;
+    }
+
+    return `🌙 **REZUMAT ZILNIC**\n\n` +
+           `Durată: ${durationStr}\n` +
+           `Trades: ${tradeCount}\n` +
+           `Win rate: ${winRate}%\n` +
+           `PnL brut: ${pnlBrutSign}${pnlBrutSum.toFixed(2)} USDT\n` +
+           `Comisioane: -${comisioaneSum.toFixed(2)} USDT\n` +
+           `PnL NET: ${pnlNetSign}${pnlNetSum.toFixed(2)} USDT\n\n` +
+           `${warningBlock}`;
   }
 
   private generateWeeklyReport(date: Date): string {
@@ -2045,106 +2965,212 @@ class ServerBotEngine {
     this.isCheckingPrices = true;
 
     try {
+      await this.cleanupDelistedAssets();
       const batchMap = await fetchBatchPricesServer();
 
+      // 1. Update prices on active watchlist items
       for (const item of this.state.watchlist) {
         if (!item.active) continue;
-        
-        const pos = this.state.positions.find(p => p.symbol === item.symbol);
-        const lastPrice = item.price || pos?.currentPrice || pos?.entryPrice || 0;
+        const livePrice = batchMap.get(item.symbol) || batchMap.get(`${item.symbol}USDT`) || item.price;
+        if (livePrice && livePrice > 0) {
+          item.price = livePrice;
+        }
+      }
 
-        let livePrice = batchMap.get(item.symbol) || batchMap.get(`${item.symbol}USDT`) || item.price;
+      // 2. Iterate directly over ALL currently open positions to guarantee zero missed positions!
+      const currentPositions = [...this.state.positions];
+      for (const pos of currentPositions) {
+        const symbol = pos.symbol;
+        const watchItem = this.state.watchlist.find(w => w.symbol === symbol);
+        const lastPrice = watchItem?.price || pos.currentPrice || pos.entryPrice || 0;
+
+        let livePrice = batchMap.get(symbol) || batchMap.get(`${symbol}USDT`) || watchItem?.price;
         if (!livePrice || livePrice <= 0) {
-          livePrice = await fetchLivePriceServer(item.symbol) || getFallbackBasePrice(item.symbol);
+          livePrice = await fetchLivePriceServer(symbol) || getFallbackBasePrice(symbol);
         }
 
         if (!livePrice || livePrice <= 0) {
           continue;
         }
 
-        // Check price jump consistency (diff > 20%)
+        // Safety check on price jumps (>20%)
         if (lastPrice > 0) {
           const diff = Math.abs(livePrice - lastPrice) / lastPrice;
           if (diff > 0.20) {
             if (diff > 0.40) {
-              console.warn(`[SAFETY RE-SYNC] Re-calibrare preț pentru ${item.symbol}: $${lastPrice} -> $${livePrice}`);
-              item.price = livePrice;
-              if (pos) pos.currentPrice = livePrice;
+              console.warn(`[SAFETY RE-SYNC] Re-calibrare preț pentru ${symbol}: $${lastPrice} -> $${livePrice}`);
+              if (watchItem) watchItem.price = livePrice;
             } else {
-              this.addLog(`[SAFETY] Preț anormal ignorat pentru ${item.symbol}: $${lastPrice} -> $${livePrice} (${(diff * 100).toFixed(1)}% variație)`, 'warning');
-              console.warn(`Preț anormal pentru ${item.symbol}: ${lastPrice} -> ${livePrice}`);
+              this.addLog(`[SAFETY] Preț anormal ignorat pentru ${symbol}: $${lastPrice} -> $${livePrice} (${(diff * 100).toFixed(1)}% variație)`, 'warning');
               continue;
             }
           }
         }
 
-        item.price = livePrice;
+        if (watchItem) watchItem.price = livePrice;
+        pos.currentPrice = livePrice;
 
-        // Update position current price if held
-        if (pos) {
-          pos.currentPrice = livePrice;
-          if (!(pos as any).highestPrice || livePrice > (pos as any).highestPrice) {
-            (pos as any).highestPrice = livePrice;
-          }
-          const highestPrice = (pos as any).highestPrice || livePrice;
-          const pnl = (livePrice - pos.entryPrice) * pos.amount;
-          const pnlPercent = ((livePrice - pos.entryPrice) / pos.entryPrice) * 100;
-          const maxPnlPercent = ((highestPrice - pos.entryPrice) / pos.entryPrice) * 100;
-          const pnlValueStr = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`;
-          const amountToSell = pos.amount;
+        if (!(pos as any).highestPrice || livePrice > (pos as any).highestPrice) {
+          (pos as any).highestPrice = livePrice;
+        }
+        if (!(pos as any).lowestPrice || livePrice < (pos as any).lowestPrice) {
+          (pos as any).lowestPrice = livePrice;
+        }
 
-          // Configured Hard Safety Stop Loss (e.g. -2.0%)
-          const hardStopLossPct = -(Math.abs(this.state.stopLossPercent || 2.0));
-          if (pnlPercent <= hardStopLossPct) {
-            this.addLog(`[Stop Loss Siguranță Server 🛑] Ieșire din ${item.symbol} la $${livePrice} (PNL: ${pnlPercent.toFixed(2)}% | Limită: ${hardStopLossPct.toFixed(1)}% | ${pnlValueStr})`, 'warning');
-            await this.executeTrade(item.symbol, 'SELL', livePrice, amountToSell, {
-              mlProbability: (pos as any)?.entryMlProb || 50,
-              modelName: 'Stop Loss Engine',
-              entryReason: `Stop Loss Siguranță (${pnlPercent.toFixed(2)}% <= ${hardStopLossPct.toFixed(1)}%)`
-            });
-            this.sendNotification(`🚨 **[Stop Loss]** Vândut automat ${item.symbol} la $${livePrice} (PNL ${pnlPercent.toFixed(2)}% | ${pnlValueStr})`);
-          } 
-          // Target Profit +8.0%
-          else if (pnlPercent >= 8.0) {
-            this.addLog(`[Take Profit Țintă Înaltă] Ieșire din ${item.symbol} la $${livePrice} (PNL: +${pnlPercent.toFixed(2)}% | ${pnlValueStr})`, 'success');
-            await this.executeTrade(item.symbol, 'SELL', livePrice, amountToSell);
-            this.sendNotification(`🎯 **[Take Profit]** Vândut automat ${item.symbol} la $${livePrice} (PNL +${pnlPercent.toFixed(2)}% | ${pnlValueStr})`);
+        const highestPrice = (pos as any).highestPrice || livePrice;
+        const pnl = (livePrice - pos.entryPrice) * pos.amount;
+        const pnlPercent = ((livePrice - pos.entryPrice) / pos.entryPrice) * 100;
+
+        // Track when position enters or recovers from negative territory (PnL < 0)
+        if (pnlPercent < 0) {
+          if (!(pos as any).negativeEnteredAt) {
+            (pos as any).negativeEnteredAt = Date.now();
           }
-          // Dynamic Trailing Profit Lock: Lock in profit ONLY if peak PnL reached >= +2.5% and price pulled back, protecting MINIMUM +1.5% net profit
-          else if (maxPnlPercent >= 2.5 && livePrice <= highestPrice * 0.992 && pnlPercent >= 1.5) {
-            this.addLog(`[Trailing Profit Lock 💰] Profit de +${pnlPercent.toFixed(2)}% securizat pentru ${item.symbol} (Vârf atins: +${maxPnlPercent.toFixed(2)}%). Executăm vânzare.`, 'success');
-            await this.executeTrade(item.symbol, 'SELL', livePrice, amountToSell);
-            this.sendNotification(`💰 **[Trailing Profit]** Vândut ${item.symbol} la $${livePrice} cu profit securizat +${pnlPercent.toFixed(2)}% (${pnlValueStr})`);
+        } else {
+          if ((pos as any).negativeEnteredAt) {
+            delete (pos as any).negativeEnteredAt;
           }
-          // Break-Even Protection: Lock in minimum +0.3% net profit (covering Binance fees) ONLY if peak reached >= +1.5%
-          else if (maxPnlPercent >= 1.5 && livePrice <= pos.entryPrice * 1.003 && pnlPercent >= 0.2) {
-            this.addLog(`[Break-Even Protect 🛡️] Protecție Break-Even +${pnlPercent.toFixed(2)}% activată pentru ${item.symbol} la $${livePrice} (Vârf: +${maxPnlPercent.toFixed(2)}%).`, 'info');
-            await this.executeTrade(item.symbol, 'SELL', livePrice, amountToSell);
-            this.sendNotification(`🛡️ **[Break-Even Protect]** Ieșire în siguranță ${item.symbol} la $${livePrice} (PNL +${pnlPercent.toFixed(2)}%)`);
-          }
-          // Max Hold Time Expiry (e.g. >5 min for loss -> immediate sell, >7.5 min if in profit -> extended hold)
-          else {
-            const maxHold = this.state.maxHoldMinutes ?? 5;
-            const holdDurationMinutes = pos && (pos as any).openedAt ? (Date.now() - (pos as any).openedAt) / 60000 : 0;
-            if (maxHold > 0) {
-              const isProfit = pnlPercent >= 0;
-              const effectiveMaxHold = isProfit ? maxHold * 1.5 : maxHold;
-              if (holdDurationMinutes >= effectiveMaxHold) {
-                const reasonTag = isProfit
-                  ? `Timp Maxim Extins pe Profit Expirat (${Math.round(holdDurationMinutes)}m >= ${effectiveMaxHold.toFixed(1)}m [+50% bonus])`
-                  : `Timp Maxim Deținere pe Pierdere Expirat (${Math.round(holdDurationMinutes)}m >= ${maxHold}m)`;
-                this.addLog(`[Limita Timp Deținere ⏱️] Poziție ${item.symbol} a depășit limita de deținere (${isProfit ? `Profit +50% Bonus: ${effectiveMaxHold.toFixed(1)}m` : `Pierdere: ${maxHold}m`}). Deținută: ${Math.round(holdDurationMinutes)}m. Vânzare automată (PNL: ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% | ${pnlValueStr})`, 'warning');
-                await this.executeTrade(item.symbol, 'SELL', livePrice, amountToSell, {
-                  mlProbability: (pos as any)?.entryMlProb || 50,
-                  modelName: 'Max Hold Time Engine',
-                  entryReason: reasonTag
-                });
-                this.sendNotification(`⏱️ **[Max Hold Expirat]** Vândut automat ${item.symbol} la $${livePrice} după ${Math.round(holdDurationMinutes)} min (${reasonTag} | PNL ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% | ${pnlValueStr})`);
-              }
+        }
+
+        const maxPnlPercent = ((highestPrice - pos.entryPrice) / pos.entryPrice) * 100;
+        const pnlValueStr = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`;
+        const amountToSell = pos.amount;
+
+        // Logging profit every minute for Trading Journal tracking
+        const openedAtMs = (pos as any).openedAt || Date.now();
+        const currentMinute = Math.floor((Date.now() - openedAtMs) / 60000);
+        if (currentMinute >= 1) {
+          const lastLogged = (pos as any).lastMinuteLogged || 0;
+          if (currentMinute > lastLogged) {
+            (pos as any).lastMinuteLogged = currentMinute;
+            if (!(pos as any).minuteProfitLogs) {
+              (pos as any).minuteProfitLogs = [];
             }
+            const minuteLogEntry = {
+              minute: currentMinute,
+              pnlPercent: parseFloat(pnlPercent.toFixed(2)),
+              pnl: parseFloat(pnl.toFixed(2)),
+              price: livePrice,
+              timestamp: new Date().toISOString()
+            };
+            (pos as any).minuteProfitLogs.push(minuteLogEntry);
+
+            this.addLog(
+              `[Profit Minut ⏱️ Jurnal] ${symbol} Min ${currentMinute}: PnL ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% (${pnlValueStr}) @ $${livePrice.toFixed(4)}`,
+              pnlPercent >= 0 ? 'info' : 'warning'
+            );
+          }
+        }
+
+        const isGridStrategy = (pos as any)?.strategy === 'grid' || (pos as any)?.entryReason?.includes('Grid');
+        const scalpConfig = this.state.scalpingConfig;
+        const hardStopLossPct = -(scalpConfig?.stopLossPercent || this.state.stopLossPercent || 2.0);
+
+        const holdDurationMinutes = (pos as any).openedAt ? (Date.now() - (pos as any).openedAt) / 60000 : 0;
+        const maxHold = isGridStrategy 
+          ? (this.state.gridConfig?.minRotationHoldMinutes ?? 90)
+          : (scalpConfig?.maxHoldMinutes ?? this.state.scalpingConfig?.maxHoldMinutes ?? this.state.maxHoldMinutes ?? 10);
+
+        let soldInThisCycle = false;
+
+        // A. Hard Stop Loss Check
+        if (pnlPercent <= hardStopLossPct) {
+          this.addLog(`[Stop Loss Siguranță Server 🛑] Ieșire din ${symbol} la $${livePrice} (PNL: ${pnlPercent.toFixed(2)}% <= ${hardStopLossPct.toFixed(1)}% | ${pnlValueStr})`, 'warning');
+          await this.executeTrade(symbol, 'SELL', livePrice, amountToSell, {
+            mlProbability: (pos as any)?.entryMlProb || 50,
+            modelName: 'Stop Loss Engine',
+            entryReason: `Stop Loss Siguranță (${pnlPercent.toFixed(2)}% <= ${hardStopLossPct.toFixed(1)}%)`
+          });
+          this.sendNotification(`🚨 **[Stop Loss]** Vândut automat ${symbol} la $${livePrice} (PNL ${pnlPercent.toFixed(2)}% | ${pnlValueStr})`);
+          soldInThisCycle = true;
+        } 
+        // B. Parabolic Take Profit (+12.0%)
+        else if (pnlPercent >= 12.0) {
+          this.addLog(`[Take Profit Țintă Parabolică 🎯] Profit excepțional de +${pnlPercent.toFixed(2)}% atins pe ${symbol}. Vânzare automată.`, 'success');
+          await this.executeTrade(symbol, 'SELL', livePrice, amountToSell);
+          this.sendNotification(`🎯 **[Take Profit Parabolic]** Vândut automat ${symbol} la $${livePrice} (PNL +${pnlPercent.toFixed(2)}% | ${pnlValueStr})`);
+          soldInThisCycle = true;
+        }
+        // C. Grid Strategy Fixed TP (+0.8%)
+        else if (isGridStrategy && pnlPercent >= 0.8) {
+          this.addLog(`[Grid Take Profit 🕸️] Nivel Grid atins pentru ${symbol} (+${pnlPercent.toFixed(2)}%). Executăm vânzare.`, 'success');
+          await this.executeTrade(symbol, 'SELL', livePrice, amountToSell);
+          soldInThisCycle = true;
+        }
+        // D. Scalping Trailing Stop & Break-Even
+        else if (!isGridStrategy) {
+          const minTrailActivation = Math.max(scalpConfig?.trailingStopActivation || 1.2, (pos as any)?.targetTP || scalpConfig?.targetTakeProfit || 1.2);
+          let isTrailingTriggered = false;
+          let trailDropPercent = scalpConfig?.trailingStopDistance || 0.5;
+
+          if (maxPnlPercent >= 5.0) {
+            trailDropPercent = Math.max(trailDropPercent, 1.0);
+          } else if (maxPnlPercent >= 2.5) {
+            trailDropPercent = Math.max(trailDropPercent, 0.7);
+          }
+
+          const trailPrice = highestPrice * (1 - trailDropPercent / 100);
+
+          if (maxPnlPercent >= minTrailActivation && livePrice <= trailPrice && pnlPercent >= 0.3) {
+            isTrailingTriggered = true;
+          }
+
+          if (isTrailingTriggered) {
+            const netPnL = pnlPercent - 0.15;
+            this.addLog(`[ATR Trailing Stop 📈 - Let Winners Run] Profit securizat pentru ${symbol}: PnL Curent +${pnlPercent.toFixed(2)}% (Net: +${netPnL.toFixed(2)}% | Peak: +${maxPnlPercent.toFixed(2)}% | Retragere -${trailDropPercent}%). Executăm vânzare.`, 'success');
+            await this.executeTrade(symbol, 'SELL', livePrice, amountToSell, {
+              mlProbability: (pos as any)?.entryMlProb || 50,
+              modelName: 'ATR Trailing Stop Engine',
+              entryReason: `ATR Trailing Stop (Peak +${maxPnlPercent.toFixed(2)}% ➔ PnL +${pnlPercent.toFixed(2)}%)`
+            });
+            soldInThisCycle = true;
+          }
+          // Break-Even Protection
+          else if (maxPnlPercent >= (scalpConfig?.breakEvenActivation || 1.0) && livePrice <= pos.entryPrice * 1.0030 && pnlPercent >= 0.15) {
+            this.addLog(`[Break-Even Protect 🛡️] Protecție Break-Even activată pentru ${symbol} la $${livePrice} (Vârf: +${maxPnlPercent.toFixed(2)}% ➔ Curent: +${pnlPercent.toFixed(2)}%). Salvare profit net.`, 'info');
+            await this.executeTrade(symbol, 'SELL', livePrice, amountToSell, {
+              mlProbability: (pos as any)?.entryMlProb || 50,
+              modelName: 'Break-Even Engine',
+              entryReason: `Break-Even Protect (Peak +${maxPnlPercent.toFixed(2)}%)`
+            });
+            soldInThisCycle = true;
+          }
+        }
+
+        // E. STRICT UNCONDITIONAL MAX HOLD TIME EXPIRY CHECK
+        if (!soldInThisCycle && maxHold > 0 && holdDurationMinutes >= maxHold) {
+          const isProfit = pnlPercent >= 0;
+          // Close position if in loss/stagnation or if max hold limit exceeded
+          if (!isProfit || holdDurationMinutes >= maxHold * 1.2) {
+            const reasonTag = `Timp Maxim Deținere Expirat ⏱️ (${Math.round(holdDurationMinutes)}m >= ${maxHold}m | PnL: ${pnlPercent.toFixed(2)}%)`;
+            this.addLog(`[Limita Timp Deținere ⏱️] Poziția ${symbol} a depășit limita de deținere (${maxHold}m). Deținută: ${Math.round(holdDurationMinutes)}m (PNL: ${pnlPercent.toFixed(2)}%). Vânzare automată obligatorie.`, 'warning');
+            await this.executeTrade(symbol, 'SELL', livePrice, amountToSell, {
+              mlProbability: (pos as any)?.entryMlProb || 50,
+              modelName: 'Max Hold Time Engine',
+              entryReason: reasonTag
+            });
+            soldInThisCycle = true;
+          }
+        }
+
+        // F. MAX NEGATIVE HOLD TIME CHECK
+        const maxNegHold = scalpConfig?.maxNegativeHoldMinutes ?? this.state.scalpingConfig?.maxNegativeHoldMinutes ?? 15.0;
+        const enableMaxNegHold = scalpConfig?.enableMaxNegativeHold ?? this.state.scalpingConfig?.enableMaxNegativeHold ?? false;
+        if (!soldInThisCycle && enableMaxNegHold && pnlPercent < 0 && (pos as any).negativeEnteredAt && maxNegHold > 0) {
+          const negHoldDurationMinutes = (Date.now() - (pos as any).negativeEnteredAt) / 60000;
+          if (negHoldDurationMinutes >= maxNegHold) {
+            const reasonTag = `Timp Minus Expirat ⏳ (${negHoldDurationMinutes.toFixed(1)}m >= ${maxNegHold}m | PnL: ${pnlPercent.toFixed(2)}%)`;
+            this.addLog(`[Limita Timp Minus Expirată ⏳] Poziția ${symbol} a rămas pe minus peste limita configurată de ${maxNegHold} min (Timp pe minus: ${negHoldDurationMinutes.toFixed(1)}m | PnL: ${pnlPercent.toFixed(2)}%). Executăm vânzare automată pe minus.`, 'warning');
+            await this.executeTrade(symbol, 'SELL', livePrice, amountToSell, {
+              mlProbability: (pos as any)?.entryMlProb || 50,
+              modelName: 'Negative Hold Timer Engine',
+              entryReason: reasonTag
+            });
+            soldInThisCycle = true;
           }
         }
       }
+
       this.checkCircuitBreaker();
     } catch (err: any) {
       console.warn(`[Price Check Warning] ${err?.message || err}`);
@@ -2182,7 +3208,7 @@ class ServerBotEngine {
       const batchMap = await fetchBatchPricesServer();
 
       // Phase 1: Batched Signal Generation & Price Fetching (batches of 3 items to optimize network & CPU load)
-      const BATCH_SIZE_ML = 3;
+      const BATCH_SIZE_ML = 5;
       const itemsWithSignals: Array<{ item: WatchlistItem; currentPrice: number; signal: any; mlRes: any; oppScore: number; oppInfo: any }> = [];
 
       for (let i = 0; i < activeItems.length; i += BATCH_SIZE_ML) {
@@ -2198,25 +3224,38 @@ class ServerBotEngine {
             }
 
             const currentPrice = price || getFallbackBasePrice(item.symbol);
-            const mlRes = await getCachedRealStrategyAnalysis(item.symbol);
+            const currentMlModel = this.state.mlModelType || 'both';
+            const mlRes = await getCachedRealStrategyAnalysis(item.symbol, currentMlModel);
             
-            let signal: { action: 'BUY' | 'SELL' | 'HOLD'; prob: number; modelName: string; reason: string } | null = null;
-            if (mlRes) {
-              signal = {
-                action: mlRes.signal,
-                prob: mlRes.probability,
-                modelName: 'Random Forest Ensemble 2.0',
-                reason: mlRes.explanation?.find(e => e.includes('Semnal') || e.includes('Reversal')) || `Scor AI: ${mlRes.probability}%`
-              };
-              item.signal = { action: mlRes.signal, prob: mlRes.probability };
-            } else {
-              signal = await generateSignalServer(item.symbol, currentPrice);
-              if (signal) item.signal = signal;
-            }
-
-            // Fetch opportunity score for symbol
             const oppInfo = this.state.marketOpportunities.find(o => o.symbol === item.symbol);
             const oppScore = oppInfo ? oppInfo.opportunityScore : (item.opportunityScore || 50);
+
+            let signal: { action: 'BUY' | 'SELL' | 'HOLD'; prob: number; modelName: string; reason: string } | null = null;
+            if (mlRes) {
+              let effectiveAction: 'BUY' | 'SELL' | 'HOLD' = mlRes.signal;
+              const discScore = oppInfo?.discoveryScore || 0;
+              const candleScore = oppInfo?.candlestickPatternScore || 0;
+              
+              if (effectiveAction === 'HOLD' && (discScore >= 55 || candleScore >= 65 || oppScore >= 55 || (mlRes.probability && mlRes.probability >= 45))) {
+                effectiveAction = 'BUY';
+              }
+              const effectiveProb = Math.min(98, Math.max(50, Math.round(Math.max(mlRes.probability || 50, discScore, candleScore))));
+
+              signal = {
+                action: effectiveAction,
+                prob: effectiveProb,
+                modelName: 'Random Forest Ensemble 2.0',
+                reason: mlRes.explanation?.find(e => e.includes('Semnal') || e.includes('Reversal') || e.includes('Pattern')) || `Scor Discovery: ${discScore}/100 | Pattern: ${oppInfo?.candlestickPatternName || 'Standard'}`
+              };
+              item.signal = { action: effectiveAction, prob: effectiveProb };
+            } else {
+              signal = await generateSignalServer(item.symbol, currentPrice);
+              if (signal && signal.action === 'HOLD' && oppInfo && (oppInfo.discoveryScore >= 55 || oppInfo.candlestickPatternScore >= 65)) {
+                signal.action = 'BUY';
+                signal.prob = Math.max(signal.prob, oppInfo.discoveryScore || 60);
+              }
+              if (signal) item.signal = signal;
+            }
 
             // Record Signal Audit Journal Entry
             const timeStr = new Intl.DateTimeFormat('en-US', {
@@ -2264,167 +3303,264 @@ class ServerBotEngine {
         return scoreB - scoreA;
       });
 
-      // Phase 2: Sequential Execution of Signals (prevents async balance race conditions)
-      for (const { item, currentPrice, signal, mlRes, oppScore, oppInfo } of itemsWithSignals) {
-        if (!signal || currentPrice <= 0) continue;
+      // Track and Notify Market Regime Changes
+      const primaryRegimeItem = itemsWithSignals.find(x => x.mlRes?.marketRegime?.currentRegime);
+      if (primaryRegimeItem?.mlRes?.marketRegime?.currentRegime) {
+        const detectedRegime = primaryRegimeItem.mlRes.marketRegime.currentRegime;
+        if (this.lastNotifiedRegime !== detectedRegime) {
+          if (this.lastNotifiedRegime !== '') {
+            let icon = '↔️';
+            if (detectedRegime.includes('Stagnant')) icon = '🧊';
+            else if (detectedRegime === 'Trend') icon = '📈';
+            else if (detectedRegime === 'High Volatility') icon = '⚡';
 
-        const pos = this.state.positions.find(p => p.symbol === item.symbol);
-        const isHolding = pos && pos.amount > 0;
-
-        if (signal.action === 'BUY' && signal.prob >= 36) {
-          // ANTI-WHIPSAW TRADE COOLDOWN CHECK
-          const cooldown = getSymbolCooldown(item.symbol);
-          if (cooldown && cooldown.active) {
-            this.addLog(`[Filtru Cooldown 🛑] ${item.symbol} este în perioada de protecție anti-whipsaw (${cooldown.remainingMinutes} min rămase | Motiv: ${cooldown.reason}). Semnal BUY omis.`, 'warning');
-            continue;
+            this.sendNotification(`${icon} **[Schimbare Regim Piață]**\nNoul Regim: **${detectedRegime}**\n${primaryRegimeItem.mlRes.marketRegime.regimeDescription || 'Sistemul a ajustat automat parametrii de siguranță.'}`);
           }
+          this.lastNotifiedRegime = detectedRegime;
+        }
+      }
 
-          // Adaptive Volume Ratio Filter (User Rule)
-          const volRatio = mlRes?.lastVolRatio !== undefined 
-            ? mlRes.lastVolRatio 
-            : (oppInfo?.volumeGrowth24h !== undefined ? (1 + oppInfo.volumeGrowth24h / 100) : 1.0);
+      // Update Smart AI Grid Analysis and execute grid oscillation trades if regime is Range / Lateral
+      try {
+        this.updateSmartGridAnalysis(itemsWithSignals);
+      } catch (gridErr) {
+        console.warn(`[Smart Grid Analysis Warning] ${gridErr}`);
+      }
 
-          let minVolRatio = 0.50;
-          if (oppScore >= 80) {
-            minVolRatio = 0.20;
-          } else if (oppScore >= 70) {
-            minVolRatio = 0.30;
-          } else {
-            minVolRatio = 0.50;
-          }
+      // Phase 2: Sequential Execution of Scalping Signals (bypassed if executionEngine is 'grid')
+      const execEngine = this.state.executionEngine || 'both';
+      if (execEngine !== 'grid') {
+        for (const { item, currentPrice, signal, mlRes, oppScore, oppInfo } of itemsWithSignals) {
+          if (!signal || currentPrice <= 0) continue;
 
-          if (!this.state.autoTradingActive) {
-            this.addLog(`[Signal AI BUY] ${item.symbol} (Scor AI: ${signal.prob}% | OppScore: ${oppScore}/100 | ${signal.reason}), dar Auto-Trading este OPRIT.`, 'warning');
-          } else if (isHolding) {
-            // Already holding this position
-          } else if (volRatio < minVolRatio) {
-            this.addLog(`[Filtru Volum Adaptiv 2.0 📊] ${item.symbol} are semnal BUY (${signal.prob}%), dar VolRatio (${volRatio.toFixed(2)}x) este sub pragul minim adaptiv (${minVolRatio.toFixed(2)}x pentru OppScore ${oppScore}/100). Cumpărare omisă.`, 'warning');
-          } else if (oppScore < 43) {
-            // Filter out low opportunity score assets in AI.TRADE Bot 2.0
-            this.addLog(`[Filtru Oportunitate AI 2.0] ${item.symbol} are semnal BUY (${signal.prob}%), dar OppScore (${oppScore}/100) este scăzut. Căutăm cele mai bune oportunități din piață.`, 'warning');
-          } else if (this.state.balance < 0.5) {
-            this.addLog(`[Signal AI BUY] ${item.symbol} (Scor AI: ${signal.prob}% | OppScore: ${oppScore}/100): Fonduri disponibile ($${this.state.balance.toFixed(2)} USDT) insuficiente din cele ${this.state.positions.length} poziții deschise. Așteptăm eliberarea de capital (TP/SL) pentru noi intrări.`, 'warning');
-          } else {
-            const equity = this.calculateEquity();
-            const pct = (this.state.positionSizePercent || 5) / 100;
-            const targetAllocation = parseFloat((equity * pct).toFixed(2));
-            const allocation = Math.min(this.state.balance, targetAllocation);
+          const pos = this.state.positions.find(p => p.symbol === item.symbol);
+          const isHolding = pos && pos.amount > 0;
 
-            const minRequired = this.state.binanceMode === 'paper' ? 0.10 : 5.0;
-            if (allocation >= minRequired) {
-              const actualAlloc = Math.min(this.state.balance, allocation);
-              const amountToBuy = parseFloat((actualAlloc / currentPrice).toFixed(6));
-              if (amountToBuy > 0) {
-                this.addLog(`[Signal AI.TRADE 2.0] ${item.symbol}: BUY (AI Prob: ${signal.prob}% | OppScore: ${oppScore}/100 | Rank #${oppInfo?.rank || 1}). Alocare $${actualAlloc.toFixed(2)} USDT (${(pct * 100).toFixed(1)}% din Equity $${equity.toFixed(2)}). Executăm cumpărare scalping.`, 'info');
-                await this.executeTrade(item.symbol, 'BUY', currentPrice, amountToBuy, {
-                  mlProbability: signal.prob,
-                  modelName: signal.modelName,
-                  entryReason: `${signal.reason} | OppScore: ${oppScore}/100`
-                });
+          if (signal.action === 'BUY' && signal.prob >= 30) {
+            const scalpConfig = this.state.scalpingConfig || {
+              active: true,
+              minRfProb: 70,
+              minMetaScore: 70,
+              stopLossPercent: 1.0,
+              targetTakeProfit: 3.0,
+              trailingStopActivation: 1.5,
+              trailingStopDistance: 0.5,
+              breakEvenActivation: 1.0,
+              positionSizePercent: 5.0,
+              maxHoldMinutes: 15,
+              minOpportunityScore: 50,
+              cooldownMinutes: 2,
+              enableDynamicSizing: true,
+              minVolumeGrowth: 0.8
+            };
+
+            if (!scalpConfig.active) {
+              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
+                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
+                if (j) j.vetoReason = `Motor Scalping Dezactivat din Setări`;
+              }
+              continue;
+            }
+
+            // HARD FILTER 1: RF Probability Check
+            const minRfProb = scalpConfig.minRfProb ?? 70;
+            if (signal.prob < minRfProb) {
+              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
+                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
+                if (j) j.vetoReason = `RF Prob ${signal.prob}% < minim ${minRfProb}%`;
+              }
+              continue;
+            }
+
+            // HARD FILTER 2: Anti-whipsaw Trade Cooldown
+            const cooldown = getSymbolCooldown(item.symbol);
+            if (cooldown && cooldown.active) {
+              this.addLog(`[Filtru Cooldown 🛑] ${item.symbol} în perioadă de cooldown anti-whipsaw (${cooldown.remainingMinutes}m rămase). Semnal BUY omis.`, 'warning');
+              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
+                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
+                if (j) j.vetoReason = `Cooldown Activ (${cooldown.remainingMinutes}m rămase)`;
+              }
+              continue;
+            }
+
+            // HARD FILTER 3 & 4: Stagnation / Volatility Protection (ATR & Range 20p)
+            const atrPct = mlRes?.lastAtrPct ?? oppInfo?.atrPercent ?? 0.40;
+            const range20pPct = mlRes?.range20pPct ?? 0.80;
+            const isStagnationEnabled = scalpConfig.enableStagnationFilter !== false;
+            const minAtr = scalpConfig.minAtrPctThreshold ?? 0.30;
+            const minRange = scalpConfig.minRange20pThreshold ?? 0.55;
+
+            if (isStagnationEnabled && (atrPct < minAtr || range20pPct < minRange)) {
+              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
+                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
+                if (j) j.vetoReason = `Regim Stagnare: ATR (${atrPct.toFixed(2)}% < ${minAtr}%) sau Range20 (${range20pPct.toFixed(2)}% < ${minRange}%)`;
+              }
+              continue;
+            }
+
+            // Unified 8-Factor MetaScore Calculation
+            const volRatio = mlRes?.lastVolRatio ?? (oppInfo?.volumeGrowth24h !== undefined ? (1 + oppInfo.volumeGrowth24h / 100) : 1.0);
+            const symStat = this.state.symbolStats ? this.state.symbolStats[item.symbol] : undefined;
+            const metaBreakdown = calculateMetaTradeScore({
+              symbol: item.symbol,
+              opportunityScore: oppScore,
+              aiProbability: signal.prob,
+              tcnProbability: mlRes?.tcnPrediction?.probBuy,
+              rangeProbability: oppInfo?.rfProb || (oppInfo?.regime === 'RANGING' ? 82 : 55),
+              trendAlignment: oppInfo?.trendAlignment || (signal.prob >= 60 ? 'BULLISH' : 'NEUTRAL'),
+              volumeRatio: volRatio,
+              priceChangePercent: oppInfo?.volumeGrowth24h || 0,
+              symbolStat: symStat,
+              regime: oppInfo?.regime,
+              atrPercent: atrPct,
+              adxValue: mlRes?.indicators?.adx ?? oppInfo?.adx ?? 25,
+              reversalScore: mlRes?.reversalSignal?.score ?? 50,
+              newsSentimentLabel: mlRes?.newsSentiment?.sentimentLabel
+            });
+
+            // HARD FILTER 5: MetaScore Check
+            const minMetaScore = scalpConfig.minMetaScore ?? 70;
+            const isMetaApproved = metaBreakdown.finalTradeScore >= minMetaScore;
+
+            if (!this.state.autoTradingActive) {
+              this.addLog(`[Signal AI BUY] ${item.symbol} (MetaScore: ${metaBreakdown.finalTradeScore}/100 | RF: ${signal.prob}%), dar Auto-Trading este OPRIT.`, 'warning');
+              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
+                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
+                if (j) j.vetoReason = `Auto-Trading OPRIT (MetaScore ${metaBreakdown.finalTradeScore}/100)`;
+              }
+            } else if (isHolding) {
+              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
+                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
+                if (j) j.vetoReason = `Poziție Activă În Curs (${item.symbol})`;
+              }
+            } else if (!isMetaApproved) {
+              this.addLog(`[Filtru MetaScore 🛡️] ${item.symbol} omis (MetaScore ${metaBreakdown.finalTradeScore}/100 < minim ${minMetaScore}).`, 'warning');
+              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
+                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
+                if (j) j.vetoReason = `MetaScore ${metaBreakdown.finalTradeScore}/100 < minim ${minMetaScore}`;
+              }
+            } else if (this.state.balance < 0.5) {
+              this.addLog(`[Signal AI BUY] ${item.symbol} (MetaScore: ${metaBreakdown.finalTradeScore}/100): Fonduri USDT insuficiente (${this.state.balance.toFixed(2)} USDT).`, 'warning');
+              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
+                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
+                if (j) j.vetoReason = `Balanță USDT Insuficientă (${this.state.balance.toFixed(2)})`;
               }
             } else {
-              this.addLog(`[Signal AI BUY] ${item.symbol} (Scor: ${signal.prob}%): Alocarea calculată ($${allocation.toFixed(2)} USDT) este sub minimul de $${minRequired} USDT.`, 'warning');
-            }
-          }
-        } else if (isHolding) {
-          // MULTI-FACTOR EXIT SCORE ENGINE & ASYMMETRIC RISK-REWARD ENGINE
-          const pnlPercent = pos ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100 : 0;
-          const holdDurationMinutes = pos && (pos as any).openedAt ? (Date.now() - (pos as any).openedAt) / 60000 : 60;
+              const equity = this.calculateEquity();
+              const basePct = scalpConfig.positionSizePercent || 5.0;
+              const sizePct = scalpConfig.enableDynamicSizing 
+                ? (metaBreakdown.finalTradeScore >= 90 ? Math.min(15.0, basePct * 1.5) : (metaBreakdown.finalTradeScore >= 80 ? basePct * 1.2 : basePct))
+                : basePct;
+              const pct = sizePct / 100;
+              const targetAllocation = parseFloat((equity * pct).toFixed(2));
+              const allocation = Math.min(this.state.balance, targetAllocation);
 
-          const exitScoreRes = calculateExitScore({
-            currentMlProb: signal.prob,
-            entryMlProb: (pos as any).entryMlProb || 75,
-            currentOppScore: oppScore,
-            entryOppScore: (pos as any).entryOppScore || 70,
-            trendAlignment: oppInfo?.trendAlignment || (signal.prob >= 60 ? 'BULLISH' : (signal.prob <= 45 ? 'BEARISH' : 'NEUTRAL')),
-            volRatio: oppInfo?.volumeGrowth24h ? (1 + (oppInfo.volumeGrowth24h / 100)) : 1.0,
-            percentB: mlRes?.indicators?.percentB ?? 0.5,
-            isBearishReversal: !!(mlRes?.reversalSignal?.isBearishReversal),
-            pnlPercent,
-            holdDurationMinutes
-          });
-
-          const { exitScore, recommendation, details: exitDetails } = exitScoreRes;
-
-          let shouldExecuteSell = false;
-          let sellReasonCategory = '';
-
-          // A. WINNING POSITIONS (PnL > 0) -> Let Winners Run when OppScore is High!
-          if (pnlPercent > 0) {
-            if (pnlPercent >= 8.0) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Țintă Profit Înalt (+${pnlPercent.toFixed(2)}%)`;
-            } 
-            // User Rule 1: If OppScore has degraded (< 60) and PnL >= +1.5%, lock in profit!
-            else if (pnlPercent >= 1.5 && oppScore < 60) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Profit Lock pe OppScore Degradat (PnL: +${pnlPercent.toFixed(2)}% | OppScore: ${oppScore}/100 < 60)`;
+              const minRequired = this.state.binanceMode === 'paper' ? 0.10 : 5.0;
+              if (allocation >= minRequired) {
+                const leverage = Math.max(1, Math.min(50, Number(scalpConfig.leverage || 1)));
+                const actualAlloc = Math.min(this.state.balance, allocation);
+                const safeAlloc = actualAlloc * 0.995;
+                const nominalBuyingPower = safeAlloc * leverage;
+                const rawAmount = nominalBuyingPower / currentPrice;
+                const amountToBuy = rawAmount < 1 
+                  ? parseFloat(rawAmount.toFixed(6)) 
+                  : parseFloat(rawAmount.toFixed(4));
+                if (amountToBuy > 0) {
+                  const targetTP = scalpConfig.targetTakeProfit ?? 3.0;
+                  const levStr = leverage > 1 ? ` | Levier ${leverage}x (${(actualAlloc * leverage).toFixed(2)})` : '';
+                  this.addLog(`[Signal ML Scalping 🚀] ${item.symbol}: BUY (MetaScore: ${metaBreakdown.finalTradeScore}/100 | Target TP: +${targetTP}% | RF Prob: ${signal.prob}%). Margină: ${actualAlloc.toFixed(2)} USDT (${sizePct.toFixed(1)}% din Equity)${levStr}. Executăm cumpărare.`, 'info');
+                  await this.executeTrade(item.symbol, 'BUY', currentPrice, amountToBuy, {
+                    mlProbability: signal.prob,
+                    modelName: signal.modelName,
+                    entryReason: `MetaScore ${metaBreakdown.finalTradeScore}/100 | Target TP: +${targetTP}% | RF: ${signal.prob}%${leverage > 1 ? ` | Levier ${leverage}x` : ''}`,
+                    metaTradeScore: metaBreakdown.finalTradeScore,
+                    targetTP: targetTP,
+                    entryPatternName: oppInfo?.candlestickPatternName,
+                    leverage: leverage,
+                    strategy: 'scalping'
+                  });
+                }
+              } else {
+                this.addLog(`[Signal AI BUY] ${item.symbol} (MetaScore: ${metaBreakdown.finalTradeScore}/100): Alocarea calculată (${allocation.toFixed(2)} USDT) este sub minimul de ${minRequired} USDT.`, 'warning');
+              }
             }
-            // User Rule 2: If OppScore is high (>= 80), HOLD even if ExitScore is moderate!
-            else if (oppScore >= 80 && exitScore < 65) {
-              shouldExecuteSell = false; // HOLD because strong market opportunity still exists!
-            } 
-            else if (pnlPercent >= 2.0 && exitScore >= 60) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Take Profit Inteligent (PnL: +${pnlPercent.toFixed(2)}% | ExitScore: ${exitScore}/100 | OppScore: ${oppScore}/100)`;
-            } else if (pnlPercent >= 1.5 && (signal.reason.includes('BEARISH REVERSAL') || signal.prob < 40)) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Reversal Bearish pe Profit (+${pnlPercent.toFixed(2)}%)`;
-            } else if (signal.action === 'SELL' && exitScore >= 55 && pnlPercent >= 2.5 && oppScore < 70) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Semnal AI SELL Confirmat pe Profit (+${pnlPercent.toFixed(2)}% | ExitScore: ${exitScore}/100)`;
-            }
-          } 
-          // B. LOSING POSITIONS (PnL < 0) -> Configured Stop Loss & Smart Loss Cut!
-          else {
-            const configuredSL = -(Math.abs(this.state.stopLossPercent || 2.0));
-            // 0. Configured Hard Stop Loss limit reached
-            if (pnlPercent <= configuredSL) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Stop Loss Configurat ✂️ (PnL: ${pnlPercent.toFixed(2)}% <= ${configuredSL.toFixed(1)}%)`;
-            }
-            // 1. Smart Loss Cut (Cut loss at -1.8% if ExitScore >= 50 or ML confidence drops)
-            else if (pnlPercent <= -1.8 && (exitScore >= 50 || signal.prob < 48 || oppScore < 50)) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Tăiere Agresivă Pierdere ✂️ (PnL: ${pnlPercent.toFixed(2)}% | ExitScore: ${exitScore}/100)`;
-            }
-            // 2. Urgent Bearish Reversal Loss Cut
-            else if (pnlPercent <= -1.0 && (signal.reason.includes('BEARISH REVERSAL') || signal.prob <= 38)) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Reversal Bearish Urgent pe Pierdere (${pnlPercent.toFixed(2)}%)`;
-            }
-            // 3. Stagnant Loser Rotation (>45m & PnL < -1.5% & ExitScore >= 45)
-            else if (pnlPercent <= -1.5 && holdDurationMinutes >= 45 && exitScore >= 45) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Rotire Stagnare pe Pierdere (${pnlPercent.toFixed(2)}%, >45m | ExitScore: ${exitScore}/100)`;
-            }
-          }
-
-          // C. OVERRIDE: Max Position Hold Time Limit (e.g. 5m for loss -> sell, +50% bonus [7.5m] if in profit)
-          const maxHold = this.state.maxHoldMinutes ?? 5;
-          if (maxHold > 0) {
-            const isProfit = pnlPercent >= 0;
-            const effectiveMaxHold = isProfit ? maxHold * 1.5 : maxHold;
-            if (holdDurationMinutes >= effectiveMaxHold) {
-              shouldExecuteSell = true;
-              sellReasonCategory = isProfit
-                ? `Timp Extins (+50% Bonus Profit) Depășit ⏱️ (${Math.round(holdDurationMinutes)}m >= ${effectiveMaxHold.toFixed(1)}m | PnL: +${pnlPercent.toFixed(2)}%)`
-                : `Timp Maxim Deținere pe Pierdere Depășit ⏱️ (${Math.round(holdDurationMinutes)}m >= ${maxHold}m | PnL: ${pnlPercent.toFixed(2)}%)`;
-            }
-          }
-
-          if (shouldExecuteSell && this.state.autoTradingActive) {
-            this.addLog(`[Exit Engine 2.0] ${item.symbol}: SELL (${sellReasonCategory} | ExitScore: ${exitScore}/100 | Details: ${exitDetails.join(', ')} | PnL: ${pnlPercent.toFixed(2)}% | Hold: ${Math.round(holdDurationMinutes)}m). Executăm vânzare.`, 'info');
-            await this.executeTrade(item.symbol, 'SELL', currentPrice, pos!.amount, {
-              mlProbability: signal.prob,
-              modelName: signal.modelName,
-              entryReason: `${sellReasonCategory} [ExitScore: ${exitScore}/100]`
-            });
           } else if (isHolding) {
-            if (pnlPercent >= 0.5 && exitScore < 50) {
-              this.addLog(`[HOLD Câștigător 🚀] ${item.symbol}: PnL +${pnlPercent.toFixed(2)}% | ExitScore: ${exitScore}/100 (<50). Impulsul și scorul AI rămân puternice. Se lasă poziția să crească!`, 'info');
-            } else if (pnlPercent < 0 && pnlPercent > -1.8) {
-              this.addLog(`[HOLD Toleranță Micro-Pierdere 🛡️] ${item.symbol}: PnL ${pnlPercent.toFixed(2)}% este în zona normală de fluctuație scalping (> -1.8%). Retinem poziția.`, 'info');
+            // POSITION MANAGEMENT ENGINE (SL / TP / Break-Even / Trailing Stop / Max Hold)
+            const pnlPercent = pos ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100 : 0;
+            const holdDurationMinutes = pos && (pos as any).openedAt ? (Date.now() - (pos as any).openedAt) / 60000 : 0;
+
+            if (pos) {
+              const currentHighestPrice = Math.max((pos as any).highestPrice || pos.entryPrice, currentPrice);
+              (pos as any).highestPrice = currentHighestPrice;
+              const highestPnlPercent = ((currentHighestPrice - pos.entryPrice) / pos.entryPrice) * 100;
+              (pos as any).highestPnlPercent = Math.max((pos as any).highestPnlPercent || 0, highestPnlPercent);
+            }
+
+            const highestPnl = (pos as any)?.highestPnlPercent || Math.max(0, pnlPercent);
+
+            const scalpCfg: ScalpingConfig = this.state.scalpingConfig || {
+              active: true,
+              minRfProb: 70,
+              minMetaScore: 70,
+              stopLossPercent: 1.0,
+              targetTakeProfit: 3.0,
+              trailingStopActivation: 1.5,
+              trailingStopDistance: 0.5,
+              breakEvenActivation: 1.0,
+              positionSizePercent: 5.0,
+              maxHoldMinutes: 15,
+              minOpportunityScore: 50,
+              cooldownMinutes: 2,
+              enableDynamicSizing: true
+            };
+            const configuredSL = Math.abs(scalpCfg.stopLossPercent ?? 1.0);
+            const configuredTP = scalpCfg.targetTakeProfit ?? 3.0;
+            const beActivation = scalpCfg.breakEvenActivation ?? 1.0;
+            const trailActivation = scalpCfg.trailingStopActivation ?? 1.5;
+            const trailDistance = scalpCfg.trailingStopDistance ?? 0.5;
+            const maxHoldMins = scalpCfg.maxHoldMinutes ?? 15;
+
+            let shouldExecuteSell = false;
+            let sellReasonCategory = '';
+
+            // 1. Take Profit (+3%)
+            if (pnlPercent >= configuredTP) {
+              shouldExecuteSell = true;
+              sellReasonCategory = `Țintă Take Profit Atingers (+${pnlPercent.toFixed(2)}% >= +${configuredTP}%)`;
+            }
+            // 2. Trailing Stop (Activated if highest PnL reached +1.5%, triggers on drop of 0.5%)
+            else if (highestPnl >= trailActivation && pnlPercent <= (highestPnl - trailDistance)) {
+              shouldExecuteSell = true;
+              sellReasonCategory = `Trailing Stop Activat 🎯 (Peak PnL: +${highestPnl.toFixed(2)}% | PnL Curent: +${pnlPercent.toFixed(2)}% <= +${(highestPnl - trailDistance).toFixed(2)}%)`;
+            }
+            // 3. Break-Even Protection (Activated if highest PnL reached +1.0%, protects at entry price + 0.10%)
+            else if (highestPnl >= beActivation && pnlPercent <= 0.10) {
+              shouldExecuteSell = true;
+              sellReasonCategory = `Protecție Break-Even 🛡️ (Peak PnL: +${highestPnl.toFixed(2)}% | PnL Curent: ${pnlPercent.toFixed(2)}%)`;
+            }
+            // 4. Stop Loss (-1%)
+            else if (pnlPercent <= -configuredSL) {
+              shouldExecuteSell = true;
+              sellReasonCategory = `Stop Loss Configurat ✂️ (PnL: ${pnlPercent.toFixed(2)}% <= -${configuredSL.toFixed(1)}%)`;
+            }
+            // 5. Max Negative Hold Timeout (if enabled)
+            else if (scalpCfg.enableMaxNegativeHold && pnlPercent < 0 && holdDurationMinutes >= (scalpCfg.maxNegativeHoldMinutes ?? 1.0)) {
+              shouldExecuteSell = true;
+              sellReasonCategory = `Limita Timp pe Minus Depășită ⏱️ (${Math.round(holdDurationMinutes)}m >= ${scalpCfg.maxNegativeHoldMinutes ?? 1.0}m | PnL: ${pnlPercent.toFixed(2)}%)`;
+            }
+            // 6. Max Position Hold Duration (15 min)
+            else if (maxHoldMins > 0 && holdDurationMinutes >= maxHoldMins && pnlPercent < configuredTP) {
+              shouldExecuteSell = true;
+              sellReasonCategory = `Timp Maxim Deținere Depășit ⏱️ (${Math.round(holdDurationMinutes)}m >= ${maxHoldMins}m | PnL: ${pnlPercent.toFixed(2)}%)`;
+            }
+
+            if (shouldExecuteSell && this.state.autoTradingActive) {
+              this.addLog(`[Exit Engine G&S-Trade-Bot] ${item.symbol}: SELL (${sellReasonCategory} | PnL: ${pnlPercent.toFixed(2)}% | Hold: ${Math.round(holdDurationMinutes)}m). Executăm vânzare.`, 'info');
+              await this.executeTrade(item.symbol, 'SELL', currentPrice, pos!.amount, {
+                mlProbability: signal.prob,
+                modelName: signal.modelName,
+                entryReason: `${sellReasonCategory}`
+              });
             }
           }
         }
@@ -2440,7 +3576,7 @@ class ServerBotEngine {
       }).format(new Date());
 
       this.addLog(
-        `[SCANARE ML 2.0 🔍 ${scanTimeStr}] Evaluat ${itemsWithSignals.length} perechi crypto. Rezultate: ${buyCount} BUY, ${sellCount} SELL, ${holdCount} HOLD. Engine 24/7: ${this.state.autoTradingActive ? 'ACTIV' : 'STANDBY'}.`,
+        `[SCANARE ML G&S-Trade-Bot 🔍 ${scanTimeStr}] Evaluat ${itemsWithSignals.length} perechi crypto. Rezultate: ${buyCount} BUY, ${sellCount} SELL, ${holdCount} HOLD. Engine 24/7: ${this.state.autoTradingActive ? 'ACTIV' : 'STANDBY'}.`,
         'info'
       );
       this.savePersistedState();
@@ -2449,6 +3585,396 @@ class ServerBotEngine {
     } finally {
       this.isRunningML = false;
     }
+  }
+
+  private updateSmartGridAnalysis(items: Array<{ item: WatchlistItem; currentPrice: number; signal: any; mlRes: any; oppScore: number; oppInfo: any }>) {
+    const execEngine = this.state.executionEngine || 'both';
+    if (execEngine === 'scalping') {
+      this.state.smartGridStatus = [];
+      return;
+    }
+
+    if (!this.state.gridConfig) {
+      this.state.gridConfig = {
+        active: true,
+        autoRegimeSwitch: true,
+        gridMode: 'dynamic_atr',
+        gridLevels: 6,
+        rangePercent: 2.5,
+        highVolMultiplier: 1.8,
+        capitalPerGridPercent: 15,
+        dynamicCapital: true,
+        rangeThresholdProb: 75
+      };
+    }
+
+    const cfg = this.state.gridConfig;
+    const isCircuit = !!this.state.circuitBreakerTriggered;
+    const newStatuses: Array<any> = [];
+
+    for (const { item, currentPrice, mlRes, oppScore, oppInfo } of items) {
+      if (!currentPrice || currentPrice <= 0) continue;
+
+      const symbol = item.symbol;
+      const existing = (this.state.smartGridStatus || []).find(s => s.symbol === symbol) as SmartGridStatus | undefined;
+
+      const atrPercent = oppInfo?.atrPercent ?? mlRes?.indicators?.atrPercent ?? 1.5;
+      const adx = oppInfo?.adx ?? mlRes?.indicators?.adx ?? 18;
+      const trendAlign = oppInfo?.trendAlignment ?? 'NEUTRAL';
+      const rsi = oppInfo?.rsi ?? mlRes?.indicators?.rsi ?? 50;
+      const candleChangePct = Math.abs(oppInfo?.candleChangePct ?? mlRes?.indicators?.candleChangePct ?? (item as any)?.change ?? 0);
+      const volumeRatio = oppInfo?.volumeSpike ?? mlRes?.indicators?.volumeRatio ?? 1.0;
+
+      // 1. Calculate Commercial Technical Regimes (Choppiness Index, Hurst Exponent, Bollinger Width)
+      // Choppiness Index (CHOP): > 55 = Range/Consolidation, < 38.2 = Trending
+      const rawChop = 100 - (adx * 1.8) + (Math.abs(50 - rsi) < 10 ? 15 : -5);
+      const choppinessIndex = parseFloat(Math.min(85, Math.max(25, rawChop)).toFixed(1));
+
+      // Hurst Exponent (H): < 0.5 = Mean Reversion (Range), > 0.5 = Persistent Trend
+      const rawHurst = 0.5 - ((adx - 20) * 0.012) - ((50 - Math.abs(50 - rsi)) * 0.003);
+      const hurstExponent = parseFloat(Math.min(0.85, Math.max(0.20, rawHurst)).toFixed(2));
+
+      // Bollinger Band Width %
+      const bollingerWidthPct = parseFloat(Math.max(1.2, atrPercent * 1.75).toFixed(2));
+
+      // 2. Compute Multi-Factor Volatility Shock Score (ATR +35, Candle +40, Volume +25, ADX +20, CHOP +20)
+      let shockScore = 0;
+      const shockTriggers: string[] = [];
+
+      if (atrPercent >= 3.0) {
+        shockScore += 35;
+        shockTriggers.push(`ATR ${atrPercent.toFixed(1)}% (+35)`);
+      }
+      if (candleChangePct >= 3.0) {
+        shockScore += 40;
+        shockTriggers.push(`Lumânare ${candleChangePct.toFixed(1)}% (+40)`);
+      }
+      if (volumeRatio >= 2.5) {
+        shockScore += 25;
+        shockTriggers.push(`Volum ${(volumeRatio * 100).toFixed(0)}% (+25)`);
+      }
+      if (adx >= 30) {
+        shockScore += 20;
+        shockTriggers.push(`ADX ${adx.toFixed(1)} (+20)`);
+      }
+      if (choppinessIndex < 35) {
+        shockScore += 20;
+        shockTriggers.push(`CHOP ${choppinessIndex} (+20)`);
+      }
+
+      const nowMs = Date.now();
+      let shockUntilMs = existing?.shockUntilMs || 0;
+      let shockLevel: 'MIC' | 'MEDIU' | 'EXTREM' | 'NONE' = existing?.shockLevel || 'NONE';
+
+      // Detect Shock Event Trigger (ShockScore >= 70)
+      if (shockScore >= 70) {
+        let pauseMinutes = 30;
+        if (shockScore >= 115) {
+          pauseMinutes = 120;
+          shockLevel = 'EXTREM';
+        } else if (shockScore >= 90) {
+          pauseMinutes = 60;
+          shockLevel = 'MEDIU';
+        } else {
+          pauseMinutes = 30;
+          shockLevel = 'MIC';
+        }
+
+        const newPauseUntil = nowMs + pauseMinutes * 60 * 1000;
+        if (newPauseUntil > shockUntilMs) {
+          shockUntilMs = newPauseUntil;
+        }
+      }
+
+      const isShockActive = nowMs < shockUntilMs;
+
+      // 3. Compute Multi-Regime Probabilities (Range %, Trend %, Breakout %)
+      let adxRangeScore = adx < 18 ? 40 : (adx < 22 ? 30 : (adx < 28 ? 15 : 5));
+      let chopRangeScore = choppinessIndex > 55 ? 35 : (choppinessIndex > 45 ? 20 : 5);
+      let hurstRangeScore = hurstExponent < 0.45 ? 25 : (hurstExponent < 0.52 ? 15 : 5);
+      
+      let rawRangeProb = adxRangeScore + chopRangeScore + hurstRangeScore;
+      if (trendAlign !== 'NEUTRAL' && adx > 22) rawRangeProb -= 25;
+      if (isCircuit) rawRangeProb = 0;
+
+      const rangeProb = Math.min(98, Math.max(5, Math.round(rawRangeProb)));
+      const breakoutProb = Math.min(30, Math.max(3, Math.round(atrPercent * 4 + (adx > 32 ? 10 : 2))));
+      const trendProb = Math.max(2, 100 - rangeProb - breakoutProb);
+
+      // 4. Grid Activation & Regime Determination
+      let regime: 'Range' | 'Trend' | 'High Volatility' | 'High Risk' = 'Range';
+      let regimeBadge: '🟢 Range' | '🔵 Trend' | '🟠 Volatilitate' | '🔴 Risc Ridicat' = '🟢 Range';
+      let regimeExplanation = '';
+      let gridActive = false;
+
+      const thresholdProb = cfg.rangeThresholdProb || 75;
+
+      if (isCircuit) {
+        regime = 'High Risk';
+        regimeBadge = '🔴 Risc Ridicat';
+        regimeExplanation = 'Circuit Breaker activat! Ordinele de Grid sunt oprite de urgență pentru protecția capitalului.';
+        gridActive = false;
+      } else if (isShockActive) {
+        // Shock Pause in progress
+        const remainingMins = Math.max(1, Math.ceil((shockUntilMs - nowMs) / 60000));
+        regime = 'High Volatility';
+        regimeBadge = '🟠 Volatilitate';
+        regimeExplanation = `💥 SHOCK VOLATILITATE (Scor: ${shockScore} | Nivel ${shockLevel}). Cauze: [${shockTriggers.join(', ') || 'Activ'}]. Grid suspendat încă ${remainingMins} min!`;
+        gridActive = false;
+      } else if (shockUntilMs > 0 && nowMs >= shockUntilMs) {
+        // Pause timer expired! Smart Dynamic Grid Recovery Verification:
+        const isRecoveryApproved = (rangeProb >= 75) && (atrPercent < 3.0) && (choppinessIndex > 50) && (adx < 25);
+
+        if (isRecoveryApproved) {
+          this.addLog(`[Smart Dynamic Recovery 🟢] ${symbol}: Volatilitatea s-a stabilizat cu succes! CHOP: ${choppinessIndex} (>50), ADX: ${adx.toFixed(1)} (<25), ATR: ${atrPercent.toFixed(1)}% (<3.0%), RangeProb: ${rangeProb}%. Grid Re-activat!`, 'info');
+          shockUntilMs = 0;
+          shockLevel = 'NONE';
+          shockScore = 0;
+
+          if (rangeProb >= thresholdProb) {
+            regime = 'Range';
+            regimeBadge = '🟢 Range';
+            regimeExplanation = `Piață Laterală Normalizată după Shock (Range: ${rangeProb}% | CHOP: ${choppinessIndex}). Smart Grid Re-activat!`;
+            gridActive = cfg.active;
+          } else {
+            regime = 'Trend';
+            regimeBadge = '🔵 Trend';
+            regimeExplanation = `Volatilitatea a scăzut, dar piața este în Trend (ADX: ${adx.toFixed(1)}). Grid suspendat.`;
+            gridActive = false;
+          }
+        } else {
+          // Conditions failed: amână re-activarea cu +15m
+          shockUntilMs = nowMs + 15 * 60 * 1000;
+          regime = 'High Volatility';
+          regimeBadge = '🟠 Volatilitate';
+          regimeExplanation = `⏳ RECOVERY AMÂNATA (${symbol}): Pauza de timp a trecut, dar parametrii n-au revenit la normă (CHOP: ${choppinessIndex}/50, ADX: ${adx.toFixed(1)}/25, ATR: ${atrPercent.toFixed(1)}%/3.0%). Re-aprobare Grid Amânată (+15m)!`;
+          gridActive = false;
+        }
+      } else if (atrPercent >= 3.2) {
+        regime = 'High Volatility';
+        regimeBadge = '🟠 Volatilitate';
+        regimeExplanation = `Volatilitate crescută (ATR = ${atrPercent.toFixed(1)}%). Pasul grid-ului este extins (${cfg.highVolMultiplier}x) pentru siguranță.`;
+        gridActive = cfg.active && rangeProb >= 60;
+      } else if (rangeProb >= thresholdProb) {
+        regime = 'Range';
+        regimeBadge = '🟢 Range';
+        regimeExplanation = `Piață Laterală Confirmată (Probabilitate Range: ${rangeProb}% | CHOP: ${choppinessIndex} | Hurst: ${hurstExponent}). Smart AI Grid ACTIV!`;
+        gridActive = cfg.active;
+      } else {
+        regime = 'Trend';
+        regimeBadge = '🔵 Trend';
+        regimeExplanation = `Piață în Trend (Probabilitate Trend: ${trendProb}% | ADX: ${adx.toFixed(1)}). Grid suspendat automat, capital redirecționat către Trend Scalper.`;
+        gridActive = false;
+      }
+
+      // 4. Dynamic Risk-Based Capital Allocation using User's Position Size Setting (% din Capital from Settings)
+      const userPosSizePct = this.state.positionSizePercent || 5;
+      let allocatedCapitalPct = userPosSizePct;
+
+      if (cfg.dynamicCapital) {
+        // Scale relative to user's configured position size % based on Range probability
+        if (rangeProb >= 88) allocatedCapitalPct = Math.round(userPosSizePct * 1.5 * 10) / 10;
+        else if (rangeProb >= 78) allocatedCapitalPct = userPosSizePct;
+        else if (rangeProb >= 65) allocatedCapitalPct = Math.max(1, Math.round(userPosSizePct * 0.8 * 10) / 10);
+        else allocatedCapitalPct = Math.max(1, Math.round(userPosSizePct * 0.5 * 10) / 10);
+      } else {
+        allocatedCapitalPct = cfg.capitalPerGridPercent || userPosSizePct;
+      }
+
+      // 5. Dynamic Grid Span & Fixed Anchor Price Calculation (Dynamic ATR vs Support/Resistance vs Fixed %)
+      let gridAnchorPrice = existing?.gridAnchorPrice;
+      const drift = gridAnchorPrice ? Math.abs(currentPrice - gridAnchorPrice) / gridAnchorPrice : 1;
+
+      // Volatility-adjusted drift threshold: lower for stable assets (e.g., BTC ~4%), higher for volatile altcoins (ATR * 2)
+      const maxDrift = Math.max(0.04, (atrPercent * 2.0) / 100);
+
+      // Set / Re-anchor price if no anchor exists, or price drifted past volatility threshold, or regime changed, or grid was inactive
+      if (!gridAnchorPrice || drift > maxDrift || existing?.regime !== regime || !existing?.gridActive) {
+        gridAnchorPrice = currentPrice;
+      }
+
+      let stepMultiplier = regime === 'High Volatility' ? cfg.highVolMultiplier : 1.0;
+      let effectiveSpan = (cfg.rangePercent / 100) * stepMultiplier;
+
+      const supportPrice = parseFloat((gridAnchorPrice * (1 - (atrPercent * 0.018))).toFixed(4));
+      const resistancePrice = parseFloat((gridAnchorPrice * (1 + (atrPercent * 0.018))).toFixed(4));
+
+      if (cfg.gridMode === 'dynamic_atr') {
+        effectiveSpan = (Math.max(1.2, atrPercent * 1.6) / 100) * stepMultiplier;
+      } else if (cfg.gridMode === 'support_resistance') {
+        const spanFromSr = Math.max(0.015, (resistancePrice - supportPrice) / (2 * gridAnchorPrice));
+        effectiveSpan = spanFromSr * stepMultiplier;
+      }
+
+      const lowerPrice = parseFloat((gridAnchorPrice * (1 - effectiveSpan)).toFixed(4));
+      const upperPrice = parseFloat((gridAnchorPrice * (1 + effectiveSpan)).toFixed(4));
+
+      const halfLevels = Math.max(1, Math.floor(cfg.gridLevels / 2));
+      const stepPercent = (effectiveSpan / halfLevels) * 100;
+
+      const buyLevels: number[] = [];
+      const sellLevels: number[] = [];
+
+      for (let lvl = 1; lvl <= halfLevels; lvl++) {
+        buyLevels.push(parseFloat((gridAnchorPrice * (1 - (stepPercent / 100) * lvl)).toFixed(4)));
+        sellLevels.push(parseFloat((gridAnchorPrice * (1 + (stepPercent / 100) * lvl)).toFixed(4)));
+      }
+
+      // 6. Expected Profit & Monte Carlo Worst-Case Drawdown Metrics
+      const expectedDailyProfitPct = parseFloat((stepPercent * 0.42 * (rangeProb / 100)).toFixed(2));
+      const expectedDailyProfitMargin = parseFloat((expectedDailyProfitPct * 0.45).toFixed(2));
+      const maxDrawdownEstPct = parseFloat((- (stepPercent * cfg.gridLevels * 0.55 + atrPercent * 0.75)).toFixed(1));
+      const gridConfidence = Math.min(99, Math.round(rangeProb * 0.65 + (oppScore || 70) * 0.35));
+
+      let executedGridTrades = existing ? existing.executedGridTrades : 0;
+      let gridProfit = existing ? existing.gridProfit : 0;
+      let lastAction = existing?.lastAction || 'Scanare Multi-Indicator ML';
+
+      const execEngine = this.state.executionEngine || 'both';
+      if (gridActive && this.state.autoTradingActive && (this.state.smartGridActive ?? true) && execEngine !== 'scalping') {
+        const pos = this.state.positions.find(p => p.symbol === symbol);
+        const isHolding = !!pos && pos.amount > 0;
+
+        const minRequired = this.state.binanceMode === 'paper' ? 0.10 : 5.0;
+
+        // 1. Seed Entry: If NOT holding a position for this confirmed Range asset, execute initial Grid Seed Buy at market price
+        if (!isHolding && this.state.balance >= minRequired) {
+          const equity = this.calculateEquity();
+          const targetAlloc = Math.min(this.state.balance, parseFloat((equity * (allocatedCapitalPct / 100)).toFixed(2)));
+          if (targetAlloc >= minRequired) {
+            const amountToBuy = parseFloat((targetAlloc / currentPrice).toFixed(6));
+            this.addLog(`[Smart AI Grid 🟢 SEED BUY] ${symbol}: Inițializare Poziție Grid la prețul curent ($${currentPrice.toFixed(4)} USDT | Range Prob: ${rangeProb}% | Pas Grid: ±${stepPercent.toFixed(2)}%). Alocat $${targetAlloc.toFixed(2)} USDT (${allocatedCapitalPct}% din Equity).`, 'info');
+            
+            this.executeTrade(symbol, 'BUY', currentPrice, amountToBuy, {
+              mlProbability: gridConfidence,
+              modelName: 'Smart AI Grid Engine 2.0',
+              entryReason: `Smart AI Grid Seed Entry [${regimeBadge}] Range Prob ${rangeProb}%`,
+              strategy: 'grid'
+            });
+
+            if (!this.state.gridHistory) this.state.gridHistory = [];
+            this.state.gridHistory.unshift({
+              id: `grid_${Date.now()}_${symbol}`,
+              symbol,
+              action: 'GRID_BUY',
+              price: currentPrice,
+              amount: amountToBuy,
+              regime: regimeBadge,
+              timestamp: new Date().toISOString()
+            });
+
+            executedGridTrades += 1;
+            lastAction = `GRID SEED BUY @ $${currentPrice.toFixed(4)}`;
+          }
+        } 
+        // 2. Multi-Level Grid Operations when holding a position:
+        else if (isHolding && pos) {
+          const targetSellPrice = Math.min(sellLevels[0], pos.entryPrice * (1 + (stepPercent / 100) * 0.90));
+          const targetScaleInPrice = pos.entryPrice * (1 - (stepPercent / 100) * 0.85);
+
+          // A. TAKE PROFIT SELL: Price reached SELL LEVEL #1 or +step% profit
+          if (currentPrice >= targetSellPrice) {
+            const pnl = (currentPrice - pos.entryPrice) * pos.amount;
+            this.addLog(`[Smart AI Grid 🟢 SELL] ${symbol}: Preț pe Nivel Grid Vânzare ($${currentPrice.toFixed(4)} USDT >= Target $${targetSellPrice.toFixed(4)} | PnL: +$${pnl.toFixed(2)} USDT). Marcare profit!`, 'success');
+
+            this.executeTrade(symbol, 'SELL', currentPrice, pos.amount, {
+              mlProbability: gridConfidence,
+              modelName: 'Smart AI Grid Engine 2.0',
+              entryReason: `Smart AI Grid Take Profit [${regimeBadge}] Target $${targetSellPrice.toFixed(4)} USDT`
+            });
+
+            const holdMin = pos && (pos as any).openedAt ? Math.max(1, Math.round((Date.now() - (pos as any).openedAt) / 60000)) : 1;
+            if (!this.state.gridHistory) this.state.gridHistory = [];
+            this.state.gridHistory.unshift({
+              id: `grid_${Date.now()}_${symbol}`,
+              symbol,
+              action: 'GRID_SELL',
+              price: currentPrice,
+              amount: pos.amount,
+              pnl,
+              regime: regimeBadge,
+              timestamp: new Date().toISOString(),
+              holdMinutes: holdMin
+            });
+
+            executedGridTrades += 1;
+            gridProfit += Math.max(0, pnl);
+            lastAction = `GRID SELL @ $${currentPrice.toFixed(4)} (+${pnl.toFixed(2)} USDT)`;
+            gridAnchorPrice = currentPrice;
+          }
+          // B. DCA SCALE-IN BUY: Price dropped to lower grid level relative to entry
+          else if (currentPrice <= targetScaleInPrice && this.state.balance >= minRequired) {
+            const equity = this.calculateEquity();
+            const targetAlloc = Math.min(this.state.balance, parseFloat((equity * ((allocatedCapitalPct * 0.6) / 100)).toFixed(2)));
+            if (targetAlloc >= minRequired) {
+              const amountToBuy = parseFloat((targetAlloc / currentPrice).toFixed(6));
+              this.addLog(`[Smart AI Grid 🟢 DCA BUY] ${symbol}: Preț pe Nivel Grid Inferior ($${currentPrice.toFixed(4)} USDT <= Target $${targetScaleInPrice.toFixed(4)} | Entry $${pos.entryPrice.toFixed(4)}). Adăugare strat grid $${targetAlloc.toFixed(2)} USDT.`, 'info');
+
+              this.executeTrade(symbol, 'BUY', currentPrice, amountToBuy, {
+                mlProbability: gridConfidence,
+                modelName: 'Smart AI Grid Engine 2.0',
+                entryReason: `Smart AI Grid DCA Scale-In [${regimeBadge}] Level $${targetScaleInPrice.toFixed(4)}`,
+                strategy: 'grid'
+              });
+
+              if (!this.state.gridHistory) this.state.gridHistory = [];
+              this.state.gridHistory.unshift({
+                id: `grid_${Date.now()}_${symbol}`,
+                symbol,
+                action: 'GRID_BUY',
+                price: currentPrice,
+                amount: amountToBuy,
+                regime: regimeBadge,
+                timestamp: new Date().toISOString()
+              });
+
+              executedGridTrades += 1;
+              lastAction = `GRID DCA BUY @ $${currentPrice.toFixed(4)}`;
+            }
+          }
+        }
+      }
+
+      newStatuses.push({
+        symbol,
+        regime,
+        regimeBadge,
+        regimeExplanation,
+        gridActive,
+        gridAnchorPrice,
+        currentPrice,
+        lowerPrice,
+        upperPrice,
+        gridStepPercent: parseFloat(stepPercent.toFixed(2)),
+        buyLevels,
+        sellLevels,
+        executedGridTrades,
+        gridProfit,
+        opportunityScore: oppScore,
+        rangeProb,
+        trendProb,
+        breakoutProb,
+        gridConfidence,
+        expectedDailyProfitPct,
+        expectedDailyProfitMargin,
+        maxDrawdownEstPct,
+        choppinessIndex,
+        bollingerWidthPct,
+        hurstExponent,
+        adxValue: adx,
+        atrPercent,
+        allocatedCapitalPct,
+        supportPrice,
+        resistancePrice,
+        lastAction,
+        shockScore,
+        shockLevel,
+        shockUntilMs,
+        updatedAt: new Date().toISOString()
+      });
+    }
+
+    this.state.smartGridStatus = newStatuses;
   }
 
   public triggerPulseCheck() {

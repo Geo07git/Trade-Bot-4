@@ -27,12 +27,126 @@ interface SuperDashboardProps {
   onSwitchToFullDashboard?: () => void;
 }
 
+function MiniCandlePatternChart({ patternName, strategy }: { patternName?: string; strategy?: 'grid' | 'scalping' | 'manual' }) {
+  const nameLower = (patternName || '').toLowerCase();
+  const isGrid = strategy === 'grid' || nameLower.includes('grid');
+
+  let cleanName = 'Bullish Engulfing';
+  let patternType: 'engulfing' | 'hammer' | 'soldiers' | 'inside' | 'marubozu' | 'piercing' | 'grid' = 'engulfing';
+
+  if (isGrid) {
+    cleanName = 'Grid Rebound';
+    patternType = 'grid';
+  } else if (nameLower.includes('hammer') || nameLower.includes('pinbar')) {
+    cleanName = 'Hammer Pinbar';
+    patternType = 'hammer';
+  } else if (nameLower.includes('soldier') || nameLower.includes('3 white')) {
+    cleanName = '3 Soldiers';
+    patternType = 'soldiers';
+  } else if (nameLower.includes('inside') || nameLower.includes('harami')) {
+    cleanName = 'Inside Breakout';
+    patternType = 'inside';
+  } else if (nameLower.includes('marubozu') || nameLower.includes('expansion')) {
+    cleanName = 'Marubozu Bar';
+    patternType = 'marubozu';
+  } else if (nameLower.includes('piercing')) {
+    cleanName = 'Piercing Line';
+    patternType = 'piercing';
+  } else if (patternName) {
+    cleanName = patternName.replace(/[^\w\s]/gi, '').trim().slice(0, 15) || 'Bullish Pattern';
+  }
+
+  return (
+    <div className="flex flex-col items-center justify-center gap-0.5" title={`Pattern intrare: ${patternName || cleanName}`}>
+      <svg className="w-11 h-5 shrink-0" viewBox="0 0 50 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        {patternType === 'engulfing' && (
+          <>
+            <line x1="13" y1="5" x2="13" y2="19" stroke="#f43f5e" strokeWidth="1" strokeLinecap="round" />
+            <rect x="10.5" y="8" width="5" height="7" rx="0.5" fill="#f43f5e" />
+            <line x1="33" y1="2" x2="33" y2="22" stroke="#10b981" strokeWidth="1" strokeLinecap="round" />
+            <rect x="29.5" y="4" width="7" height="15" rx="0.5" fill="#10b981" />
+          </>
+        )}
+
+        {patternType === 'hammer' && (
+          <>
+            <line x1="13" y1="6" x2="13" y2="18" stroke="#f43f5e" strokeWidth="1" />
+            <rect x="10.5" y="8" width="5" height="6" rx="0.5" fill="#f43f5e" />
+            <line x1="33" y1="2" x2="33" y2="22" stroke="#10b981" strokeWidth="1.2" />
+            <rect x="29" y="3" width="8" height="5" rx="0.5" fill="#10b981" />
+          </>
+        )}
+
+        {patternType === 'soldiers' && (
+          <>
+            <line x1="9" y1="12" x2="9" y2="22" stroke="#10b981" strokeWidth="1" />
+            <rect x="7" y="14" width="4" height="6" rx="0.5" fill="#10b981" />
+            <line x1="25" y1="7" x2="25" y2="17" stroke="#10b981" strokeWidth="1" />
+            <rect x="23" y="9" width="4" height="6" rx="0.5" fill="#10b981" />
+            <line x1="41" y1="2" x2="41" y2="12" stroke="#10b981" strokeWidth="1" />
+            <rect x="39" y="4" width="4" height="6" rx="0.5" fill="#10b981" />
+          </>
+        )}
+
+        {patternType === 'inside' && (
+          <>
+            <line x1="9" y1="3" x2="9" y2="21" stroke="#f43f5e" strokeWidth="1" />
+            <rect x="6.5" y="6" width="5" height="12" rx="0.5" fill="#f43f5e" />
+            <line x1="25" y1="9" x2="25" y2="17" stroke="#38bdf8" strokeWidth="1" />
+            <rect x="23" y="11" width="4" height="4" rx="0.5" fill="#38bdf8" />
+            <line x1="41" y1="1" x2="41" y2="21" stroke="#10b981" strokeWidth="1" />
+            <rect x="38.5" y="2" width="5" height="15" rx="0.5" fill="#10b981" />
+          </>
+        )}
+
+        {patternType === 'marubozu' && (
+          <>
+            <line x1="13" y1="10" x2="13" y2="20" stroke="#f43f5e" strokeWidth="1" />
+            <rect x="10.5" y="12" width="5" height="6" rx="0.5" fill="#f43f5e" />
+            <rect x="28" y="2" width="10" height="20" rx="0.5" fill="#10b981" />
+          </>
+        )}
+
+        {patternType === 'piercing' && (
+          <>
+            <line x1="13" y1="4" x2="13" y2="20" stroke="#f43f5e" strokeWidth="1" />
+            <rect x="10.5" y="6" width="5" height="12" rx="0.5" fill="#f43f5e" />
+            <line x1="33" y1="2" x2="33" y2="22" stroke="#10b981" strokeWidth="1" />
+            <rect x="30.5" y="5" width="5" height="14" rx="0.5" fill="#10b981" />
+          </>
+        )}
+
+        {patternType === 'grid' && (
+          <>
+            <line x1="2" y1="21" x2="48" y2="21" stroke="#10b981" strokeWidth="1" strokeDasharray="2 2" opacity="0.5" />
+            <line x1="13" y1="8" x2="13" y2="21" stroke="#f43f5e" strokeWidth="1" />
+            <rect x="10.5" y="10" width="5" height="10" rx="0.5" fill="#f43f5e" />
+            <line x1="33" y1="5" x2="33" y2="21" stroke="#10b981" strokeWidth="1" />
+            <rect x="30.5" y="6" width="5" height="14" rx="0.5" fill="#10b981" />
+          </>
+        )}
+      </svg>
+
+      <span className="text-[8px] font-mono px-1 py-0.2 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 truncate max-w-[80px] leading-tight text-center">
+        {cleanName}
+      </span>
+    </div>
+  );
+}
+
 export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps) {
   const {
     balance,
     positions,
+    marketOpportunities,
     maxHoldMinutes,
+    scalpingConfig,
+    gridConfig,
     initialBalance,
+    accumulationBalance = 0,
+    sessionCycleCount = 1,
+    accumulationTargetPercent = 3.0,
+    consolidateAccumulation,
     logs,
     autoTradingActive,
     setAutoTradingActive,
@@ -41,22 +155,26 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
     resetCircuitBreaker,
     binanceMode,
     syncBinanceBalance,
-    executeTrade
+    executeTrade,
+    executionEngine
   } = useTradingStore();
 
   const [isSyncing, setIsSyncing] = useState(false);
   const [sellingSymbol, setSellingSymbol] = useState<string | null>(null);
 
   // Calculations
-  const positionsValue = positions.reduce((acc, pos) => acc + (pos.amount * (pos.currentPrice || pos.entryPrice)), 0);
-  const equity = balance + positionsValue;
-  const totalPnL = equity - initialBalance;
-  const totalPnLPercent = initialBalance > 0 ? (totalPnL / initialBalance) * 100 : 0;
-  
+  const positionsMargin = positions.reduce((acc, pos) => {
+    const lev = (pos as any).leverage || 1;
+    return acc + ((pos as any).margin || ((pos.entryPrice * pos.amount) / lev));
+  }, 0);
+  const nominalPositionsValue = positions.reduce((acc, pos) => acc + (pos.amount * (pos.currentPrice || pos.entryPrice)), 0);
   const unrealizedPnL = positions.reduce((acc, pos) => {
     const cp = pos.currentPrice || pos.entryPrice;
     return acc + ((cp - pos.entryPrice) * pos.amount);
   }, 0);
+  const equity = balance + positionsMargin + unrealizedPnL;
+  const totalPnL = equity - initialBalance;
+  const totalPnLPercent = initialBalance > 0 ? (totalPnL / initialBalance) * 100 : 0;
 
   const handleSync = async () => {
     setIsSyncing(true);
@@ -117,6 +235,16 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
             <span>{autoTradingActive ? "24/7 ACTIV" : "24/7 OPRIT"}</span>
           </button>
 
+          <span className={cn(
+            "flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-mono font-bold",
+            (executionEngine || 'both') === 'both' ? "bg-cyan-500/10 border-cyan-500/30 text-cyan-300" :
+            executionEngine === 'grid' ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" :
+            "bg-amber-500/10 border-amber-500/30 text-amber-300"
+          )}>
+            <span className="w-2 h-2 rounded-full bg-current animate-pulse"></span>
+            <span>{(executionEngine || 'both') === 'both' ? 'Hibrid' : (executionEngine === 'grid' ? 'Grid' : 'Scalping')}</span>
+          </span>
+
           {onSwitchToFullDashboard && (
             <button
               onClick={onSwitchToFullDashboard}
@@ -148,8 +276,8 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
         </div>
       )}
 
-      {/* Core Mobile KPI Grid (4 Cards) */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4">
+      {/* Core Mobile KPI Grid (5 Cards) */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2.5 sm:gap-4">
         {/* Capital Total (Equity) */}
         <div className="bg-zinc-900/90 border border-white/10 rounded-2xl p-3.5 sm:p-5 relative overflow-hidden">
           <div className="flex items-center justify-between text-zinc-400 mb-1">
@@ -161,6 +289,33 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
           </div>
           <div className="text-[11px] text-zinc-500 mt-1">
             Initial: ${initialBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+          </div>
+        </div>
+
+        {/* Sold Acumulare (Vault Profit Conservat) */}
+        <div className="bg-gradient-to-b from-amber-950/40 to-zinc-900/90 border border-amber-500/30 rounded-2xl p-3.5 sm:p-5 relative overflow-hidden">
+          <div className="flex items-center justify-between text-amber-300 mb-1">
+            <span className="text-[11px] uppercase tracking-wider font-semibold flex items-center gap-1">
+              <span>Sold "Acumulare"</span>
+            </span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono font-bold border border-amber-500/30">
+              Ciclu #{sessionCycleCount}
+            </span>
+          </div>
+          <div className="text-xl sm:text-2xl font-bold font-mono text-amber-300 tracking-tight">
+            ${accumulationBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+          <div className="text-[11px] text-amber-400/80 mt-1 flex items-center justify-between font-mono">
+            <span>Țintă: +{accumulationTargetPercent}%</span>
+            {totalPnLPercent >= accumulationTargetPercent && (
+              <button
+                onClick={() => consolidateAccumulation && consolidateAccumulation()}
+                className="px-1.5 py-0.5 rounded bg-emerald-500 text-black text-[10px] font-bold hover:bg-emerald-400 transition-all cursor-pointer"
+                title="Consolidează profitul manual"
+              >
+                Salvează
+              </button>
+            )}
           </div>
         </div>
 
@@ -222,17 +377,34 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
 
       {/* Active Positions List */}
       <div className="bg-zinc-900/80 border border-white/10 rounded-2xl p-4 sm:p-6 space-y-4">
-        <div className="flex items-center justify-between border-b border-white/5 pb-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-white/5 pb-3 gap-2">
           <div className="flex items-center gap-2">
             <Layers className="w-4 h-4 text-emerald-400" />
             <h3 className="font-medium text-sm sm:text-base text-white">
               Poziții Active în Piață ({positions.length})
             </h3>
           </div>
-          <span className="text-xs text-zinc-400 font-mono">
-            Total Valoare: ${positionsValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded border bg-zinc-800 text-zinc-300 border-white/10">
+              Motor: {(executionEngine || 'both') === 'both' ? 'Hibrid' : (executionEngine === 'grid' ? 'DOAR GRID 🟢' : 'DOAR SCALPING ⚡')}
+            </span>
+            <span className="text-xs text-zinc-400 font-mono">
+              Margină: <strong className="text-white">${positionsMargin.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+              {nominalPositionsValue > positionsMargin && (
+                <span className="text-amber-400/90 ml-1.5">(Expunere: ${nominalPositionsValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})</span>
+              )}
+            </span>
+          </div>
         </div>
+
+        {executionEngine === 'grid' && positions.length > 0 && (
+          <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-[11px] text-emerald-300 font-mono flex items-center gap-2">
+            <span>ℹ️</span>
+            <span>
+              <strong>Motor activ pe DOAR GRID.</strong> Pozițiile active de mai jos (deschise anterior prin Scalping) vor fi închise la atingerea profitului (TP), Stop Loss sau la expirarea timpului. Noi achiziții de Scalping sunt blocate.
+            </span>
+          </div>
+        )}
 
         {positions.length === 0 ? (
           <div className="text-center py-8 text-zinc-500 space-y-2">
@@ -248,6 +420,9 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
               const posPnL = (currentPrice - pos.entryPrice) * pos.amount;
               const posPnLPercent = pos.entryPrice > 0 ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100 : 0;
               const isSelling = sellingSymbol === pos.symbol;
+              const isGridPos = pos.strategy === 'grid';
+              const oppMatch = (marketOpportunities || []).find(o => o.symbol === pos.symbol);
+              const posPatternName = pos.entryPatternName || oppMatch?.candlestickPatternName || (isGridPos ? 'Grid Rebound 🕸️' : 'Bullish Engulfing 🟢');
 
               return (
                 <div 
@@ -255,14 +430,28 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
                   className="bg-black/60 border border-white/10 hover:border-white/20 rounded-xl p-3.5 space-y-2.5 transition-all"
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex items-center gap-1.5 shrink-0">
                       <span className="font-bold text-sm text-white font-mono">{pos.symbol}</span>
                       <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                         BUY
                       </span>
+                      <span className={cn(
+                        "text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase",
+                        isGridPos
+                          ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
+                          : "bg-purple-500/10 text-purple-300 border-purple-500/30"
+                      )}>
+                        {isGridPos ? 'GRID' : `SCALPING ${pos.leverage && pos.leverage > 1 ? `${pos.leverage}x` : ''}`}
+                      </span>
                     </div>
 
-                    <PositionTimer pos={pos} maxHoldMinutes={maxHoldMinutes} />
+                    <PositionTimer 
+                      pos={pos} 
+                      maxHoldMinutes={maxHoldMinutes} 
+                      maxNegativeHoldMinutes={scalpingConfig?.maxNegativeHoldMinutes ?? 1.0} 
+                      enableMaxNegativeHold={scalpingConfig?.enableMaxNegativeHold ?? true}
+                      gridConfig={gridConfig} 
+                    />
 
                     <button
                       onClick={() => handleClosePosition(pos.symbol, pos.amount, currentPrice)}
@@ -273,17 +462,25 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2 text-xs pt-1 border-t border-white/5 font-mono">
+                  <div className="grid grid-cols-3 gap-1.5 items-center text-xs pt-1 border-t border-white/5 font-mono">
                     <div>
-                      <span className="text-[10px] text-zinc-500 uppercase block">Cantitate / Valoare</span>
-                      <span className="text-zinc-200 font-medium">
+                      <span className="text-[9px] text-zinc-500 uppercase block tracking-wider">Cantitate / Valoare</span>
+                      <span className="text-zinc-200 font-medium text-[11px]">
                         {pos.amount.toFixed(3)} ({`$${posValue.toFixed(2)}`})
                       </span>
                     </div>
 
+                    <div className="flex flex-col items-center justify-center border-x border-white/5 px-1">
+                      <span className="text-[9px] text-zinc-500 uppercase block tracking-wider mb-0.5 text-center">Pattern Intrare</span>
+                      <MiniCandlePatternChart 
+                        patternName={posPatternName} 
+                        strategy={pos.strategy} 
+                      />
+                    </div>
+
                     <div className="text-right">
-                      <span className="text-[10px] text-zinc-500 uppercase block">Entry / Curent</span>
-                      <span className="text-zinc-300">
+                      <span className="text-[9px] text-zinc-500 uppercase block tracking-wider">Entry / Curent</span>
+                      <span className="text-zinc-300 text-[11px]">
                         ${pos.entryPrice.toFixed(3)} ➔ ${currentPrice.toFixed(3)}
                       </span>
                     </div>

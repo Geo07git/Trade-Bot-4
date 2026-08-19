@@ -5,6 +5,7 @@ import { twMerge } from 'tailwind-merge';
 import { useTradingStore } from '../store';
 import { PieChart, Pie, Cell, ResponsiveContainer, Sector } from 'recharts';
 import Markdown from 'react-markdown';
+import { apiFetch, safeJson } from '../utils/apiHelper';
 
 function cn(...inputs: (string | undefined | null | false)[]) {
   return twMerge(clsx(inputs));
@@ -79,7 +80,12 @@ export function AIAnalyst() {
     try {
       // Build real market context from local state
       const state = useTradingStore.getState();
-      const equity = state.balance + state.positions.reduce((acc, pos) => acc + (pos.amount * (pos.currentPrice || pos.entryPrice)), 0);
+      const equity = state.balance + state.positions.reduce((acc, pos) => {
+        const lev = (pos as any).leverage || 1;
+        const margin = (pos as any).margin || ((pos.entryPrice * pos.amount) / lev);
+        const pnl = ((pos.currentPrice || pos.entryPrice) - pos.entryPrice) * pos.amount;
+        return acc + (margin + pnl);
+      }, 0);
       const activeWatchlist = state.watchlist.filter(w => w.active).map(w => `${w.symbol}: $${w.price || 'Unknown'} (Signal: ${w.signal?.action || 'None'})`);
       const portfolio = state.positions.map(p => `${p.amount} ${p.symbol} @ $${p.entryPrice} (Current: $${p.currentPrice})`);
       
@@ -95,18 +101,18 @@ ${portfolio.join('\n') || 'None'}
 `;
       
       const geminiApiKey = useTradingStore.getState().geminiApiKey;
-      const res = await fetch('/api/analyze', {
+      const res = await apiFetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: userMsg, context, geminiApiKey })
       });
 
-      const data = await res.json();
+      const data = await safeJson<{ result?: string; error?: string }>(res, { error: 'Răspuns invalid sau server indisponibil' });
       
-      if (res.ok) {
+      if (res.ok && data?.result) {
         setMessages(prev => [...prev, { role: 'ai', content: data.result }]);
       } else {
-        setMessages(prev => [...prev, { role: 'ai', content: `[ERROR]: ${data.error}` }]);
+        setMessages(prev => [...prev, { role: 'ai', content: `[ERROR]: ${data?.error || 'Eroare la procesarea cererii'}` }]);
       }
     } catch (err: any) {
       setMessages(prev => [...prev, { role: 'ai', content: `[SYSTEM FAILURE]: Could not reach analysis engine.` }]);
@@ -122,38 +128,38 @@ ${portfolio.join('\n') || 'None'}
   ];
 
   return (
-    <div className="flex flex-col xl:flex-row h-full bg-black overflow-y-auto xl:overflow-hidden">
+    <div className="flex flex-col xl:flex-row h-full bg-black overflow-y-auto xl:overflow-hidden pb-28 xl:pb-0">
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col min-w-0 border-r border-white/5 order-2 xl:order-1 h-[600px] xl:h-full">
-        <header className="h-16 md:h-20 border-b border-white/5 flex items-center justify-between px-4 md:px-8 bg-zinc-900/10 backdrop-blur-md shrink-0 gap-2">
+      <div className="flex-1 flex flex-col min-w-0 border-r border-white/5 order-2 xl:order-1 h-[520px] xl:h-full">
+        <header className="h-14 sm:h-16 md:h-20 border-b border-white/5 flex items-center justify-between px-3 sm:px-6 md:px-8 bg-zinc-900/10 backdrop-blur-md shrink-0 gap-2">
           <div>
-            <h1 className="font-serif text-lg md:text-xl text-white">AI Analysis Engine</h1>
-            <p className="text-[10px] uppercase text-zinc-500 tracking-wider mt-0.5">Analiză piață în timp real</p>
+            <h1 className="font-serif text-base sm:text-lg md:text-xl text-white">AI Analysis Engine</h1>
+            <p className="text-[9px] uppercase text-zinc-500 tracking-wider mt-0.5 hidden sm:block">Analiză piață în timp real</p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2">
             <button
               onClick={() => {
                 setInput('Generează un raport complet de analiză a pieței crypto și a semnalelor curente.');
               }}
               disabled={isLoading}
-              className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-xl text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5"
+              className="px-2.5 py-1 sm:px-3 sm:py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-xl text-[11px] sm:text-xs font-medium transition-all cursor-pointer flex items-center gap-1"
             >
-              <span>▶️ Raport Piață</span>
+              <span>▶️ Raport</span>
             </button>
             <button
               onClick={() => {
                 setInput('Analizează riscul și alocarea din portofoliul meu curent.');
               }}
               disabled={isLoading}
-              className="px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-xl text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5"
+              className="px-2.5 py-1 sm:px-3 sm:py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-xl text-[11px] sm:text-xs font-medium transition-all cursor-pointer flex items-center gap-1"
             >
-              <span>⚡ Analiză Portofoliu</span>
+              <span>⚡ Portofoliu</span>
             </button>
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6">
+        <div className="flex-1 overflow-y-auto p-3 sm:p-6 space-y-4">
           <div className="max-w-4xl mx-auto space-y-6">
             {messages.map((msg, idx) => (
               <div key={idx} className={cn(

@@ -30,22 +30,50 @@ export function sendWebPush(title: string, body: string) {
 }
 
 export async function sendNotificationMessage(
-  provider: 'telegram' | string,
+  provider: 'telegram' | 'discord' | 'all' | string,
   discordWebhookUrl: string,
   telegramBotToken: string,
   telegramChatId: string,
   message: string
 ) {
   try {
-    if (telegramBotToken && telegramChatId) {
-      const url = `https://api.telegram.org/bot${telegramBotToken}/sendMessage`;
-      await fetch(url, {
+    if (discordWebhookUrl && discordWebhookUrl.trim()) {
+      fetch(discordWebhookUrl.trim(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: telegramChatId, text: message })
-      });
+        body: JSON.stringify({ content: message })
+      }).catch(err => console.error("Eroare Discord webhook:", err));
+    }
+
+    if (telegramBotToken && telegramChatId) {
+      const token = telegramBotToken.trim();
+      const chatId = telegramChatId.trim();
+      const url = `https://api.telegram.org/bot${token}/sendMessage`;
+      const htmlText = message
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
+        .replace(/\*(.*?)\*/g, '<b>$1</b>');
+
+      fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: htmlText, parse_mode: 'HTML' })
+      })
+      .then(async (res) => {
+        if (!res.ok) {
+          const plainText = message.replace(/\*\*/g, '').replace(/\*/g, '');
+          fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text: plainText })
+          }).catch(err => console.error("Eroare Telegram fallback:", err));
+        }
+      })
+      .catch(err => console.error("Eroare Telegram webhook:", err));
     }
   } catch (err) {
-    console.error("Eroare la trimiterea notificării Telegram:", err);
+    console.error("Eroare la trimiterea notificărilor:", err);
   }
 }

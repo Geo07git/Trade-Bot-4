@@ -9,17 +9,20 @@ function cn(...inputs: (string | undefined | null | false)[]) {
 import { Sidebar } from './components/Sidebar';
 import { SuperDashboard } from './components/SuperDashboard';
 import { Dashboard } from './components/Dashboard';
+import { ScalpingBot } from './components/ScalpingBot';
+import { SmartGridBot } from './components/SmartGridBot';
 import { AIAnalyst } from './components/AIAnalyst';
 import { TradeLogs } from './components/TradeLogs';
 import { Alerts } from './components/Alerts';
 import { TradingJournal } from './components/TradingJournal';
-import { NewsFeed } from './components/NewsFeed';
+import { AICalibration } from './components/AICalibration';
 import { Settings } from './components/Settings';
 import { useTradingStore } from './store';
 import { sendWebPush, sendNotificationMessage } from './services/notifications';
 import { generateSignal } from './services/ml';
 import { fetchLivePrice } from './services/api';
-import { Menu, ShieldAlert } from 'lucide-react';
+import { apiFetch } from './utils/apiHelper';
+import { Menu, ShieldAlert, RotateCcw } from 'lucide-react';
 
 export default function App() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -74,7 +77,7 @@ export default function App() {
 
     const fetchServerBotState = async () => {
       try {
-        const res = await fetch('/api/bot/state');
+        const res = await apiFetch('/api/bot/state');
         if (res.ok) {
           const data = await res.json();
           const currentStore = useTradingStore.getState();
@@ -87,7 +90,7 @@ export default function App() {
             (currentStore.apiSecret && !data.apiSecret) ||
             (currentStore.telegramBotToken && !data.telegramBotToken)
           ) {
-            fetch('/api/bot/config', {
+            apiFetch('/api/bot/config', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -106,56 +109,84 @@ export default function App() {
             const currentLatestLog = data.logs[0];
             if (lastLogRef.current && (lastLogRef.current.time !== currentLatestLog.time || lastLogRef.current.message !== currentLatestLog.message)) {
               if (currentLatestLog.type === 'success' || currentLatestLog.type === 'warning') {
-                sendWebPush('AI.TRADE Semnal', currentLatestLog.message);
+                sendWebPush('G&S-Trade-Bot Semnal', currentLatestLog.message);
               }
             }
             lastLogRef.current = currentLatestLog;
           }
 
-          // Sync server state to Zustand store cleanly
+          // Sync server state to Zustand store cleanly with change-detection
           const updates: any = {};
 
-          if (data.balance !== undefined) updates.balance = data.balance;
-          if (data.initialBalance !== undefined) updates.initialBalance = data.initialBalance;
-          if (data.positions) updates.positions = data.positions;
-          if (data.logs) updates.logs = data.logs;
-          if (data.signalJournal) updates.signalJournal = data.signalJournal;
-          if (data.tradeHistory) updates.tradeHistory = data.tradeHistory;
-          if (data.watchlist) updates.watchlist = data.watchlist;
-          if (data.marketOpportunities) updates.marketOpportunities = data.marketOpportunities;
-          if (data.symbolStats) updates.symbolStats = data.symbolStats;
-          if (data.lastScanAt) updates.lastScanAt = data.lastScanAt;
-          if (data.dynamicWatchlistSize) updates.dynamicWatchlistSize = data.dynamicWatchlistSize;
-          if (data.positionSizePercent) updates.positionSizePercent = data.positionSizePercent;
-          if (data.stopLossPercent) updates.stopLossPercent = data.stopLossPercent;
-          if (data.maxHoldMinutes !== undefined) updates.maxHoldMinutes = data.maxHoldMinutes;
+          if (data.balance !== undefined && data.balance !== currentStore.balance) updates.balance = data.balance;
+          if (data.initialBalance !== undefined && data.initialBalance !== currentStore.initialBalance) updates.initialBalance = data.initialBalance;
+          if (data.accumulationBalance !== undefined && data.accumulationBalance !== currentStore.accumulationBalance) updates.accumulationBalance = data.accumulationBalance;
+          if (data.accumulationTargetPercent !== undefined && data.accumulationTargetPercent !== currentStore.accumulationTargetPercent) updates.accumulationTargetPercent = data.accumulationTargetPercent;
+          if (data.sessionCycleCount !== undefined && data.sessionCycleCount !== currentStore.sessionCycleCount) updates.sessionCycleCount = data.sessionCycleCount;
+          if (data.accumulationTargetEnabled !== undefined && data.accumulationTargetEnabled !== currentStore.accumulationTargetEnabled) updates.accumulationTargetEnabled = data.accumulationTargetEnabled;
+          if (data.positions && JSON.stringify(data.positions) !== JSON.stringify(currentStore.positions)) updates.positions = data.positions;
+          if (data.logs && (data.logs.length !== currentStore.logs.length || (data.logs[0]?.time !== currentStore.logs[0]?.time))) updates.logs = data.logs;
+          if (data.signalJournal && (data.signalJournal.length !== currentStore.signalJournal.length || (data.signalJournal[0]?.id !== currentStore.signalJournal[0]?.id))) updates.signalJournal = data.signalJournal;
+          if (data.tradeHistory && JSON.stringify(data.tradeHistory) !== JSON.stringify(currentStore.tradeHistory)) updates.tradeHistory = data.tradeHistory;
+          if (data.watchlist && JSON.stringify(data.watchlist) !== JSON.stringify(currentStore.watchlist)) updates.watchlist = data.watchlist;
+          if (data.marketOpportunities && JSON.stringify(data.marketOpportunities) !== JSON.stringify(currentStore.marketOpportunities)) updates.marketOpportunities = data.marketOpportunities;
+          if (data.symbolStats && JSON.stringify(data.symbolStats) !== JSON.stringify(currentStore.symbolStats)) updates.symbolStats = data.symbolStats;
+          if (data.lastScanAt && data.lastScanAt !== currentStore.lastScanAt) updates.lastScanAt = data.lastScanAt;
+          if (data.dynamicWatchlistSize && data.dynamicWatchlistSize !== currentStore.dynamicWatchlistSize) updates.dynamicWatchlistSize = data.dynamicWatchlistSize;
+          if (data.positionSizePercent && data.positionSizePercent !== currentStore.positionSizePercent) updates.positionSizePercent = data.positionSizePercent;
+          if (data.stopLossPercent && data.stopLossPercent !== currentStore.stopLossPercent) updates.stopLossPercent = data.stopLossPercent;
+          if (data.maxHoldMinutes !== undefined && data.maxHoldMinutes !== currentStore.maxHoldMinutes) updates.maxHoldMinutes = data.maxHoldMinutes;
+          if (data.executionEngine && data.executionEngine !== currentStore.executionEngine) updates.executionEngine = data.executionEngine;
 
-          if (data.autoTradingActive !== undefined) updates.autoTradingActive = data.autoTradingActive;
-          if (data.circuitBreakerTriggered !== undefined) updates.circuitBreakerTriggered = !!data.circuitBreakerTriggered;
-          if (data.circuitBreakerReason !== undefined) updates.circuitBreakerReason = data.circuitBreakerReason || null;
-          if (data.maxLogs) updates.maxLogs = data.maxLogs;
-          if (data.notificationProvider) updates.notificationProvider = data.notificationProvider;
-          if (data.discordWebhookUrl) updates.discordWebhookUrl = data.discordWebhookUrl;
-          if (data.telegramBotToken) updates.telegramBotToken = data.telegramBotToken;
-          if (data.telegramChatId) updates.telegramChatId = data.telegramChatId;
-          if (data.timezone) updates.timezone = data.timezone;
-          if (data.apiKey) updates.apiKey = data.apiKey;
-          if (data.apiSecret) updates.apiSecret = data.apiSecret;
-          if (data.testnetApiKey) updates.testnetApiKey = data.testnetApiKey;
-          if (data.testnetApiSecret) updates.testnetApiSecret = data.testnetApiSecret;
-          if (data.binanceMode) updates.binanceMode = data.binanceMode;
-          if (data.lastCheckAt) updates.lastCheckAt = data.lastCheckAt;
+          if (data.autoTradingActive !== undefined && data.autoTradingActive !== currentStore.autoTradingActive) updates.autoTradingActive = data.autoTradingActive;
+          if (data.circuitBreakerTriggered !== undefined && !!data.circuitBreakerTriggered !== currentStore.circuitBreakerTriggered) updates.circuitBreakerTriggered = !!data.circuitBreakerTriggered;
+          if (data.circuitBreakerReason !== undefined && data.circuitBreakerReason !== currentStore.circuitBreakerReason) updates.circuitBreakerReason = data.circuitBreakerReason || null;
+          if (data.maxLogs && data.maxLogs !== currentStore.maxLogs) updates.maxLogs = data.maxLogs;
+          if (data.notificationProvider && data.notificationProvider !== currentStore.notificationProvider) updates.notificationProvider = data.notificationProvider;
+          if (data.discordWebhookUrl && data.discordWebhookUrl !== currentStore.discordWebhookUrl) updates.discordWebhookUrl = data.discordWebhookUrl;
+          if (data.telegramBotToken && data.telegramBotToken !== currentStore.telegramBotToken) updates.telegramBotToken = data.telegramBotToken;
+          if (data.telegramChatId && data.telegramChatId !== currentStore.telegramChatId) updates.telegramChatId = data.telegramChatId;
+          if (data.timezone && data.timezone !== currentStore.timezone) updates.timezone = data.timezone;
+          if (data.apiKey && data.apiKey !== currentStore.apiKey) updates.apiKey = data.apiKey;
+          if (data.apiSecret && data.apiSecret !== currentStore.apiSecret) updates.apiSecret = data.apiSecret;
+          if (data.testnetApiKey && data.testnetApiKey !== currentStore.testnetApiKey) updates.testnetApiKey = data.testnetApiKey;
+          if (data.testnetApiSecret && data.testnetApiSecret !== currentStore.testnetApiSecret) updates.testnetApiSecret = data.testnetApiSecret;
+          if (data.binanceMode && data.binanceMode !== currentStore.binanceMode) updates.binanceMode = data.binanceMode;
+          if (data.lastCheckAt && data.lastCheckAt !== currentStore.lastCheckAt) updates.lastCheckAt = data.lastCheckAt;
+          if (data.smartGridActive !== undefined && data.smartGridActive !== currentStore.smartGridActive) updates.smartGridActive = data.smartGridActive;
+          if (data.gridConfig && JSON.stringify(data.gridConfig) !== JSON.stringify(currentStore.gridConfig)) updates.gridConfig = data.gridConfig;
+          if (data.smartGridStatus && JSON.stringify(data.smartGridStatus) !== JSON.stringify(currentStore.smartGridStatus)) updates.smartGridStatus = data.smartGridStatus;
+          if (data.gridHistory && JSON.stringify(data.gridHistory) !== JSON.stringify(currentStore.gridHistory)) updates.gridHistory = data.gridHistory;
+          if (data.aiUsageStats && JSON.stringify(data.aiUsageStats) !== JSON.stringify(currentStore.aiUsageStats)) updates.aiUsageStats = data.aiUsageStats;
 
-          useTradingStore.setState(updates);
+          if (Object.keys(updates).length > 0) {
+            useTradingStore.setState(updates);
+          }
+        } else {
+          // Server returned error, run client engine pulse fallback
+          useTradingStore.getState().runClientEnginePulse();
         }
       } catch (err) {
-        console.debug('Server state sync error:', err);
+        // Network/standalone mode, run client engine pulse fallback
+        useTradingStore.getState().runClientEnginePulse();
       }
     };
 
     fetchServerBotState();
     const interval = setInterval(fetchServerBotState, 3000);
-    return () => clearInterval(interval);
+
+    // Auto-scan opportunities if empty or every 60s (ensures mobile Android & standalone client always have live rankings)
+    if (useTradingStore.getState().marketOpportunities.length === 0) {
+      useTradingStore.getState().triggerScanOpportunities();
+    }
+    const oppInterval = setInterval(() => {
+      useTradingStore.getState().triggerScanOpportunities();
+    }, 60000);
+
+    return () => {
+      clearInterval(interval);
+      clearInterval(oppInterval);
+    };
   }, []);
 
   // Tick countdown timer
@@ -195,53 +226,91 @@ export default function App() {
     setAnalysisCountdown(analysisInterval);
   }, [analysisInterval]);
 
+  const validViews: ViewState[] = [
+    'superDashboard', 
+    'dashboard', 
+    'scalping',
+    'grid', 
+    'journal', 
+    'calibration',
+    'analyst', 
+    'alerts', 
+    'logs', 
+    'settings'
+  ];
+  const activeView: ViewState = validViews.includes(currentView) ? currentView : 'dashboard';
+
+  useEffect(() => {
+    console.log(`[G&S App.tsx] Content Mounting - Active View: "${activeView}" (raw store view: "${currentView}")`);
+  }, [activeView, currentView]);
+
   return (
     <div className="flex flex-col md:flex-row h-screen w-full bg-black text-zinc-100 overflow-hidden font-sans">
-      {/* Mobile Top Header */}
-      <header className="md:hidden h-14 bg-zinc-900/90 border-b border-white/5 flex items-center justify-between px-3 shrink-0 z-30">
-        <div className="flex items-center gap-2">
+      {/* Mobile Ultra-Compact Top Header */}
+      <header className="md:hidden h-11 bg-zinc-950 border-b border-white/10 flex items-center justify-between px-2.5 shrink-0 z-30">
+        <div className="flex items-center gap-1.5">
           <button 
             onClick={() => setIsMobileMenuOpen(true)}
-            className="p-1.5 text-zinc-300 hover:text-white rounded-lg bg-zinc-800/50 border border-white/5"
+            className="p-1 text-zinc-300 hover:text-white rounded-md bg-zinc-900 border border-white/10 cursor-pointer"
             aria-label="Open Navigation Menu"
           >
-            <Menu className="w-5 h-5" />
+            <Menu className="w-4 h-4" />
           </button>
-          <span className="font-serif italic text-base text-white font-semibold">AI.TRADE</span>
+          <div className="flex items-center gap-1.5">
+            <img 
+              src="/logo.png" 
+              alt="G&S Logo" 
+              referrerPolicy="no-referrer"
+              className="w-5 h-5 rounded object-contain border border-emerald-500/30 bg-zinc-900 p-0.5" 
+            />
+            <span className="font-serif italic text-sm text-white font-semibold tracking-tight">G&amp;S-Trade</span>
+          </div>
         </div>
         
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <button
-            onClick={() => setCurrentView(currentView === 'superDashboard' ? 'dashboard' : 'superDashboard')}
+            onClick={() => setCurrentView(activeView === 'superDashboard' ? 'dashboard' : 'superDashboard')}
             className={cn(
-              "px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all flex items-center gap-1 cursor-pointer",
-              currentView === 'superDashboard'
+              "px-2 py-0.5 rounded-full text-[10px] font-medium border transition-all flex items-center gap-1 cursor-pointer",
+              activeView === 'superDashboard'
                 ? "bg-amber-500/20 text-amber-300 border-amber-500/40 font-semibold"
-                : "bg-zinc-800 text-zinc-300 border-white/10 hover:text-white"
+                : "bg-zinc-900 text-zinc-300 border-white/10 hover:text-white"
             )}
-            title="Deschide Super Dashboard pentru mobil"
+            title="Comută vizualizarea Super Dashboard"
           >
             <span>⚡ Super</span>
           </button>
 
           <button
+            onClick={() => {
+              localStorage.removeItem('trading_store');
+              window.location.reload();
+            }}
+            className="px-2 py-0.5 rounded-full text-[10px] font-medium border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 transition-all flex items-center gap-1 cursor-pointer"
+            title="Hard Refresh: Șterge trading_store și reîncarcă"
+          >
+            <RotateCcw className="w-3 h-3 text-amber-400" />
+            <span>Hard Refresh</span>
+          </button>
+
+          <button
             onClick={() => setAutoTradingActive(!autoTradingActive)}
             className={cn(
-              "flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border transition-all cursor-pointer",
+              "flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-all cursor-pointer",
               autoTradingActive
                 ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-400"
                 : "bg-rose-500/10 border-rose-500/40 text-rose-400"
             )}
             title="Pornire / Oprire tranzacționare server"
           >
-            <span className={cn("w-2 h-2 rounded-full", autoTradingActive ? "bg-emerald-400 animate-pulse" : "bg-rose-500")}></span>
+            <span className={cn("w-1.5 h-1.5 rounded-full", autoTradingActive ? "bg-emerald-400 animate-pulse" : "bg-rose-500")}></span>
             <span>{autoTradingActive ? "24/7 ACTIV" : "24/7 OPRIT"}</span>
           </button>
         </div>
       </header>
 
       <Sidebar 
-        currentView={currentView} 
+        currentView={activeView} 
         onViewChange={setCurrentView} 
         isOpenMobile={isMobileMenuOpen}
         onCloseMobile={() => setIsMobileMenuOpen(false)}
@@ -277,14 +346,16 @@ export default function App() {
         )}
 
         <div className="flex-1 h-full overflow-hidden relative flex flex-col">
-          {currentView === 'superDashboard' && <SuperDashboard onSwitchToFullDashboard={() => setCurrentView('dashboard')} />}
-          {currentView === 'dashboard' && <Dashboard />}
-          {currentView === 'journal' && <TradingJournal />}
-          {currentView === 'analyst' && <AIAnalyst />}
-          {currentView === 'news' && <NewsFeed />}
-          {currentView === 'alerts' && <Alerts />}
-          {currentView === 'logs' && <TradeLogs />}
-          {currentView === 'settings' && <Settings />}
+          {activeView === 'superDashboard' && <SuperDashboard onSwitchToFullDashboard={() => setCurrentView('dashboard')} />}
+          {activeView === 'dashboard' && <Dashboard />}
+          {activeView === 'scalping' && <ScalpingBot />}
+          {activeView === 'grid' && <SmartGridBot />}
+          {activeView === 'journal' && <TradingJournal />}
+          {activeView === 'calibration' && <AICalibration />}
+          {activeView === 'analyst' && <AIAnalyst />}
+          {activeView === 'alerts' && <Alerts />}
+          {activeView === 'logs' && <TradeLogs />}
+          {activeView === 'settings' && <Settings />}
         </div>
       </main>
     </div>

@@ -1,6 +1,6 @@
 import React from 'react';
 import { ViewState } from '../types';
-import { X, Power } from 'lucide-react';
+import { X, Power, RotateCcw } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { useTradingStore } from '../store';
@@ -25,15 +25,19 @@ export function Sidebar({ currentView, onViewChange, isOpenMobile, onCloseMobile
     apiSecret,
     testnetApiKey,
     testnetApiSecret,
-    circuitBreakerTriggered
+    circuitBreakerTriggered,
+    accumulationBalance = 0,
+    sessionCycleCount = 1
   } = useTradingStore();
 
   const navItems: { id: ViewState; label: string }[] = [
     { id: 'superDashboard', label: '⚡ Super Dashboard' },
     { id: 'dashboard', label: 'Dashboard Complet' },
+    { id: 'scalping', label: '⚡ Motor Scalping ML' },
+    { id: 'grid', label: '🤖 Smart AI Grid' },
     { id: 'journal', label: 'Trading Journal' },
+    { id: 'calibration', label: '🎯 AI Calibration' },
     { id: 'analyst', label: 'AI Analyst' },
-    { id: 'news', label: 'Flux Știri Binance' },
     { id: 'alerts', label: 'Alerts' },
     { id: 'logs', label: 'Trade Logs' },
     { id: 'settings', label: 'Settings' },
@@ -54,10 +58,21 @@ export function Sidebar({ currentView, onViewChange, isOpenMobile, onCloseMobile
         "fixed inset-y-0 left-0 md:static md:translate-x-0",
         isOpenMobile ? "translate-x-0 shadow-2xl" : "-translate-x-full md:translate-x-0"
       )}>
-        <div className="p-6 flex items-center justify-between border-b border-white/5 md:border-none">
-          <div>
-            <h1 className="font-serif italic text-2xl tracking-tight text-white">AI.TRADE Bot</h1>
-            <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500 mt-1">Algorithmic Trading</p>
+        <div className="p-5 flex items-center justify-between border-b border-white/5">
+          <div className="flex items-center gap-3">
+            <img 
+              src="/logo.png" 
+              alt="G&S-Trade-Bot Logo" 
+              referrerPolicy="no-referrer"
+              className="w-10 h-10 rounded-xl object-contain border border-emerald-500/30 shadow-md bg-zinc-950 p-0.5" 
+            />
+            <div>
+              <div className="flex items-center gap-1.5">
+                <h1 className="font-serif italic text-xl font-bold tracking-tight text-white leading-tight">G&amp;S-Trade-Bot</h1>
+                <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">v3.0</span>
+              </div>
+              <p className="text-[9px] uppercase tracking-[0.2em] text-emerald-400 font-mono mt-0.5">AI Grid &amp; Scalping 24/7</p>
+            </div>
           </div>
           {onCloseMobile && (
             <button 
@@ -95,6 +110,19 @@ export function Sidebar({ currentView, onViewChange, isOpenMobile, onCloseMobile
         </nav>
 
         <div className="p-6 border-t border-white/5 space-y-3">
+          {/* Hard Refresh Button */}
+          <button
+            onClick={() => {
+              localStorage.removeItem('trading_store');
+              window.location.reload();
+            }}
+            className="w-full flex items-center justify-center gap-2 p-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 text-xs font-semibold transition-all cursor-pointer"
+            title="Şterge starea locală (trading_store) şi reîncarcă aplicaţia"
+          >
+            <RotateCcw className="w-4 h-4 text-amber-400" />
+            <span>Hard Refresh State</span>
+          </button>
+
           {/* Server 24/7 Control Button in Sidebar */}
           <button
             onClick={() => setAutoTradingActive(!autoTradingActive)}
@@ -174,6 +202,15 @@ export function Sidebar({ currentView, onViewChange, isOpenMobile, onCloseMobile
                     <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", binanceMode === 'live' ? "bg-rose-500 animate-pulse" : binanceMode === 'testnet' ? "bg-amber-400" : "bg-emerald-400")}></span>
                     <span className="uppercase">{binanceMode}</span>
                   </div>
+                </div>
+
+                <div className="pt-2 border-t border-white/5 flex items-center justify-between text-[11px] font-mono">
+                  <span className="text-amber-400/90 font-medium flex items-center gap-1">
+                    <span>🏦 Acumulare:</span>
+                  </span>
+                  <span className="text-amber-300 font-bold">
+                    ${accumulationBalance.toFixed(2)} USDT <span className="text-[9px] text-zinc-500">(#{sessionCycleCount})</span>
+                  </span>
                 </div>
               </div>
             );

@@ -10,56 +10,82 @@ function cn(...inputs: (string | undefined | null | false)[]) {
 
 export function Alerts() {
   const { discordWebhookUrl, telegramBotToken, telegramChatId, reportConfig, setReportConfig, balance, positions, timezone, setTimezone } = useTradingStore();
-  const equity = balance + positions.reduce((acc, pos) => acc + (pos.amount * (pos.currentPrice || pos.entryPrice)), 0);
+  const equity = balance + positions.reduce((acc, pos) => {
+    const lev = (pos as any).leverage || 1;
+    const margin = (pos as any).margin || ((pos.entryPrice * pos.amount) / lev);
+    const pnl = ((pos.currentPrice || pos.entryPrice) - pos.entryPrice) * pos.amount;
+    return acc + (margin + pnl);
+  }, 0);
   const [macroStatus, setMacroStatus] = useState<'idle' | 'triggered'>('idle');
 
   const handleTestAlerts = async () => {
+    if (reportConfig?.enabled === false) {
+      alert("Sistemul general de notificări este DEZACTIVAT din Setări.");
+      return;
+    }
     const granted = await requestNotificationPermission();
-    if (granted && reportConfig?.channels?.browser) {
+    if (granted && reportConfig?.channels?.browser !== false) {
       sendWebPush('Test Notificare AI', 'Sistemul de notificări desktop & Android este activat.');
     }
     
-    if (reportConfig?.channels?.telegram) {
-      await sendNotificationMessage(
-        'telegram',
-        discordWebhookUrl,
-        telegramBotToken,
-        telegramChatId,
-        '🔔 **Test Notificare AI.TRADE**\nSistemul de notificări Telegram funcționează corect.'
-      );
-    }
+    await sendNotificationMessage(
+      'all',
+      reportConfig?.channels?.discord !== false ? discordWebhookUrl : '',
+      reportConfig?.channels?.telegram !== false ? telegramBotToken : '',
+      telegramChatId,
+      '🔔 **Test Notificare G&S-Trade-Bot**\nSistemul de notificări funcționează corect pe canalele selectate.'
+    );
   };
 
   const handleTriggerReport = async () => {
-    const message = `🤖 *AI.TRADE Bot - Test Report*\n\n📅 Data: ${new Date().toLocaleDateString('ro-RO')}\n💼 Valoare portofoliu: $${Number(equity || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+    if (reportConfig?.enabled === false) {
+      alert("Sistemul general de notificări este DEZACTIVAT.");
+      return;
+    }
+    const message = `🤖 *G&S-Trade-Bot - Test Report*\n\n📅 Data: ${new Date().toLocaleDateString('ro-RO')}\n💼 Valoare portofoliu: $${Number(equity || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
     
-    if (reportConfig?.channels?.telegram) await sendNotificationMessage('telegram', discordWebhookUrl, telegramBotToken, telegramChatId, message);
-    if (reportConfig?.channels?.browser) sendWebPush('Raport Trimis', 'Raportul a fost trimis cu succes!');
+    if (reportConfig?.channels?.telegram !== false || reportConfig?.channels?.discord !== false) {
+      await sendNotificationMessage(
+        'all',
+        reportConfig?.channels?.discord !== false ? discordWebhookUrl : '',
+        reportConfig?.channels?.telegram !== false ? telegramBotToken : '',
+        telegramChatId,
+        message
+      );
+    }
+    if (reportConfig?.channels?.browser !== false) sendWebPush('Raport Trimis', 'Raportul a fost trimis cu succes!');
   };
 
   const handleMacroEvent = async () => {
+    if (reportConfig?.enabled === false) return;
     setMacroStatus('triggered');
     const message = `⚠️ **Macro Event Volatility Spike**\nCuvânt cheie detectat: "CPI"\nSistemul recomandă prudență.`;
-    await sendNotificationMessage('telegram', discordWebhookUrl, telegramBotToken, telegramChatId, message);
-    sendWebPush('Alertă Volatilitate', 'News API detectat. Prudență!');
+    await sendNotificationMessage(
+      'all',
+      reportConfig?.channels?.discord !== false ? discordWebhookUrl : '',
+      reportConfig?.channels?.telegram !== false ? telegramBotToken : '',
+      telegramChatId,
+      message
+    );
+    if (reportConfig?.channels?.browser !== false) sendWebPush('Alertă Volatilitate', 'News API detectat. Prudență!');
     setTimeout(() => setMacroStatus('idle'), 5000);
   };
 
   return (
     <div className="flex flex-col h-full bg-black">
-      <header className="h-20 border-b border-white/5 flex items-center justify-between px-8 bg-zinc-900/10 backdrop-blur-md shrink-0 flex-wrap gap-2">
+      <header className="py-3 border-b border-white/5 flex items-center justify-between px-3 sm:px-8 bg-zinc-900/10 backdrop-blur-md shrink-0 flex-wrap gap-2">
         <div>
-          <h1 className="font-serif text-xl text-white">Notificări & Alerte</h1>
-          <p className="text-[10px] uppercase text-zinc-500 tracking-wider mt-0.5">Semnale trimise prin Web Push (Desktop & Android Push) și Telegram</p>
+          <h1 className="font-serif text-base sm:text-xl text-white">Notificări & Alerte</h1>
+          <p className="text-[9px] sm:text-[10px] uppercase text-zinc-500 tracking-wider mt-0.5 hidden sm:block">Semnale trimise prin Web Push (Desktop & Android Push) și Telegram</p>
         </div>
         <button 
           onClick={handleTestAlerts}
-          className="px-4 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 font-medium rounded-full transition-colors text-sm border border-emerald-500/20 shadow-sm cursor-pointer whitespace-nowrap">
-          Testează Alertele (Push & Telegram)
+          className="px-3 py-1.5 sm:px-4 sm:py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 font-medium rounded-full transition-colors text-xs sm:text-sm border border-emerald-500/20 shadow-sm cursor-pointer whitespace-nowrap">
+          Testează Alertele
         </button>
       </header>
 
-      <div className="p-8 overflow-y-auto flex-1 pb-32">
+      <div className="p-3 sm:p-6 overflow-y-auto flex-1 pb-32">
         <div className="max-w-4xl space-y-4">
           
           <div className="bg-zinc-900/50 border border-white/5 rounded-2xl p-6 relative overflow-hidden group hover:border-white/10 transition-colors">
@@ -71,6 +97,7 @@ export function Alerts() {
                </div>
                <div className="flex flex-wrap items-center gap-2">
                  <span className="px-2 py-1 bg-blue-500/20 border border-blue-500/50 text-blue-400 rounded text-[10px] font-bold tracking-wider">TELEGRAM</span>
+                 <span className="px-2 py-1 bg-indigo-500/20 border border-indigo-500/50 text-indigo-400 rounded text-[10px] font-bold tracking-wider">DISCORD</span>
                  <span className="px-2 py-1 bg-emerald-500/20 border border-emerald-500/50 text-emerald-400 rounded text-[10px] font-bold tracking-wider">DESKTOP & ANDROID PUSH</span>
                </div>
             </div>
@@ -117,11 +144,15 @@ export function Alerts() {
                 <p className="text-[10px] uppercase text-zinc-500 tracking-wider mb-3">Canale de Distribuție</p>
                 <div className="flex flex-wrap gap-6">
                   <label className="flex items-center gap-2 cursor-pointer group/chk">
-                    <input type="checkbox" checked={reportConfig?.channels?.telegram} onChange={(e) => setReportConfig({ channels: { ...reportConfig.channels, telegram: e.target.checked } })} className="accent-blue-500 w-4 h-4 rounded border-white/10 bg-black" />
+                    <input type="checkbox" checked={reportConfig?.channels?.telegram ?? true} onChange={(e) => setReportConfig({ channels: { ...reportConfig.channels, telegram: e.target.checked } })} className="accent-blue-500 w-4 h-4 rounded border-white/10 bg-black" />
                     <span className="text-sm text-zinc-300 group-hover/chk:text-white transition-colors">Telegram</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer group/chk">
-                    <input type="checkbox" checked={reportConfig?.channels?.browser} onChange={(e) => setReportConfig({ channels: { ...reportConfig.channels, browser: e.target.checked } })} className="accent-emerald-500 w-4 h-4 rounded border-white/10 bg-black" />
+                    <input type="checkbox" checked={reportConfig?.channels?.discord ?? true} onChange={(e) => setReportConfig({ channels: { ...reportConfig.channels, discord: e.target.checked } })} className="accent-indigo-500 w-4 h-4 rounded border-white/10 bg-black" />
+                    <span className="text-sm text-zinc-300 group-hover/chk:text-white transition-colors">Discord Webhook</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer group/chk">
+                    <input type="checkbox" checked={reportConfig?.channels?.browser ?? true} onChange={(e) => setReportConfig({ channels: { ...reportConfig.channels, browser: e.target.checked } })} className="accent-emerald-500 w-4 h-4 rounded border-white/10 bg-black" />
                     <span className="text-sm text-zinc-300 group-hover/chk:text-white transition-colors">Desktop & Android Push (PWA)</span>
                   </label>
                 </div>
