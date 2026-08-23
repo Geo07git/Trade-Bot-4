@@ -164,7 +164,6 @@ function MinuteProfitDisplay({ minuteLogs, notes }: { minuteLogs?: any[]; notes?
 export function TradingJournal() {
   const { 
     tradeHistory, 
-    gridHistory, 
     positions, 
     binanceMode, 
     timezone, 
@@ -440,7 +439,7 @@ export function TradingJournal() {
       const data = await safeJson(res, { success: false });
       if (data && data.success) {
         setEntries([]);
-        useTradingStore.setState({ tradeHistory: [], gridHistory: [] });
+        useTradingStore.setState({ tradeHistory: [] });
       }
     } catch (err) {
       console.error('Eroare la ștergerea jurnalului:', err);
@@ -466,10 +465,6 @@ export function TradingJournal() {
             return true;
           });
           useTradingStore.setState({ tradeHistory: updatedHistory });
-        }
-        if (gridHistory && Array.isArray(gridHistory)) {
-          const updatedGrid = gridHistory.filter((g) => g.id !== entry.id && `${g.symbol}_${g.timestamp}` !== `${entry.symbol}_${entry.timestamp}`);
-          useTradingStore.setState({ gridHistory: updatedGrid });
         }
       }
     } catch (err) {
@@ -544,50 +539,9 @@ export function TradingJournal() {
       });
     }
 
-    // 3. Merge gridHistory safely
-    if (gridHistory && Array.isArray(gridHistory)) {
-      gridHistory.forEach((g, idx) => {
-        if (!g || !g.symbol) return;
-        const gId = g.id || `grid_${idx}_${g.symbol}_${g.timestamp}`;
-        const gTimeMs = new Date(g.timestamp).getTime();
-        const action = g.action === 'GRID_BUY' ? 'BUY' : 'SELL';
-
-        const alreadyInCombined = combined.some(c => {
-          if (c.id === gId) return true;
-          if (c.symbol.toUpperCase() !== g.symbol.toUpperCase()) return false;
-          const timeDiff = Math.abs(new Date(c.timestamp).getTime() - gTimeMs);
-          return c.action === action && Math.abs(c.price - (g.price || 0)) < 0.0001 && (timeDiff < 15000 || isNaN(timeDiff));
-        });
-
-        if (!alreadyInCombined) {
-          const pnlVal = g.pnl || 0;
-          const pnlPct = pnlVal && g.price && g.amount ? (pnlVal / (g.price * g.amount)) * 100 : 0;
-          combined.push({
-            id: gId,
-            symbol: g.symbol || 'USDT',
-            action: action as any,
-            price: g.price || 0,
-            amount: g.amount || 0,
-            fee: (g.price || 0) * (g.amount || 0) * 0.00075,
-            pnl: pnlVal,
-            pnlPercent: pnlPct,
-            mlProbability: 88,
-            modelName: 'Smart AI Grid Engine 2.0',
-            entryReason: `Smart AI Grid [${g.regime || '🟢 Range'}] (${g.action === 'GRID_BUY' ? 'Ordin Cumpărare' : 'Vânzare Profit Grid'})`,
-            mode: (binanceMode || 'paper') as any,
-            timestamp: g.timestamp || new Date().toISOString(),
-            date: (g.timestamp || new Date().toISOString()).split('T')[0],
-            notes: `Ordin automat de oscilație executat pe ${g.symbol}`,
-            tradeGrade: 'A+',
-            tradeQualityScore: 92,
-            stars: 5
-          });
-        }
-      });
-    }
 
     return combined.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  }, [entries, tradeHistory, gridHistory, binanceMode]);
+  }, [entries, tradeHistory, binanceMode]);
 
   const uniqueSymbols = useMemo(() => {
     const symbols = new Set(allDisplayEntries.map(e => e?.symbol).filter(Boolean));

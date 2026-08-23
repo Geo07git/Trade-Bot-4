@@ -18,7 +18,7 @@ import {
   calculateTrendConfirmationScore,
   fetchHistoricalKlines
 } from '../src/services/ml';
-import { MarketOpportunity, SymbolPerformanceStat, SmartGridStatus, MetaTradeScoreBreakdown, ScalpingConfig } from '../src/types';
+import { MarketOpportunity, SymbolPerformanceStat, MetaTradeScoreBreakdown, ScalpingConfig } from '../src/types';
 
 function createBinanceClient(options: { apiKey?: string; apiSecret?: string; httpBase?: string }) {
   const binanceFactory = typeof Binance === 'function' 
@@ -550,7 +550,8 @@ async function fetchBatchPricesServer(): Promise<Map<string, number>> {
 
       const now = Date.now();
       if (now - lastPriceSuccessLogTime > 20000) {
-        console.log(`[PRICE ENGINE 🟢] Prețuri actualizate cu succes (${freshMap.size} simboluri de la Binance).`);
+        // Prețuri actualizate cu succes (silently handled)
+
         lastPriceSuccessLogTime = now;
       }
       return batchPricesCache.map;
@@ -2802,8 +2803,6 @@ class ServerBotEngine {
           let klines: any[] = [];
           if (idx < 40) {
             klines = await fetchHistoricalKlines(symbol, 50).catch(() => []);
-          } else {
-            console.log(`[SCANNER 🛡️ PROTECȚIE RATE-LIMIT] Descărcare klines omisă pentru ${symbol} (#${idx + 1}). Măsură preventivă: prevenire depășire cota cereri Binance API (limita 1200 request/min).`);
           }
 
           // 1. Candlestick/Price Action (35% weight)
@@ -2895,7 +2894,8 @@ class ServerBotEngine {
       // DIAGNOSTIC: Log BTCUSDT scores after calculation and before sort
       const btcBeforeSort = scannedCandidates.find(c => c.symbol === 'BTCUSDT');
       if (btcBeforeSort) {
-        console.log(`[DIAGNOSTIC] BTCUSDT discoveryScore: ${btcBeforeSort.discoveryScore}, candlestickPatternScore: ${btcBeforeSort.candlestickPatternScore}, momentumAccelScore: ${btcBeforeSort.momentumAccelScore}, rvolScore: ${btcBeforeSort.rvolScore}, breakoutAtrScore: ${btcBeforeSort.breakoutAtrScore}, trendConfirmationScore: ${btcBeforeSort.trendConfirmationScore}`);
+        // discoveryScore calculation logged silently
+
       } else {
         console.log('[DIAGNOSTIC] BTCUSDT not found in scannedCandidates after discoveryScore calculation');
       }
@@ -2911,7 +2911,8 @@ class ServerBotEngine {
       if (btcIndex !== -1) {
         const btcRank = btcIndex + 1;
         const isIncludedInTop50 = btcRank <= 50;
-        console.log(`[DIAGNOSTIC] BTCUSDT rank: ${btcRank}, included in TOP 50: ${isIncludedInTop50}, scannedCandidates count: ${scannedCandidates.length}, top50Candidates count: ${top50Candidates.length}`);
+        // Rank logged silently
+
       } else {
         console.log(`[DIAGNOSTIC] BTCUSDT not found in scannedCandidates after sort. scannedCandidates count: ${scannedCandidates.length}, top50Candidates count: ${top50Candidates.length}`);
       }
@@ -3388,7 +3389,8 @@ class ServerBotEngine {
       const batchMap = await fetchBatchPricesServer();
 
       if (this.state.positions.length > 0) {
-        console.log(`[PREȚURI LIVE 🟢] Prețuri sincronizate cu succes pentru ${this.state.positions.length} poziții active și ${this.state.watchlist.filter(w => w.active).length} perechi.`);
+        // Prețuri sincronizate (silently handled)
+
       }
 
       // 1. Update prices on active watchlist items
@@ -4057,7 +4059,7 @@ class ServerBotEngine {
       if (!currentPrice || currentPrice <= 0) continue;
 
       const symbol = item.symbol;
-      const existing = (this.state.smartGridStatus || []).find(s => s.symbol === symbol) as SmartGridStatus | undefined;
+      const existing = (this.state.smartGridStatus || []).find(s => s.symbol === symbol);
 
       const atrPercent = oppInfo?.atrPercent ?? mlRes?.indicators?.atrPercent ?? 1.5;
       const adx = oppInfo?.adx ?? mlRes?.indicators?.adx ?? 18;

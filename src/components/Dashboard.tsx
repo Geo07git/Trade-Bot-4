@@ -19,7 +19,6 @@ export function Dashboard() {
     positions, 
     maxHoldMinutes,
     scalpingConfig,
-    gridConfig,
     watchlist, 
     marketOpportunities,
     symbolStats,
@@ -676,11 +675,9 @@ export function Dashboard() {
                             </span>
                             <span className={cn(
                               "text-[9px] font-mono font-bold px-2 py-0.5 rounded border uppercase flex items-center gap-1",
-                              pos.strategy === 'grid'
-                                ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
-                                : "bg-purple-500/10 text-purple-300 border-purple-500/30"
+                              "bg-purple-500/10 text-purple-300 border-purple-500/30"
                             )}>
-                              {pos.strategy === 'grid' ? 'GRID' : `SCALPING ${(pos as any).leverage && (pos as any).leverage > 1 ? `${(pos as any).leverage}x` : ''}`}
+                              {`SCALPING ${(pos as any).leverage && (pos as any).leverage > 1 ? `${(pos as any).leverage}x` : ''}`}
                             </span>
                           </div>
 
@@ -701,7 +698,6 @@ export function Dashboard() {
                             maxHoldMinutes={maxHoldMinutes} 
                             maxNegativeHoldMinutes={scalpingConfig?.maxNegativeHoldMinutes ?? 1.0} 
                             enableMaxNegativeHold={scalpingConfig?.enableMaxNegativeHold ?? true}
-                            gridConfig={gridConfig} 
                           />
                         </div>
 

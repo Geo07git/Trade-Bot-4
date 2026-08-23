@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware';
 import { registerSymbolCooldown } from './services/ml';
 import { scanClientSideMarketOpportunities } from './services/api';
 import { apiFetch, safeJson } from './utils/apiHelper';
-import { ViewState, MarketOpportunity, SymbolPerformanceStat, GridConfig, ScalpingConfig, SmartGridStatus, GridOrderHistory, ExecutionEngineMode, MlModelSelection, Position } from './types';
+import { ViewState, MarketOpportunity, SymbolPerformanceStat, ScalpingConfig, ExecutionEngineMode, MlModelSelection, Position } from './types';
 
 export interface WatchlistItem {
   symbol: string;
@@ -88,11 +88,6 @@ interface TradingStore {
     weekly: { enabled: boolean; day: number; time: string };
     monthly: { enabled: boolean };
   };
-  
-  smartGridActive: boolean;
-  gridConfig: GridConfig;
-  smartGridStatus: SmartGridStatus[];
-  gridHistory: GridOrderHistory[];
   
   scalpingActive: boolean;
   scalpingConfig: ScalpingConfig;
@@ -216,20 +211,6 @@ export const useTradingStore = create<TradingStore>()(
   timezone: 'Europe/Bucharest',
   binanceMode: 'paper',
   lastCheckAt: null,
-  smartGridActive: false,
-  gridConfig: {
-    active: false,
-    autoRegimeSwitch: true,
-    gridMode: 'dynamic_atr',
-    gridLevels: 10,
-    rangePercent: 2.0,
-    highVolMultiplier: 1.6,
-    capitalPerGridPercent: 15,
-    dynamicCapital: true,
-    rangeThresholdProb: 75
-  },
-  smartGridStatus: [],
-  gridHistory: [],
   scalpingActive: true,
   scalpingConfig: {
     active: true,
@@ -244,6 +225,10 @@ export const useTradingStore = create<TradingStore>()(
     maxHoldMinutes: 15,
     maxNegativeHoldMinutes: 1.0,
     enableMaxNegativeHold: true,
+    dtwEnabled: true,
+    dtwWindow: 20,
+    dtwK: 10,
+    dtwMinScore: 65,
     minOpportunityScore: 50,
     cooldownMinutes: 2,
     enableDynamicSizing: true,
@@ -852,7 +837,6 @@ export const useTradingStore = create<TradingStore>()(
           sessionCycleCount: data.state.sessionCycleCount ?? 1,
           positions: data.state.positions || [],
           watchlist: data.state.watchlist || [],
-          smartGridStatus: data.state.smartGridStatus || [],
           logs: data.state.logs,
           signalJournal: data.state.signalJournal || [],
           lastCheckAt: data.state.lastCheckAt || data.lastCheckAt,
@@ -872,19 +856,7 @@ export const useTradingStore = create<TradingStore>()(
             enableDynamicSizing: true,
             minVolumeGrowth: 0.8
           },
-          scalpingActive: data.state.scalpingConfig?.active ?? true,
-          gridConfig: data.state.gridConfig || {
-            active: false,
-            autoRegimeSwitch: true,
-            gridMode: 'dynamic_atr',
-            gridLevels: 10,
-            rangePercent: 2.0,
-            highVolMultiplier: 1.6,
-            capitalPerGridPercent: 15,
-            dynamicCapital: true,
-            rangeThresholdProb: 75
-          },
-          smartGridActive: data.state.smartGridActive ?? false
+          scalpingActive: data.state.scalpingConfig?.active ?? true
         });
       }
       return data || { success: false };

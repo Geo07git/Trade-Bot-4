@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useTradingStore } from '../store';
 import { requestNotificationPermission } from '../services/notifications';
+import { Alerts } from './Alerts';
+import { AIAnalyst } from './AIAnalyst';
+import { AICalibration } from './AICalibration';
 import { NotificationDiagnostic } from './NotificationDiagnostic';
 import { AICostMonitor } from './AICostMonitor';
 import { apiFetch, safeJson } from '../utils/apiHelper';
@@ -29,7 +32,8 @@ import {
   Cpu,
   GitMerge,
   Sparkles,
-  BrainCircuit
+  BrainCircuit,
+  Target
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -39,7 +43,7 @@ function cn(...inputs: (string | undefined | null | false)[]) {
 }
 
 export function Settings() {
-  const [activeTab, setActiveTab] = useState<'engine' | 'intervals' | 'account' | 'ai' | 'notifications' | 'system'>('engine');
+  const [activeTab, setActiveTab] = useState<'engine' | 'intervals' | 'account' | 'ai' | 'notifications' | 'system' | 'alerts' | 'analyst' | 'calibration'>('engine');
 
   const [syncStatus, setSyncStatus] = useState<{ loading: boolean; message: string | null; error: boolean }>(
     { loading: false, message: null, error: false }
@@ -225,13 +229,16 @@ export function Settings() {
     setTimeout(() => setCopiedCmd(null), 3000);
   };
 
-  const tabItems: Array<{ id: 'engine' | 'intervals' | 'account' | 'ai' | 'notifications' | 'system'; label: string; icon: any; badge?: string }> = [
-    { id: 'engine', label: 'Execuție & Risc', icon: Activity, badge: executionEngine === 'both' ? 'Hibrid' : executionEngine === 'grid' ? 'Grid' : 'Scalping' },
+  const tabItems: Array<{ id: 'engine' | 'intervals' | 'account' | 'ai' | 'notifications' | 'system' | 'alerts' | 'analyst' | 'calibration'; label: string; icon: any; badge?: string }> = [
+    { id: 'engine', label: 'Execuție & Risc', icon: Activity, badge: executionEngine === 'both' ? 'Hibrid' : 'Scalping' },
     { id: 'intervals', label: 'Intervale & Server 24/7', icon: Clock },
     { id: 'account', label: 'Cont & Exchange', icon: CreditCard, badge: binanceMode.toUpperCase() },
     { id: 'ai', label: 'Modele AI & Gemini', icon: Bot },
     { id: 'notifications', label: 'Notificări', icon: Bell },
-    { id: 'system', label: 'Sistem & Desktop', icon: Sliders }
+    { id: 'system', label: 'Sistem & Desktop', icon: Sliders },
+    { id: 'alerts', label: 'Alerts', icon: AlertCircle },
+    { id: 'analyst', label: 'AI Analyst', icon: BrainCircuit },
+    { id: 'calibration', label: 'AI Calibration', icon: Target },
   ];
 
   return (
@@ -322,14 +329,14 @@ export function Settings() {
                 <div className="flex items-center gap-2">
                   <h3 className="text-lg font-serif text-white">Motor de Execuție Automatizată</h3>
                   <span className="text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-300 px-2 py-0.5 rounded border border-cyan-500/30">
-                    {(executionEngine || 'both') === 'both' ? 'HIBRID (GRID + SCALPING)' : ((executionEngine || 'both') === 'grid' ? 'DOAR GRID' : 'DOAR SCALPING')}
+                    {(executionEngine || 'both') === 'both' ? 'HIBRID (SCALPING)' : 'DOAR SCALPING'}
                   </span>
                 </div>
                 <p className="text-xs text-cyan-400/90">Alege modul în care se vor executa ordinele automate pe piață.</p>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-2">
               {/* Option 1: Both */}
               <button
                 onClick={() => setExecutionEngine('both')}
@@ -342,41 +349,16 @@ export function Settings() {
               >
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs font-bold text-cyan-300">⚡ Amândouă Odată</span>
+                    <span className="text-xs font-bold text-cyan-300">⚡ Hibrid</span>
                     <span className="text-[9px] font-mono bg-cyan-500/20 text-cyan-300 px-1.5 py-0.5 rounded">Hibrid Complete</span>
                   </div>
                   <p className="text-[11px] text-zinc-300 leading-snug">
-                    Rulează atât <strong>Smart AI Grid</strong> (în consolidare) cât și <strong>AI Scalping</strong> (pe impuls).
+                    Rulează <strong>AI Scalping</strong> pe impuls.
                   </p>
                 </div>
                 <div className="text-[10px] font-mono text-cyan-400/80 pt-2 border-t border-cyan-500/20 flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></span>
                   <span>Flexibilitate Maximă 24/7</span>
-                </div>
-              </button>
-
-              {/* Option 2: Grid Only */}
-              <button
-                onClick={() => setExecutionEngine('grid')}
-                className={cn(
-                  "p-4 rounded-xl text-left border transition-all relative flex flex-col justify-between space-y-3 cursor-pointer",
-                  executionEngine === 'grid'
-                    ? "bg-emerald-500/15 border-emerald-500/50 text-white shadow-lg shadow-emerald-950/50 ring-1 ring-emerald-500/30"
-                    : "bg-zinc-950/60 border-white/5 text-zinc-400 hover:bg-white/5 hover:border-white/10"
-                )}
-              >
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs font-bold text-emerald-300">📊 Doar Grid</span>
-                    <span className="text-[9px] font-mono bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded">Range Only</span>
-                  </div>
-                  <p className="text-[11px] text-zinc-300 leading-snug">
-                    Execută exclusiv ordine de rețea <strong>Smart AI Grid</strong> în canale de acumulare laterală. Scalping-ul este complet oprit.
-                  </p>
-                </div>
-                <div className="text-[10px] font-mono text-emerald-400/80 pt-2 border-t border-emerald-500/20 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                  <span>Oscilații & DCA Inteligent</span>
                 </div>
               </button>
 
@@ -396,7 +378,7 @@ export function Settings() {
                     <span className="text-[9px] font-mono bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded">Momentum Only</span>
                   </div>
                   <p className="text-[11px] text-zinc-300 leading-snug">
-                    Execută exclusiv semnale de <strong>AI Scalping</strong> bazate pe scorul ML. Grid-ul este complet oprit.
+                    Execută exclusiv semnale de <strong>AI Scalping</strong> bazate pe scorul ML.
                   </p>
                 </div>
                 <div className="text-[10px] font-mono text-amber-400/80 pt-2 border-t border-amber-500/20 flex items-center gap-1">
@@ -1944,6 +1926,10 @@ export function Settings() {
           </div>
         </div>
       )}
+
+      {activeTab === 'alerts' && <div className="h-full"><Alerts /></div>}
+      {activeTab === 'analyst' && <div className="h-full"><AIAnalyst /></div>}
+      {activeTab === 'calibration' && <div className="h-full"><AICalibration /></div>}
     </div>
   );
 }

@@ -1,6 +1,6 @@
-export type ViewState = 'superDashboard' | 'dashboard' | 'scalping' | 'grid' | 'journal' | 'analyst' | 'alerts' | 'logs' | 'settings' | 'calibration';
+export type ViewState = 'superDashboard' | 'dashboard' | 'scalping' | 'journal' | 'analyst' | 'alerts' | 'logs' | 'settings' | 'calibration';
 
-export type ExecutionEngineMode = 'both' | 'grid' | 'scalping';
+export type ExecutionEngineMode = 'both' | 'scalping';
 
 export type MlModelSelection = 'rf';
 
@@ -17,6 +17,10 @@ export interface ScalpingConfig {
   maxHoldMinutes: number;         // e.g. 15
   maxNegativeHoldMinutes?: number; // e.g. 1.0 minute on drawdown/loss
   enableMaxNegativeHold?: boolean; // ON/OFF switch for max negative hold limit rule
+  dtwEnabled?: boolean;
+  dtwWindow?: number;
+  dtwK?: number;
+  dtwMinScore?: number;
   minOpportunityScore: number;    // e.g. 50
   cooldownMinutes: number;        // e.g. 2
   enableDynamicSizing: boolean;   // e.g. true (3% - 8% based on MetaScore)
@@ -43,80 +47,6 @@ export interface MetaTradeScoreBreakdown {
   vetoReason?: string;
 }
 
-export interface GridConfig {
-  active: boolean;
-  autoRegimeSwitch: boolean;
-  gridMode: 'dynamic_atr' | 'support_resistance' | 'fixed_percent';
-  gridLevels: number; // e.g. 6 (3 buy, 3 sell)
-  rangePercent: number; // e.g. 2.5%
-  highVolMultiplier: number; // e.g. 1.8x step expansion
-  capitalPerGridPercent: number; // base capital %
-  dynamicCapital: boolean; // dynamic 5% - 25% allocation based on risk score
-  rangeThresholdProb: number; // e.g. 75%
-  // Capital Rotation Engine (Opportunity Cost & Smart Time Stop)
-  enableCapitalRotation?: boolean;
-  minRotationHoldMinutes?: number; // e.g. 90 minutes
-  minOppScoreDiff?: number; // e.g. +15 points higher
-  stagnantProfitMaxPct?: number; // e.g. 0.30%
-}
-
-export interface SmartGridStatus {
-  symbol: string;
-  regime: 'Range' | 'Trend' | 'High Volatility' | 'High Risk';
-  regimeBadge: '🟢 Range' | '🔵 Trend' | '🟠 Volatilitate' | '🔴 Risc Ridicat';
-  regimeExplanation: string;
-  gridActive: boolean;
-  gridAnchorPrice?: number;
-  currentPrice: number;
-  lowerPrice: number;
-  upperPrice: number;
-  gridStepPercent: number;
-  buyLevels: number[];
-  sellLevels: number[];
-  executedGridTrades: number;
-  gridProfit: number; // USDT
-  opportunityScore: number;
-  // Commercial AI Indicators & Multi-Regime Probabilities
-  rangeProb: number; // 0 - 100%
-  trendProb: number; // 0 - 100%
-  breakoutProb: number; // 0 - 100%
-  gridConfidence: number; // 0 - 100%
-  expectedDailyProfitPct: number; // e.g. 0.7
-  expectedDailyProfitMargin: number; // e.g. 0.4
-  maxDrawdownEstPct: number; // e.g. -8.2%
-  choppinessIndex: number; // e.g. 58.4 (>38.2 means range)
-  bollingerWidthPct: number; // e.g. 3.2%
-  hurstExponent: number; // < 0.5 mean reversion / range
-  adxValue: number;
-  atrPercent: number;
-  allocatedCapitalPct: number; // 5%, 10%, 15%, 25%
-  supportPrice: number;
-  resistancePrice: number;
-  lastAction?: string;
-  updatedAt: string;
-  // Volatility Shock & Smart Recovery Diagnostics
-  shockScore?: number;
-  shockLevel?: 'MIC' | 'MEDIU' | 'EXTREM' | 'NONE';
-  shockUntilMs?: number;
-  // Rotation Engine Diagnostics
-  openedAt?: string;
-  holdMinutes?: number;
-  rotationReadiness?: 'LOW_HOLD_TIME' | 'MONITORING' | 'EVALUATING_ROTATION' | 'ROTATION_CANDIDATE';
-  rotationTargetSymbol?: string;
-}
-
-export interface GridOrderHistory {
-  id: string;
-  symbol: string;
-  action: 'GRID_BUY' | 'GRID_SELL' | 'GRID_ROTATION';
-  price: number;
-  amount: number;
-  pnl?: number;
-  regime: string;
-  timestamp: string;
-  holdMinutes?: number;
-  rotationDetail?: string;
-}
 
 export interface MarketOpportunity {
   symbol: string;
@@ -247,7 +177,7 @@ export interface Position {
   shares?: number;
   pnl?: number;
   pnlPercent?: number;
-  strategy?: 'grid' | 'scalping' | 'manual';
+  strategy?: 'scalping' | 'manual';
   entryPatternName?: string;
   leverage?: number;
   margin?: number;

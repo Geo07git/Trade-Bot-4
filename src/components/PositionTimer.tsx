@@ -1,16 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Clock } from 'lucide-react';
-import { Position, GridConfig } from '../types';
+import { Position } from '../types';
 
 interface PositionTimerProps {
   pos: Position;
   maxHoldMinutes?: number;
   maxNegativeHoldMinutes?: number;
   enableMaxNegativeHold?: boolean;
-  gridConfig?: GridConfig;
 }
 
-export function PositionTimer({ pos, maxHoldMinutes = 15, maxNegativeHoldMinutes = 1.0, enableMaxNegativeHold = true, gridConfig }: PositionTimerProps) {
+export function PositionTimer({ pos, maxHoldMinutes = 15, maxNegativeHoldMinutes = 1.0, enableMaxNegativeHold = true }: PositionTimerProps) {
   const [now, setNow] = useState(Date.now());
   const fallbackRef = useRef<number>(Date.now());
 
@@ -33,10 +32,7 @@ export function PositionTimer({ pos, maxHoldMinutes = 15, maxNegativeHoldMinutes
     return null;
   };
 
-  const isGridPos = pos.strategy === 'grid';
-  const effectiveBaseHold = isGridPos
-    ? (gridConfig?.minRotationHoldMinutes ?? 90)
-    : (maxHoldMinutes ?? 15);
+  const effectiveBaseHold = maxHoldMinutes ?? 15;
 
   const currentPrice = pos.currentPrice || pos.entryPrice;
   const isProfit = pos.entryPrice > 0 ? currentPrice >= pos.entryPrice : true;
@@ -45,7 +41,7 @@ export function PositionTimer({ pos, maxHoldMinutes = 15, maxNegativeHoldMinutes
   const negStart = parseMs(pos.negativeEnteredAt) || openedAt;
 
   // 1. Negative Drawdown Timer (Triggered when position goes negative PnL < 0)
-  if (enableMaxNegativeHold && !isProfit && (maxNegativeHoldMinutes ?? 1.0) > 0 && !isGridPos) {
+  if (enableMaxNegativeHold && !isProfit && (maxNegativeHoldMinutes ?? 1.0) > 0) {
     const negElapsedMs = Math.max(0, now - negStart);
     const negTotalMs = (maxNegativeHoldMinutes ?? 1.0) * 60 * 1000;
     const negRemainingMs = Math.max(0, negTotalMs - negElapsedMs);
@@ -102,7 +98,7 @@ export function PositionTimer({ pos, maxHoldMinutes = 15, maxNegativeHoldMinutes
       return (
         <span 
           className="inline-flex items-center gap-1 text-[10px] font-mono font-bold text-emerald-300 bg-emerald-500/15 px-2 py-0.5 rounded-md border border-emerald-500/30 shadow-sm"
-          title={`${isGridPos ? 'Poziție Grid' : 'Scalping'} pe profit! Rămas din timpul standard: ${formattedTime}. Trailing Stop & TP activat.`}
+          title={`Scalping pe profit! Rămas din timpul standard: ${formattedTime}. Trailing Stop & TP activat.`}
         >
           <Clock className="w-3 h-3 text-emerald-400" />
           <span>⏱️ {formattedTime}</span>
@@ -143,7 +139,7 @@ export function PositionTimer({ pos, maxHoldMinutes = 15, maxNegativeHoldMinutes
           ? 'text-rose-300 bg-rose-500/20 border-rose-500/40 animate-pulse' 
           : 'text-amber-300 bg-amber-500/15 border-amber-500/30'
       }`}
-      title={`Timp rămas din limita de ${effectiveBaseHold} min pe pierdere (${isGridPos ? 'Grid' : 'Scalping'})`}
+      title={`Timp rămas din limita de ${effectiveBaseHold} min pe pierdere (Scalping)`}
     >
       <Clock className={`w-3 h-3 ${isCritical ? 'text-rose-400' : 'text-amber-400'}`} />
       <span>⏱️ {formattedTime}</span>

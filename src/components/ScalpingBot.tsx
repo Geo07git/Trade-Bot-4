@@ -174,7 +174,7 @@ export function ScalpingBot() {
 
   // Recent scalping signals from signal journal
   const scalpingSignals = (signalJournal || []).slice(0, 15);
-  const activeScalpPositions = (positions || []).filter(p => !p.strategy || p.strategy !== 'grid');
+  const activeScalpPositions = positions || [];
 
   return (
     <div className="flex-1 h-full overflow-y-auto bg-black text-zinc-100 p-3 sm:p-6 space-y-4 sm:space-y-6 pb-28 scrollbar-thin scrollbar-thumb-zinc-800">

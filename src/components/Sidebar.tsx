@@ -34,11 +34,7 @@ export function Sidebar({ currentView, onViewChange, isOpenMobile, onCloseMobile
     { id: 'superDashboard', label: '⚡ Super Dashboard' },
     { id: 'dashboard', label: 'Dashboard Complet' },
     { id: 'scalping', label: '⚡ Motor Scalping ML' },
-    { id: 'grid', label: '🤖 Smart AI Grid' },
     { id: 'journal', label: 'Trading Journal' },
-    { id: 'calibration', label: '🎯 AI Calibration' },
-    { id: 'analyst', label: 'AI Analyst' },
-    { id: 'alerts', label: 'Alerts' },
     { id: 'logs', label: 'Trade Logs' },
     { id: 'settings', label: 'Settings' },
   ];

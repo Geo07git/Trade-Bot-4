@@ -141,7 +141,6 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
     marketOpportunities,
     maxHoldMinutes,
     scalpingConfig,
-    gridConfig,
     initialBalance,
     accumulationBalance = 0,
     sessionCycleCount = 1,
@@ -240,11 +239,10 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
           <span className={cn(
             "flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-mono font-bold",
             (executionEngine || 'both') === 'both' ? "bg-cyan-500/10 border-cyan-500/30 text-cyan-300" :
-            executionEngine === 'grid' ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" :
             "bg-amber-500/10 border-amber-500/30 text-amber-300"
           )}>
             <span className="w-2 h-2 rounded-full bg-current animate-pulse"></span>
-            <span>{(executionEngine || 'both') === 'both' ? 'Hibrid' : (executionEngine === 'grid' ? 'Grid' : 'Scalping')}</span>
+            <span>{(executionEngine || 'both') === 'both' ? 'Hibrid' : 'Scalping'}</span>
           </span>
 
           {onSwitchToFullDashboard && (
@@ -420,7 +418,7 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-mono px-2 py-0.5 rounded border bg-zinc-800 text-zinc-300 border-white/10">
-              Motor: {(executionEngine || 'both') === 'both' ? 'Hibrid' : (executionEngine === 'grid' ? 'DOAR GRID 🟢' : 'DOAR SCALPING ⚡')}
+              Motor: {(executionEngine || 'both') === 'both' ? 'Hibrid' : 'DOAR SCALPING ⚡'}
             </span>
             <span className="text-xs text-zinc-400 font-mono">
               Margină: <strong className="text-white">${positionsMargin.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
@@ -431,14 +429,6 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
           </div>
         </div>
 
-        {executionEngine === 'grid' && positions.length > 0 && (
-          <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-[11px] text-emerald-300 font-mono flex items-center gap-2">
-            <span>ℹ️</span>
-            <span>
-              <strong>Motor activ pe DOAR GRID.</strong> Pozițiile active de mai jos (deschise anterior prin Scalping) vor fi închise la atingerea profitului (TP), Stop Loss sau la expirarea timpului. Noi achiziții de Scalping sunt blocate.
-            </span>
-          </div>
-        )}
 
         {positions.length === 0 ? (
           <div className="text-center py-8 text-zinc-500 space-y-2">
@@ -454,9 +444,9 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
               const posPnL = (currentPrice - pos.entryPrice) * pos.amount;
               const posPnLPercent = pos.entryPrice > 0 ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100 : 0;
               const isSelling = sellingSymbol === pos.symbol;
-              const isGridPos = pos.strategy === 'grid';
+              const isGridPos = false;
               const oppMatch = (marketOpportunities || []).find(o => o.symbol === pos.symbol);
-              const posPatternName = pos.entryPatternName || oppMatch?.candlestickPatternName || (isGridPos ? 'Grid Rebound 🕸️' : 'Bullish Engulfing 🟢');
+              const posPatternName = pos.entryPatternName || oppMatch?.candlestickPatternName || 'Bullish Engulfing 🟢';
 
               return (
                 <div 
@@ -469,13 +459,8 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
                       <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                         BUY
                       </span>
-                      <span className={cn(
-                        "text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase",
-                        isGridPos
-                          ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
-                          : "bg-purple-500/10 text-purple-300 border-purple-500/30"
-                      )}>
-                        {isGridPos ? 'GRID' : `SCALPING ${pos.leverage && pos.leverage > 1 ? `${pos.leverage}x` : ''}`}
+                      <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase bg-purple-500/10 text-purple-300 border-purple-500/30">
+                        {`SCALPING ${pos.leverage && pos.leverage > 1 ? `${pos.leverage}x` : ''}`}
                       </span>
                     </div>
 
@@ -484,7 +469,6 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
                       maxHoldMinutes={maxHoldMinutes} 
                       maxNegativeHoldMinutes={scalpingConfig?.maxNegativeHoldMinutes ?? 1.0} 
                       enableMaxNegativeHold={scalpingConfig?.enableMaxNegativeHold ?? true}
-                      gridConfig={gridConfig} 
                     />
 
                     <button

@@ -10,12 +10,8 @@ import { Sidebar } from './components/Sidebar';
 import { SuperDashboard } from './components/SuperDashboard';
 import { Dashboard } from './components/Dashboard';
 import { ScalpingBot } from './components/ScalpingBot';
-import { SmartGridBot } from './components/SmartGridBot';
-import { AIAnalyst } from './components/AIAnalyst';
 import { TradeLogs } from './components/TradeLogs';
-import { Alerts } from './components/Alerts';
 import { TradingJournal } from './components/TradingJournal';
-import { AICalibration } from './components/AICalibration';
 import { Settings } from './components/Settings';
 import { useTradingStore } from './store';
 import { sendWebPush, sendNotificationMessage } from './services/notifications';
@@ -153,10 +149,6 @@ export default function App() {
           if (data.testnetApiSecret && data.testnetApiSecret !== currentStore.testnetApiSecret) updates.testnetApiSecret = data.testnetApiSecret;
           if (data.binanceMode && data.binanceMode !== currentStore.binanceMode) updates.binanceMode = data.binanceMode;
           if (data.lastCheckAt && data.lastCheckAt !== currentStore.lastCheckAt) updates.lastCheckAt = data.lastCheckAt;
-          if (data.smartGridActive !== undefined && data.smartGridActive !== currentStore.smartGridActive) updates.smartGridActive = data.smartGridActive;
-          if (data.gridConfig && JSON.stringify(data.gridConfig) !== JSON.stringify(currentStore.gridConfig)) updates.gridConfig = data.gridConfig;
-          if (data.smartGridStatus && JSON.stringify(data.smartGridStatus) !== JSON.stringify(currentStore.smartGridStatus)) updates.smartGridStatus = data.smartGridStatus;
-          if (data.gridHistory && JSON.stringify(data.gridHistory) !== JSON.stringify(currentStore.gridHistory)) updates.gridHistory = data.gridHistory;
           if (data.aiUsageStats && JSON.stringify(data.aiUsageStats) !== JSON.stringify(currentStore.aiUsageStats)) updates.aiUsageStats = data.aiUsageStats;
 
           if (Object.keys(updates).length > 0) {
@@ -230,11 +222,7 @@ export default function App() {
     'superDashboard', 
     'dashboard', 
     'scalping',
-    'grid', 
     'journal', 
-    'calibration',
-    'analyst', 
-    'alerts', 
     'logs', 
     'settings'
   ];
@@ -349,11 +337,7 @@ export default function App() {
           {activeView === 'superDashboard' && <SuperDashboard onSwitchToFullDashboard={() => setCurrentView('dashboard')} />}
           {activeView === 'dashboard' && <Dashboard />}
           {activeView === 'scalping' && <ScalpingBot />}
-          {activeView === 'grid' && <SmartGridBot />}
           {activeView === 'journal' && <TradingJournal />}
-          {activeView === 'calibration' && <AICalibration />}
-          {activeView === 'analyst' && <AIAnalyst />}
-          {activeView === 'alerts' && <Alerts />}
           {activeView === 'logs' && <TradeLogs />}
           {activeView === 'settings' && <Settings />}
         </div>
