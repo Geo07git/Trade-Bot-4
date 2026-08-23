@@ -1,11 +1,11 @@
-# 🚀 G&S-Trade-Bot v3.0
+# 🚀 G&S-Trade-Bot v4.0
 ### Multi-Platform AI Trading, Scalping & Smart Grid System (Web • Desktop • Mobile)
 
 **G&S-Trade-Bot v3.0** este o platformă completă de tranzacționare automată alimentată de modele Machine Learning (Random Forest Ensemble, XGBoost Classifier) și Inteligență Artificială (Google Gemini AI). Sistemul include server autonom 24/7, Motor de Scalping de Înaltă Frecvență, Bot Smart Grid, monitorizare live a costurilor API și suport nativ pentru **Web**, **Desktop Executable (Windows .exe)** și **Mobile (Android .apk)**.
 
 ---
 
-## 🌟 Ce este nou în Versiunea 3.0?
+## 🌟 Ce este nou în Versiunea 4.0?
 
 1. **Garantare Execuție Unificată Max Hold Scalping**:
    - Corecție completă a buclei de verificare pe pozițiile deschise. Limita `Max Hold` (ex: 10 minute) este acum verificată la fiecare ciclu pe **toate** pozițiile active, eliminând definitiv depășirile accidentale de timp pe pierdere.
