@@ -202,7 +202,7 @@ export const useTradingStore = create<TradingStore>()(
   stopLossPercent: 2.0, // 2.0% stop loss
   maxHoldMinutes: 5, // 5 min max position hold time
   executionEngine: 'both', // 'both' | 'grid' | 'scalping'
-  mlModelType: 'both', // 'rf' | 'tcn' | 'both'
+  mlModelType: 'rf',
   serverUrl: '',
   apiKey: '',
   apiSecret: '',
@@ -309,15 +309,20 @@ export const useTradingStore = create<TradingStore>()(
       const res = await apiFetch('/api/bot/reset-accumulation', { method: 'POST' });
       const data = await safeJson(res, null);
       if (data && data.state) {
-        set({
-          accumulationBalance: data.state.accumulationBalance || 0,
-          sessionCycleCount: data.state.sessionCycleCount || 1,
+        set((state) => ({
+          accumulationBalance: data.state.accumulationBalance !== undefined ? data.state.accumulationBalance : 0,
+          sessionCycleCount: data.state.sessionCycleCount !== undefined ? data.state.sessionCycleCount : 1,
+          initialBalance: data.state.initialBalance !== undefined ? data.state.initialBalance : state.initialBalance,
+          balance: data.state.balance !== undefined ? data.state.balance : state.balance,
           logs: data.state.logs || []
-        });
+        }));
+      } else {
+        set({ accumulationBalance: 0, sessionCycleCount: 1 });
       }
       return data;
     } catch (e: any) {
       console.error('Error resetting accumulation vault:', e);
+      set({ accumulationBalance: 0, sessionCycleCount: 1 });
       return null;
     }
   },
@@ -843,6 +848,11 @@ export const useTradingStore = create<TradingStore>()(
         set({
           balance: data.state.balance,
           initialBalance: data.state.initialBalance,
+          accumulationBalance: data.state.accumulationBalance ?? 0,
+          sessionCycleCount: data.state.sessionCycleCount ?? 1,
+          positions: data.state.positions || [],
+          watchlist: data.state.watchlist || [],
+          smartGridStatus: data.state.smartGridStatus || [],
           logs: data.state.logs,
           signalJournal: data.state.signalJournal || [],
           lastCheckAt: data.state.lastCheckAt || data.lastCheckAt,

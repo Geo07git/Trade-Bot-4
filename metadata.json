@@ -1,5 +1,5 @@
 {
-  "name": "G&S-Trade-Bot",
+  "name": "GS-Trade-Bot",
   "description": "An AI Trading Platform dashboard supporting multi-broker connection, real-time Gemini AI market analysis, algorithmic execution simulation, backtesting mockups, and trade logging with a professional dark theme.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

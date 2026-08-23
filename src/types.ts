@@ -2,7 +2,7 @@ export type ViewState = 'superDashboard' | 'dashboard' | 'scalping' | 'grid' | '
 
 export type ExecutionEngineMode = 'both' | 'grid' | 'scalping';
 
-export type MlModelSelection = 'rf' | 'tcn' | 'both';
+export type MlModelSelection = 'rf';
 
 export interface ScalpingConfig {
   active: boolean;
@@ -131,6 +131,8 @@ export interface MarketOpportunity {
   momentumAccelScore?: number; // 0 - 100 (15% weight)
   rvolScore?: number; // 0 - 100 (10% weight)
   structureScore?: number; // 0 - 100 (10% weight)
+  breakoutAtrScore?: number;
+  trendConfirmationScore?: number;
   liquiditySpreadScore?: number; // 0 - 100 (5% weight)
   rfProb: number;
   metaProb: number;

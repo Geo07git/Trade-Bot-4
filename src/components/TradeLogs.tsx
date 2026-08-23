@@ -100,13 +100,9 @@ export function TradeLogs() {
 
   const handleClear = () => {
     if (activeTab === 'console') {
-      if (window.confirm('Sigur dorești să ștergi toate logurile din memorie și de pe server?')) {
-        clearLogs();
-      }
+      clearLogs();
     } else {
-      if (window.confirm('Sigur dorești să ștergi jurnalul de audit semnale de pe server?')) {
-        clearSignalJournal();
-      }
+      clearSignalJournal();
     }
   };
 
@@ -380,7 +376,7 @@ export function TradeLogs() {
                       <th className="py-3 px-4">Ora</th>
                       <th className="py-3 px-4">Simbol</th>
                       <th className="py-3 px-4">Preț Actual</th>
-                      <th className="py-3 px-4">TCN Conv1D / RF</th>
+                      <th className="py-3 px-4">Random Forest (RF)</th>
                       <th className="py-3 px-4">Meta Model</th>
                       <th className="py-3 px-4">Reversal Setup</th>
                       <th className="py-3 px-4">Acțiune Finală</th>
@@ -617,7 +613,7 @@ export function TradeLogs() {
 
             <div className="grid grid-cols-4 gap-2.5">
               <div className="bg-black/50 border border-white/5 rounded-xl p-2.5">
-                <span className="text-[10px] text-zinc-500 uppercase tracking-wider block">TCN Conv1D / RF</span>
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider block">Random Forest (RF)</span>
                 <span className="text-base font-mono font-bold text-emerald-400">{selectedSignal.rfProb}%</span>
               </div>
               <div className="bg-black/50 border border-white/5 rounded-xl p-2.5">

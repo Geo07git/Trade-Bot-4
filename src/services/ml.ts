@@ -1,8 +1,6 @@
 // Technical Indicators & Machine Learning Engine for G&S-Trade-Bot
 // Performs real mathematical calculations and trains actual ML models on historical market klines.
 
-import { getTCNModelInstance } from './tcn';
-
 interface CooldownEntry {
   cooldownUntil: number;
   reason: string;
@@ -25,8 +23,8 @@ export function registerSymbolCooldown(
   lastExitPrice?: number
 ): number {
   const cleanSym = symbol.toUpperCase().replace('USDT', '') + 'USDT';
-  // Watch mode window (8 minutes)
-  const durationMinutes = 8;
+  // Watch mode window (3 minutes)
+  const durationMinutes = 3;
   const cooldownUntil = Date.now() + (durationMinutes * 60 * 1000);
   const reasonStr = customReason || (pnlPercent < 0 ? `Stop Loss (${pnlPercent.toFixed(2)}%)` : `Ieșire (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%)`);
 
@@ -712,13 +710,6 @@ export interface StrategyResult {
   signal: 'BUY' | 'SELL' | 'HOLD';
   probability: number;
   rfProb?: number;
-  tcnProb?: number;
-  tcnDetails?: {
-    inferenceTimeMs: number;
-    isColdStart: boolean;
-    statusMessage: string;
-    sequenceLength: number;
-  };
   metaProb?: number;
   vetoReason?: string;
   targetScore?: number;
@@ -1258,11 +1249,29 @@ function calculateGini(groups: DataPoint[][], classes: number[]) {
   return gini;
 }
 
+// Gini computed directly from class counts (no array allocation/filtering needed).
+function giniFromCounts(counts: number[], size: number): number {
+  if (size === 0) return 0;
+  let score = 0;
+  for (const c of counts) {
+    const p = c / size;
+    score += p * p;
+  }
+  return 1.0 - score;
+}
+
+const CLASS_LABELS = [-1, 0, 1];
+const CLASS_TO_SLOT: Record<number, number> = { '-1': 0, '0': 1, '1': 2 } as any;
+
 function getBestSplit(dataset: DataPoint[], maxFeatures?: number): { featureIndex: number, threshold: number, groups: DataPoint[][] } | null {
-  const classes = [-1, 0, 1];
-  let bIndex = 999, bValue = 999, bScore = 999, bGroups: DataPoint[][] = [];
+  let bIndex = 999, bValue = 999, bScore = 999, bSplitPos = -1;
+  let bSorted: DataPoint[] = [];
   if (dataset.length < 2) return null;
   const nFeatures = dataset[0].features.length;
+  const n = dataset.length;
+
+  const totalCounts = [0, 0, 0];
+  for (const d of dataset) totalCounts[CLASS_TO_SLOT[d.label]]++;
 
   let featuresToConsider: number[] = [];
   if (maxFeatures) {
@@ -1274,22 +1283,54 @@ function getBestSplit(dataset: DataPoint[], maxFeatures?: number): { featureInde
     featuresToConsider = Array.from({length: nFeatures}, (_, i) => i);
   }
 
+  // PERF FIX: previously this sorted the dataset once per feature (fine) but then
+  // re-filtered the ENTIRE dataset with .filter() for every one of the ~10 candidate
+  // thresholds (O(10*n) extra work per feature, per node, per tree). Since the array
+  // is already sorted by the feature, the class composition of "everything below the
+  // cut" is just a running prefix count — no filtering needed, O(n) total per feature.
   for (const index of featuresToConsider) {
-    const sorted = [...dataset].sort((a,b) => a.features[index] - b.features[index]);
+    const sorted = [...dataset].sort((a, b) => a.features[index] - b.features[index]);
     const step = Math.max(1, Math.floor(sorted.length / 10)); // Evaluate ~10 percentiles
+
+    const leftCounts = [0, 0, 0];
+    let leftSize = 0;
+    let nextIdx = 0;
+
     for (let i = step; i < sorted.length; i += step) {
+      // Advance the running prefix counts up to position i (elements [nextIdx, i))
+      while (nextIdx < i) {
+        leftCounts[CLASS_TO_SLOT[sorted[nextIdx].label]]++;
+        leftSize++;
+        nextIdx++;
+      }
       const val = sorted[i].features[index];
-      const left = dataset.filter(d => d.features[index] < val);
-      const right = dataset.filter(d => d.features[index] >= val);
-      if (left.length === 0 || right.length === 0) continue;
-      const gini = calculateGini([left, right], classes);
-      if (gini < bScore) {
-        bIndex = index; bValue = val; bScore = gini; bGroups = [left, right];
+      // Skip candidate thresholds that land on a tie with the previous value
+      // (matches previous "left < val, right >= val" semantics with real splits only)
+      if (leftSize === 0 || leftSize === n) continue;
+
+      const rightCounts = [
+        totalCounts[0] - leftCounts[0],
+        totalCounts[1] - leftCounts[1],
+        totalCounts[2] - leftCounts[2],
+      ];
+      const rightSize = n - leftSize;
+
+      const giniLeft = giniFromCounts(leftCounts, leftSize);
+      const giniRight = giniFromCounts(rightCounts, rightSize);
+      const weightedGini = (giniLeft * leftSize + giniRight * rightSize) / n;
+
+      if (weightedGini < bScore) {
+        bIndex = index; bValue = val; bScore = weightedGini; bSplitPos = i; bSorted = sorted;
       }
     }
   }
   if (bIndex === 999) return null;
-  return { featureIndex: bIndex, threshold: bValue, groups: bGroups };
+
+  // Materialize the winning split's groups only once (for the winning feature only,
+  // not for every candidate threshold as before).
+  const finalLeft = bSorted.filter(d => d.features[bIndex] < bValue);
+  const finalRight = bSorted.filter(d => d.features[bIndex] >= bValue);
+  return { featureIndex: bIndex, threshold: bValue, groups: [finalLeft, finalRight] };
 }
 
 function toTerminal(group: DataPoint[]): { value: number, prob: number } {
@@ -1380,6 +1421,9 @@ export class RandomForest {
 
     for (let i = 0; i < nTrees; i++) {
       const sample: DataPoint[] = [];
+      // Track which dataset rows were actually drawn into this tree's bootstrap,
+      // so we can evaluate the tree on the rows it did NOT see (out-of-bag).
+      const inBagIds = new Set<DataPoint>();
       const baseSize = Math.max(20, Math.floor(dataset.length / 3));
       const buySize = Math.round(baseSize * 1.3);
       const sellSize = Math.round(baseSize * 1.3);
@@ -1387,28 +1431,48 @@ export class RandomForest {
 
       if (buys.length > 0) {
         for (let j = 0; j < buySize; j++) {
-          sample.push(buys[Math.floor(Math.random() * buys.length)]);
+          const row = buys[Math.floor(Math.random() * buys.length)];
+          sample.push(row);
+          inBagIds.add(row);
         }
       }
       if (sells.length > 0) {
         for (let j = 0; j < sellSize; j++) {
-          sample.push(sells[Math.floor(Math.random() * sells.length)]);
+          const row = sells[Math.floor(Math.random() * sells.length)];
+          sample.push(row);
+          inBagIds.add(row);
         }
       }
       if (holds.length > 0) {
         for (let j = 0; j < holdSize; j++) {
-          sample.push(holds[Math.floor(Math.random() * holds.length)]);
+          const row = holds[Math.floor(Math.random() * holds.length)];
+          sample.push(row);
+          inBagIds.add(row);
         }
       }
 
       const tree = buildTree(sample, maxDepth, minSize, maxFeatures);
-      
-      // Calculate Tree Weight = Tree Accuracy * Profit Factor estimate
-      let correctCount = 0;
-      for (const s of sample) {
-        if (predictTree(tree, s.features).value === s.label) correctCount++;
+
+      // FIX: Tree Weight was previously computed on the tree's OWN bootstrap sample
+      // (in-bag accuracy), which is systematically optimistic — a depth-6 tree nearly
+      // memorizes its ~900-row sample, so almost every tree scored close to the max
+      // weight (1.5) regardless of real quality, defeating the point of weighted voting.
+      // Now we evaluate each tree ONLY on dataset rows it never trained on
+      // (out-of-bag), which is a genuine held-out estimate of that tree's skill.
+      const oobRows = dataset.filter(d => !inBagIds.has(d));
+      let oobCorrect = 0;
+      for (const row of oobRows) {
+        if (predictTree(tree, row.features).value === row.label) oobCorrect++;
       }
-      const treeAcc = sample.length > 0 ? correctCount / sample.length : 0.5;
+      // Fallback to in-bag accuracy only in the rare case a tree has no OOB rows
+      // (tiny datasets), so training never crashes or produces a zero weight.
+      const treeAcc = oobRows.length > 0
+        ? oobCorrect / oobRows.length
+        : (() => {
+            let c = 0;
+            for (const s of sample) if (predictTree(tree, s.features).value === s.label) c++;
+            return sample.length > 0 ? c / sample.length : 0.5;
+          })();
       const weight = Math.max(0.2, parseFloat((treeAcc * 1.5).toFixed(2)));
 
       this.trees.push(tree);
@@ -1480,21 +1544,32 @@ export class RandomForest {
     const drops = new Array(numFeatures).fill(0);
     const sampleSet = valSet.length > 250 ? valSet.slice(0, 250) : valSet;
 
-    for (let fIdx = 0; fIdx < numFeatures; fIdx++) {
-      const permuted = sampleSet.map(d => ({ ...d, features: [...d.features] }));
-      for (let i = permuted.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        const tmp = permuted[i].features[fIdx];
-        permuted[i].features[fIdx] = permuted[j].features[fIdx];
-        permuted[j].features[fIdx] = tmp;
-      }
+    // FIX: a single random shuffle per feature is a noisy, high-variance estimate of
+    // that feature's true importance (it can look important or unimportant just by
+    // shuffle luck). Averaging over a few independent shuffles is the standard fix,
+    // and is cheap here (only affects the diagnostic feature-importance report shown
+    // to the user — this value is never read by the trading logic itself).
+    const NUM_SHUFFLES = 3;
 
-      let permCorrect = 0;
-      for (const d of permuted) {
-        if (this.predict(d.features).value === d.label) permCorrect++;
+    for (let fIdx = 0; fIdx < numFeatures; fIdx++) {
+      let dropSum = 0;
+      for (let shuffle = 0; shuffle < NUM_SHUFFLES; shuffle++) {
+        const permuted = sampleSet.map(d => ({ ...d, features: [...d.features] }));
+        for (let i = permuted.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          const tmp = permuted[i].features[fIdx];
+          permuted[i].features[fIdx] = permuted[j].features[fIdx];
+          permuted[j].features[fIdx] = tmp;
+        }
+
+        let permCorrect = 0;
+        for (const d of permuted) {
+          if (this.predict(d.features).value === d.label) permCorrect++;
+        }
+        const permAcc = permCorrect / permuted.length;
+        dropSum += Math.max(0, baseAcc - permAcc);
       }
-      const permAcc = permCorrect / permuted.length;
-      drops[fIdx] = Math.max(0, baseAcc - permAcc);
+      drops[fIdx] = dropSum / NUM_SHUFFLES;
     }
 
     const counts = new Array(numFeatures).fill(0);
@@ -1928,10 +2003,10 @@ function calculateRocAucBuy(scores: { isBuy: boolean; probBuy: number }[]): numb
 
 export async function runRealStrategyAnalysis(
   symbol: string,
-  _modelType: 'rf' | 'tcn' | 'both' | string = 'both',
+  _modelType: string = 'rf',
   modelParams: any = {},
   onProgress?: (progress: number) => void,
-  selectedModelType?: 'rf' | 'tcn' | 'both'
+  selectedModelType?: string
 ): Promise<StrategyResult> {
   if (onProgress) onProgress(10);
   
@@ -2053,8 +2128,14 @@ export async function runRealStrategyAnalysis(
     sellPct: parseFloat(((sellCount / totalDataBars) * 100).toFixed(1)),
   };
   
-  // Real Walk-Forward Validation (Expanding Window with Purged Lookahead)
-  const nFolds = fastMode ? 1 : 2;
+  // Walk-Forward Validation (Expanding Window with Purged Lookahead).
+  // FIX: was 2 folds in non-fast mode — bumped to 3. The getBestSplit() speedup
+  // (cumulative class counts instead of repeated array.filter() per candidate
+  // threshold) frees up enough of the training budget to afford one more fold
+  // without slowing the scan down noticeably, and a 3rd fold gives a less noisy,
+  // more representative out-of-fold estimate of accuracy/profitFactor/Sharpe
+  // (more OOF trades feed the meta-model and the Platt calibrator too).
+  const nFolds = fastMode ? 1 : 3;
   const minTrainSize = Math.floor(dataset.length * 0.5); // 50% training set
   const testSize = Math.floor((dataset.length - minTrainSize) / nFolds);
 
@@ -2076,7 +2157,12 @@ export async function runRealStrategyAnalysis(
     sellAsBuy: 0, sellAsHold: 0, sellAsSell: 0,
   };
   
-  const feeRate = 0.001; // Binance 0.1% fee
+  // FIX: was 0.001 (0.1%), but server/bot.ts executeTrade() actually charges
+  // `cost * 0.00075` (0.075%) per side. A mismatched backtest fee assumption means the
+  // backtested profitFactor/winRate/expectancy don't match what the live engine will
+  // actually net after costs — aligned here so backtest results are directly comparable
+  // to live/paper trading performance.
+  const feeRate = 0.00075; // Binance 0.075% fee (matches server/bot.ts executeTrade)
   const slippageRate = 0.0005; // 0.05% slippage
   const confidenceThreshold = modelParams.confidenceThreshold !== undefined ? modelParams.confidenceThreshold : 40;
 
@@ -2090,6 +2176,21 @@ export async function runRealStrategyAnalysis(
   const MIN_VOLUME_RATIO = 0.80;
   const MIN_ATR_PCT = 0.25;
   const META_MIN_PROFIT_PROB = 48;
+
+  // FIX: nEstimators/maxDepth defaults were duplicated as separate magic numbers in
+  // 2 places (per-fold model below, and productionModel further down) — the exact
+  // "silently diverge" risk the comment above already warns about for the confluence
+  // thresholds. Centralized here into one pair of constants used by both.
+  //
+  // Bumped from 18->32 trees and depth 6->7: previously, more/deeper trees would have
+  // been risky because tree "weight" was computed on each tree's own training sample
+  // (see RandomForest.train fix), so an overfit deep tree still got near-max weight.
+  // Now that weighting uses genuine out-of-bag accuracy, an overfit tree is naturally
+  // downweighted by the ensemble itself — so adding more trees and one extra level of
+  // depth reduces ensemble variance instead of just adding overfit noise, at the cost
+  // of runtime that the getBestSplit() speedup already offset.
+  const DEFAULT_N_ESTIMATORS = fastMode ? 10 : 32;
+  const DEFAULT_MAX_DEPTH = fastMode ? 5 : 7;
 
   let finalModel: RandomForest = new RandomForest();
   let filteredTradesCount = 0;
@@ -2105,8 +2206,8 @@ export async function runRealStrategyAnalysis(
 
     // PASUL 1: Train Primary Random Forest
     const model = new RandomForest();
-    const numEstimators = modelParams.nEstimators || (fastMode ? 8 : 18);
-    const maxTreeDepth = modelParams.maxDepth || (fastMode ? 5 : 6);
+    const numEstimators = modelParams.nEstimators || DEFAULT_N_ESTIMATORS;
+    const maxTreeDepth = modelParams.maxDepth || DEFAULT_MAX_DEPTH;
     model.train(trainData, numEstimators, maxTreeDepth, 3);
 
     if (fold === nFolds - 1) {
@@ -2289,7 +2390,23 @@ export async function runRealStrategyAnalysis(
         } else if (candleReversal.isBearishReversal && curVolRatio >= 1.0 && (pred.prob >= 35 || pred.value === -1)) {
           let entryPrice = nextKline.open * (1 - slippageRate);
           position = { type: -1, entryPrice, entryIdx: klineIdx + 1 };
-        } else if (backtestScore >= Math.min(45, confidenceThreshold)) {
+        } else if (
+          backtestScore >= Math.min(45, confidenceThreshold) &&
+          // FIX: the backtest previously opened "confluence" trades using only
+          // backtestScore, without the ADX/ATR minimums the live engine enforces
+          // (MIN_ADX_FOR_ENTRY / MIN_ATR_PCT below, and the meta-model threshold).
+          // That meant the meta-model — and the reported backtest win rate / profit
+          // factor — were trained/measured on a population of trades broader (and on
+          // average lower-quality) than what live trading would actually take,
+          // understating live performance. Volume is already soft-penalized via
+          // backtestScore above (same 0.80x threshold as MIN_VOLUME_RATIO), so it's
+          // intentionally left as a soft penalty here rather than a second hard gate,
+          // to avoid over-restricting the sample size available to the meta-model.
+          // Same thresholds, same variable names as the live veto — no new
+          // "magic numbers" introduced, just reused where they already existed.
+          currentAdxVal >= MIN_ADX_FOR_ENTRY &&
+          currentAtrPct >= MIN_ATR_PCT
+        ) {
           if (pred.value === 1) {
              let entryPrice = nextKline.open * (1 + slippageRate);
              position = { type: 1, entryPrice, entryIdx: klineIdx + 1 };
@@ -2324,7 +2441,7 @@ export async function runRealStrategyAnalysis(
   // exclusiv pentru inferența live — fără să atingem metricile de validare/feature
   // importance, care rămân pe `finalModel` ca înainte.
   const productionModel = new RandomForest();
-  productionModel.train(dataset, modelParams.nEstimators || 18, modelParams.maxDepth || 6, 3);
+  productionModel.train(dataset, modelParams.nEstimators || DEFAULT_N_ESTIMATORS, modelParams.maxDepth || DEFAULT_MAX_DEPTH, 3);
 
   if (onProgress) onProgress(75);
 
@@ -2437,31 +2554,6 @@ export async function runRealStrategyAnalysis(
 
   const rawProb = Math.round(currentPred.prob);
   const calibratedProb = plattCalibrator.calibrate(rawProb);
-
-  // TCN Model Sequence Inference (Temporal Convolutional Network)
-  const tcnModel = getTCNModelInstance({
-    timeframe: (modelParams.tcnTimeframe || '1m') as any,
-    sequenceLength: modelParams.tcnSequenceLength || 100,
-    filters: modelParams.tcnFilters || 24,
-    dilationRates: modelParams.tcnDilationRates || [1, 2, 4, 8],
-  });
-
-  let tcnPrediction: any;
-  try {
-    tcnPrediction = await tcnModel.predict(klines);
-  } catch (err: any) {
-    console.warn(`[ML TCN Prediction Warning]: ${err?.message || err}`);
-    tcnPrediction = {
-      value: 0,
-      probBuy: 33.3,
-      probSell: 33.3,
-      probHold: 33.4,
-      prob: 50,
-      inferenceTimeMs: 0,
-      isColdStart: true,
-      statusMessage: '⚠️ TCN Standby'
-    };
-  }
 
   // Market Regime Detection
   const lastI = klines.length - 1;
@@ -2581,76 +2673,19 @@ export async function runRealStrategyAnalysis(
   let metaVetoApplied = false;
   let vetoReason = '';
 
-  // 0. Model Selection Engine Routing ('rf' | 'tcn' | 'both')
-  const effectiveModelType: 'rf' | 'tcn' | 'both' = (selectedModelType || modelParams?.mlModelType || _modelType || 'both') as 'rf' | 'tcn' | 'both';
-
-  // 1. Strict Veto Guardrails Only (Hard safety stops before continuous scoring)
+  // 0. Random Forest Candidate & Score Evaluation
   let strictVetoTriggered = false;
 
-  let isBuyCandidate = false;
-  let isSellCandidate = false;
-  let baseScoreForUnification = calibratedProb;
+  const isBuyCandidate = currentPred.value === 1 || (currentPred.probBuy > currentPred.probSell && currentPred.probBuy >= 32);
+  const isSellCandidate = currentPred.value === -1 || (currentPred.probSell > currentPred.probBuy && currentPred.probSell >= 52);
+  const baseScoreForUnification = calibratedProb;
 
-  if (effectiveModelType === 'tcn') {
-    if (tcnPrediction.isColdStart) {
+  // Veto Check: Primary RF Prob < 32%
+  const minRfTarget = 32;
+  if (!isBuyCandidate && !isSellCandidate && calibratedProb < minRfTarget) {
+    if (!reversalSignal.isBullishReversal && !reversalSignal.isBearishReversal) {
       strictVetoTriggered = true;
-      vetoReason = '🚫 Model TCN în Standby (Neantrenat). Antrenează modelul TCN din Setări / AI pentru a activa modul TCN Deep Learning.';
-      isBuyCandidate = false;
-      isSellCandidate = false;
-      baseScoreForUnification = 50;
-    } else {
-      isBuyCandidate = tcnPrediction.probBuy > tcnPrediction.probSell && tcnPrediction.probBuy >= 34;
-      isSellCandidate = tcnPrediction.probSell > tcnPrediction.probBuy && tcnPrediction.probSell >= 48;
-      baseScoreForUnification = isBuyCandidate ? Math.round(tcnPrediction.probBuy) : (isSellCandidate ? Math.round(tcnPrediction.probSell) : Math.round(tcnPrediction.prob));
-
-      // TCN Veto
-      if (!isBuyCandidate && !isSellCandidate && tcnPrediction.prob < 34) {
-        if (!reversalSignal.isBullishReversal && !reversalSignal.isBearishReversal) {
-          strictVetoTriggered = true;
-          vetoReason = `🚫 VETO Strict TCN: Probabilitate TCN Conv1D < 34% (${tcnPrediction.prob}%)`;
-        }
-      }
-    }
-  } else if (effectiveModelType === 'rf') {
-    isBuyCandidate = currentPred.value === 1 || (currentPred.probBuy > currentPred.probSell && currentPred.probBuy >= 32);
-    isSellCandidate = currentPred.value === -1 || (currentPred.probSell > currentPred.probBuy && currentPred.probSell >= 52);
-    baseScoreForUnification = calibratedProb;
-
-    // Veto Check: Primary RF Prob < 32%
-    const minRfTarget = 32;
-    if (!isBuyCandidate && !isSellCandidate && calibratedProb < minRfTarget) {
-      if (!reversalSignal.isBullishReversal && !reversalSignal.isBearishReversal) {
-        strictVetoTriggered = true;
-        vetoReason = `🚫 VETO Strict RF: Probabilitate Random Forest < ${minRfTarget}% (${calibratedProb}%)`;
-      }
-    }
-  } else {
-    // Mode 'both' (Hybrid Confluence)
-    const rfBuy = currentPred.value === 1 || (currentPred.probBuy > currentPred.probSell && currentPred.probBuy >= 32);
-    const rfSell = currentPred.value === -1 || (currentPred.probSell > currentPred.probBuy && currentPred.probSell >= 52);
-    
-    isBuyCandidate = rfBuy && (tcnPrediction.isColdStart || tcnPrediction.probBuy >= tcnPrediction.probSell * 0.85);
-    isSellCandidate = rfSell && (tcnPrediction.isColdStart || tcnPrediction.probSell >= tcnPrediction.probBuy * 0.85);
-    baseScoreForUnification = calibratedProb;
-
-    // Veto Check 1: Primary RF Prob < 32%
-    const minRfTarget = 32;
-    if (!isBuyCandidate && !isSellCandidate && calibratedProb < minRfTarget) {
-      if (!reversalSignal.isBullishReversal && !reversalSignal.isBearishReversal) {
-        strictVetoTriggered = true;
-        vetoReason = `🚫 VETO Strict Hibrid: Probabilitate Random Forest < ${minRfTarget}% (${calibratedProb}%)`;
-      }
-    }
-
-    // TCN Strong Contradiction Veto in Hybrid Mode
-    if (!strictVetoTriggered && !tcnPrediction.isColdStart) {
-      if (rfBuy && tcnPrediction.probSell >= 68) {
-        strictVetoTriggered = true;
-        vetoReason = `🚫 VETO Divergență Hibrid: TCN indică Sell puternic (${tcnPrediction.probSell.toFixed(1)}%) vs RF Buy`;
-      } else if (rfSell && tcnPrediction.probBuy >= 68) {
-        strictVetoTriggered = true;
-        vetoReason = `🚫 VETO Divergență Hibrid: TCN indică Buy puternic (${tcnPrediction.probBuy.toFixed(1)}%) vs RF Sell`;
-      }
+      vetoReason = `🚫 VETO Strict RF: Probabilitate Random Forest < ${minRfTarget}% (${calibratedProb}%)`;
     }
   }
 
@@ -2688,7 +2723,7 @@ export async function runRealStrategyAnalysis(
       const isGreenExpansion = (lastClose > lastOpen) && ((lastClose - lastOpen) / lastOpen >= 0.0025) || reversalSignal.isBullishReversal;
 
       // 4) ML Confidence: RF & Meta scores strong
-      const isStrongMlConfluence = (effectiveModelType === 'tcn' ? (tcnPrediction.prob >= 60) : (calibratedProb >= 65)) && metaProfitProb >= 55;
+      const isStrongMlConfluence = calibratedProb >= 65 && metaProfitProb >= 55;
 
       // A New Momentum Event requires Breakout/Reclaim + (Volume Surge OR Green Expansion) + ML Confluence
       const isNewMomentumEvent = (isPriceBreakout || reversalSignal.isBullishReversal) && (isVolumeSurge || isGreenExpansion) && isStrongMlConfluence;
@@ -2709,6 +2744,26 @@ export async function runRealStrategyAnalysis(
     if (!isBreakoutVolume && !isStrongReversal) {
       strictVetoTriggered = true;
       vetoReason = `🧊 VETO Regim Stagnare (NO-TRADE): ATR (${lastAtrPct.toFixed(2)}% < ${minAtrPctThreshold.toFixed(2)}%) sau Range 20p (${range20pPct.toFixed(2)}% < ${minRange20pThreshold.toFixed(2)}%) - Volatilitate prea scăzută pentru acoperirea comisioanelor (~0.15%-0.20%). Conservare capital.`;
+    }
+  }
+
+  // Veto Check 6 (BUG FIX): isAdxStrong / isVolumeConfirmed / isAtrAdequate / isMetaApproved
+  // were computed above (MIN_ADX_FOR_ENTRY, MIN_VOLUME_RATIO, MIN_ATR_PCT, META_MIN_PROFIT_PROB)
+  // but were never actually read anywhere afterward — dead code. The comment above their
+  // constants ("centralizate ... pentru a tăia intrările de calitate joasă") describes exactly
+  // this veto, but it was never wired in, so low-ADX / low-volume / low-ATR / low-meta-confidence
+  // trades were never actually being blocked by this filter, despite the log/comment implying
+  // they were. Reversal-pattern trades are still allowed to bypass it, consistent with the other
+  // veto checks above (a genuine capitulation/euphoria setup can occur outside "normal" trend regimes).
+  if (!strictVetoTriggered && (isBuyCandidate || isSellCandidate) && !reversalSignal.isBullishReversal && !reversalSignal.isBearishReversal) {
+    const failedChecks: string[] = [];
+    if (!isAdxStrong) failedChecks.push(`ADX ${lastAdx.toFixed(1)} < ${MIN_ADX_FOR_ENTRY}`);
+    if (!isVolumeConfirmed) failedChecks.push(`Volum ${lastVolRatio.toFixed(2)}x < ${MIN_VOLUME_RATIO}x`);
+    if (!isAtrAdequate) failedChecks.push(`ATR% ${lastAtrPct.toFixed(2)}% < ${MIN_ATR_PCT}%`);
+    if (!isMetaApproved) failedChecks.push(`Meta-Model ${metaProfitProb}% < ${META_MIN_PROFIT_PROB}%`);
+    if (failedChecks.length > 0) {
+      strictVetoTriggered = true;
+      vetoReason = `🚫 VETO Filtre Hard (ADX/Volum/ATR/Meta): ${failedChecks.join(', ')}`;
     }
   }
 
@@ -2761,28 +2816,13 @@ export async function runRealStrategyAnalysis(
   const metaAdjustment = Math.max(-10, Math.min(10, Math.round((metaProfitProb - 50) * 0.2)));
   scoreAdjustments.push(`${metaAdjustment >= 0 ? '+' : ''}${metaAdjustment}% Meta-Model (${metaProfitProb}%)`);
 
-  // TCN Conv1D Continuous Adjustment (+/- 8%) when model is trained and mode is 'both'
-  let tcnAdjustment = 0;
-  if (effectiveModelType === 'both' && !tcnPrediction.isColdStart) {
-    if (isBuyCandidate) {
-      tcnAdjustment = Math.max(-8, Math.min(8, Math.round((tcnPrediction.probBuy - tcnPrediction.probSell) * 0.15)));
-    } else if (isSellCandidate) {
-      tcnAdjustment = Math.max(-8, Math.min(8, Math.round((tcnPrediction.probSell - tcnPrediction.probBuy) * 0.15)));
-    }
-    if (tcnAdjustment !== 0) {
-      scoreAdjustments.push(`${tcnAdjustment >= 0 ? '+' : ''}${tcnAdjustment}% TCN Conv1D (${tcnPrediction.prob}%)`);
-    }
-  } else if (effectiveModelType === 'rf') {
-    scoreAdjustments.push(`[Doar Random Forest Activ]`);
-  } else if (effectiveModelType === 'tcn') {
-    scoreAdjustments.push(`[Doar TCN Deep Learning Activ]`);
-  }
+  scoreAdjustments.push(`[Doar Random Forest Activ]`);
 
   // News & Macro Impact (+/- 3%..5%)
   scoreAdjustments.push(`${impactAdjustment >= 0 ? '+' : ''}${impactAdjustment}% News Sentiment (${newsSentiment.sentimentLabel})`);
 
   // Calculate Unified Confidence Score
-  const rawUnifiedScore = baseScoreForUnification + metaAdjustment + tcnAdjustment + adxAdjustment + trendAdjustment + rsiAdjustment + volAdjustment + impactAdjustment;
+  const rawUnifiedScore = baseScoreForUnification + metaAdjustment + adxAdjustment + trendAdjustment + rsiAdjustment + volAdjustment + impactAdjustment;
   const finalUnifiedScore = Math.min(98, Math.max(5, Math.round(rawUnifiedScore)));
   const minConfidenceTarget = 38; // Execution threshold for active trading (scaled ~10% for faster scalping capture)
 
@@ -2866,20 +2906,15 @@ export async function runRealStrategyAnalysis(
   const trendSign = trendAdjustment >= 0 ? `+${trendAdjustment}%` : `${trendAdjustment}%`;
   const metaSign = metaAdjustment >= 0 ? `+${metaAdjustment}%` : `${metaAdjustment}%`;
 
-  const modelEngineLabel = effectiveModelType === 'both' 
-    ? 'Hibrid Confluent (Random Forest + TCN Causal Conv1D)'
-    : (effectiveModelType === 'tcn' ? 'Doar TCN Deep Learning (Rețea Neuronală Causal Conv1D)' : 'Doar Random Forest (18 Arbori Decizionali)');
+  const modelEngineLabel = 'Doar Random Forest (18 Arbori Decizionali)';
 
   const detailedExplanation: string[] = [
     `0. Mod Calcul Activ: ${modelEngineLabel}`,
     `1. Triple Barrier Labeling & Purged Walk-Forward CV: Antrenat pe 1000 lumânări cu aliniere trend.`,
-    `2. TCN Model (Temporal Convolutional Network 1D Causal): Probabilitate Secvențială ${tcnPrediction.prob}% (${tcnPrediction.statusMessage}).`,
-    `3. Probability Calibration (Platt Scaling): Probabilitate brută ${rawProb}% recalibrată la ${calibratedProb}%.`,
-    `4. Reversal & Regime Detector: ${reversalSignal.isBullishReversal ? `⚡ CAPITULATION REBOUND BUY DETECTAT (${reversalSignal.reasons.join(', ')})` : reversalSignal.isBearishReversal ? `⚡ EUPHORIA REVERSAL SELL DETECTAT (${reversalSignal.reasons.join(', ')})` : `Reversal Inactiv | ADX=${lastAdx.toFixed(1)} (${adxSign}), VolRatio=${lastVolRatio.toFixed(2)} (${volSign})`}.`,
-    `5. Contribuții Defalcate Scor Unificat:
+    `2. Probability Calibration (Platt Scaling): Probabilitate brută ${rawProb}% recalibrată la ${calibratedProb}%.`,
+    `3. Reversal & Regime Detector: ${reversalSignal.isBullishReversal ? `⚡ CAPITULATION REBOUND BUY DETECTAT (${reversalSignal.reasons.join(', ')})` : reversalSignal.isBearishReversal ? `⚡ EUPHORIA REVERSAL SELL DETECTAT (${reversalSignal.reasons.join(', ')})` : `Reversal Inactiv | ADX=${lastAdx.toFixed(1)} (${adxSign}), VolRatio=${lastVolRatio.toFixed(2)} (${volSign})`}.`,
+    `4. Contribuții Defalcate Scor Unificat:
        • Mod Calcul Selectat: ${modelEngineLabel}
-       • Scor Primar Utilizat: ${baseScoreForUnification}% (${effectiveModelType === 'tcn' ? 'TCN Conv1D' : 'Random Forest'})
-       • TCN Causal Conv1D Sequence: ${tcnPrediction.prob}%
        • Random Forest (Bază Calibrată): ${calibratedProb}%
        • Meta-Model Adjustment: ${metaSign}
        • EMA Trend Alignment: ${trendSign}
@@ -2887,8 +2922,8 @@ export async function runRealStrategyAnalysis(
        • ADX Trend Strength: ${adxSign}
        • News & Sentiment Impact: ${impactSign}
        ➜ Scor Final Ajustat: ${finalUnifiedScore}%`,
-    `6. Sentiment Știri & Macro: ${newsSentiment.sentimentLabel} (${sentimentSign} Net, impact ${impactSign})`,
-    action !== 'HOLD' ? `7. Execution Engine: Strategie [${entryStrategy}] | Intrare: $${entryPrice.toFixed(4)} | TP: $${tpPrice.toFixed(4)} (${tpMultiplier.toFixed(1)}x ATR) | SL: $${slPrice.toFixed(4)} (${slMultiplier.toFixed(1)}x ATR) | Risk/Reward 1:${(tpMultiplier / slMultiplier).toFixed(2)}` : `7. Execution Engine: Stare În Așteptare (HOLD)`
+    `5. Sentiment Știri & Macro: ${newsSentiment.sentimentLabel} (${sentimentSign} Net, impact ${impactSign})`,
+    action !== 'HOLD' ? `6. Execution Engine: Strategie [${entryStrategy}] | Intrare: $${entryPrice.toFixed(4)} | TP: $${tpPrice.toFixed(4)} (${tpMultiplier.toFixed(1)}x ATR) | SL: $${slPrice.toFixed(4)} (${slMultiplier.toFixed(1)}x ATR) | Risk/Reward 1:${(tpMultiplier / slMultiplier).toFixed(2)}` : `6. Execution Engine: Stare În Așteptare (HOLD)`
   ];
 
   const isNeutralPrediction = currentPred.value === 0;
@@ -2912,13 +2947,6 @@ export async function runRealStrategyAnalysis(
     signal: action,
     probability: finalUnifiedScore,
     rfProb: calibratedProb,
-    tcnProb: tcnPrediction.prob,
-    tcnDetails: {
-      inferenceTimeMs: tcnPrediction.inferenceTimeMs,
-      isColdStart: tcnPrediction.isColdStart,
-      statusMessage: tcnPrediction.statusMessage,
-      sequenceLength: tcnModel.getConfig().sequenceLength,
-    },
     metaProb: metaProfitProb,
     vetoReason,
     targetScore: finalUnifiedScore,

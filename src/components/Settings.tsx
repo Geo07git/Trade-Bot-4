@@ -31,7 +31,6 @@ import {
   Sparkles,
   BrainCircuit
 } from 'lucide-react';
-import type { TCNValidationBenchmark } from '../services/tcn';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -56,73 +55,7 @@ export function Settings() {
   const [addTopupAmount, setAddTopupAmount] = useState('10');
   const [topupSuccessMsg, setTopupSuccessMsg] = useState<string | null>(null);
 
-  // TCN Model Configuration States
-  const [tcnTimeframe, setTcnTimeframe] = useState<'1m' | '2m' | '3m'>('1m');
-  const [tcnSequenceLength, setTcnSequenceLength] = useState<number>(100);
-  const [tcnFilters, setTcnFilters] = useState<number>(24);
-  const [tcnEpochs, setTcnEpochs] = useState<number>(60);
-  const [isTrainingTcn, setIsTrainingTcn] = useState(false);
-  const [tcnTrainProgress, setTcnTrainProgress] = useState(0);
-  const [tcnTrainStatus, setTcnTrainStatus] = useState<string | null>(null);
-  const [tcnLossHistory, setTcnLossHistory] = useState<number[]>([]);
-  const [tcnAccHistory, setTcnAccHistory] = useState<number[]>([]);
-  const [tcnCurrentLoss, setTcnCurrentLoss] = useState<number | null>(null);
-  const [tcnCurrentAcc, setTcnCurrentAcc] = useState<number | null>(null);
-  const [tcnBenchmark, setTcnBenchmark] = useState<TCNValidationBenchmark | null>(null);
 
-  const handleTrainTCNModel = async () => {
-    setIsTrainingTcn(true);
-    setTcnTrainProgress(5);
-    setTcnLossHistory([]);
-    setTcnAccHistory([]);
-    setTcnCurrentLoss(null);
-    setTcnCurrentAcc(null);
-    setTcnBenchmark(null);
-    setTcnTrainStatus(`Se descarcă 1000 candele istorice de la Binance (BTCUSDT) pentru secvența TCN (N=${tcnSequenceLength})...`);
-    try {
-      const { fetchHistoricalKlines } = await import('../services/ml');
-      const { getTCNModelInstance } = await import('../services/tcn');
-      const klines = await fetchHistoricalKlines('BTCUSDT', 1000);
-      setTcnTrainProgress(20);
-      setTcnTrainStatus(`Inițializare rețea TCN Causal Conv1D Z-Score Normalizată (${tcnFilters} filtre, ${tcnEpochs} epoci)...`);
-      
-      const tcn = getTCNModelInstance({
-        timeframe: tcnTimeframe,
-        sequenceLength: tcnSequenceLength,
-        filters: tcnFilters,
-      });
-
-      const fitRes = await tcn.trainOnHistoricalKlines(klines, tcnEpochs, (progress, epochLog) => {
-        setTcnTrainProgress(20 + Math.round((progress / 100) * 80));
-        if (epochLog) {
-          setTcnCurrentLoss(epochLog.loss);
-          setTcnCurrentAcc(epochLog.accuracy);
-          setTcnLossHistory(epochLog.lossHistory);
-          setTcnAccHistory(epochLog.accuracyHistory);
-          setTcnTrainStatus(`Antrenare online TF.js în desfășurare... Epoca ${epochLog.epoch}/${tcnEpochs} | Loss: ${epochLog.loss.toFixed(4)} | Acuratețe: ${epochLog.accuracy.toFixed(1)}%`);
-        }
-      });
-
-      setTcnTrainProgress(100);
-      setTcnCurrentLoss(fitRes.finalLoss);
-      setTcnCurrentAcc(fitRes.finalAccuracy);
-      setTcnLossHistory(fitRes.lossHistory);
-      setTcnAccHistory(fitRes.accuracyHistory);
-      if (fitRes.benchmark) {
-        setTcnBenchmark(fitRes.benchmark);
-      }
-
-      if (fitRes.isModelReady) {
-        setTcnTrainStatus(`✅ Antrenare TCN completată cu succes! Loss final: ${fitRes.finalLoss} (< 0.693 baseline) | Train Acc: ${fitRes.finalAccuracy}% | Out-of-Sample Test Acc: ${fitRes.benchmark?.testAccuracy || 'N/A'}%`);
-      } else {
-        setTcnTrainStatus(`⚠️ Antrenare TCN completată! Loss final: ${fitRes.finalLoss} (Prag țintă: < 0.693). Se recomandă antrenare pe 80-100 epoci.`);
-      }
-    } catch (err: any) {
-      setTcnTrainStatus(`❌ Eroare antrenare TCN: ${err?.message || err}`);
-    } finally {
-      setIsTrainingTcn(false);
-    }
-  };
   const [serverTestStatus, setServerTestStatus] = useState<{ loading: boolean; message: string | null; success: boolean | null }>({
     loading: false,
     message: null,
@@ -160,6 +93,7 @@ export function Settings() {
   const [secondsSinceCheck, setSecondsSinceCheck] = useState<number>(0);
   const [isCheckingPulse, setIsCheckingPulse] = useState(false);
   const [pulseBannerMessage, setPulseBannerMessage] = useState<string | null>(null);
+  const [confirmResetAcc, setConfirmResetAcc] = useState(false);
 
   const [mlEngineStarted, setMlEngineStarted] = useState<boolean>(() => {
     return localStorage.getItem('mlEngineStarted') === 'true';
@@ -473,131 +407,44 @@ export function Settings() {
             </div>
           </div>
 
-          {/* ML Calculation Model Selection Switch (3 Positions: RF / TCN / Ambele) */}
-          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/50 to-indigo-950/30 border border-indigo-500/20 rounded-2xl p-6 shadow-xl">
+          {/* ML Calculation Model Selection Card */}
+          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/50 to-amber-950/20 border border-amber-500/20 rounded-2xl p-6 shadow-xl">
             <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
               <div className="flex items-center gap-3">
-                <div className="p-2.5 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-400">
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400">
                   <BrainCircuit className="w-5 h-5" />
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
                     <h3 className="text-lg font-serif text-white">Motor Calcul Semnale ML</h3>
-                    <span className="text-[10px] bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded font-mono font-bold">
-                      Comutator 3 Poziții
+                    <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded font-mono font-bold">
+                      ACTIV
                     </span>
                   </div>
-                  <p className="text-xs text-indigo-300/80">
-                    Alege cu ce model dorești să fie calculate probabilitățile de intrare, oportunitățile de piață și semnalele de tranzacționare.
+                  <p className="text-xs text-amber-300/80">
+                    Procesare ultra-rapidă și stabilă a probabilităților de intrare, oportunităților de piață și semnalelor de tranzacționare.
                   </p>
                 </div>
               </div>
               <div className="flex items-center gap-2 bg-zinc-950/80 border border-white/10 px-3 py-1.5 rounded-xl">
-                <span className="text-[11px] text-zinc-400">Mod Selectat:</span>
-                <span className={cn(
-                  "text-xs font-mono font-bold px-2 py-0.5 rounded",
-                  (mlModelType || 'both') === 'rf' ? "bg-amber-500/20 text-amber-300 border border-amber-500/30" :
-                  (mlModelType || 'both') === 'tcn' ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30" :
-                  "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
-                )}>
-                  {(mlModelType || 'both') === 'rf' ? '🌲 DOAR RANDOM FOREST (RF)' : (mlModelType || 'both') === 'tcn' ? '🧠 DOAR TCN DEEP LEARNING' : '⚡ AMBELE (HIBRID CONFLUENT)'}
+                <span className="text-[11px] text-zinc-400">Mod Activ:</span>
+                <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  🌲 RANDOM FOREST (RF)
                 </span>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              {/* Option 1: Random Forest (RF) */}
-              <button
-                onClick={() => setMlModelType('rf')}
-                className={cn(
-                  "p-4 rounded-xl text-left border transition-all relative flex flex-col justify-between space-y-3 cursor-pointer group",
-                  (mlModelType || 'both') === 'rf'
-                    ? "bg-amber-500/15 border-amber-500/50 text-white shadow-lg shadow-amber-950/50 ring-1 ring-amber-500/30"
-                    : "bg-zinc-950/60 border-white/5 text-zinc-400 hover:bg-white/5 hover:border-white/10"
-                )}
-              >
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <Cpu className="w-4 h-4 text-amber-400" />
-                      <span className="text-xs font-bold text-amber-300">1. Random Forest (RF)</span>
-                    </div>
-                    <span className="text-[9px] font-mono bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded font-bold">RF Only</span>
-                  </div>
-                  <p className="text-[11px] text-zinc-300 leading-snug">
-                    Calculează semnalele exclusiv pe baza ansamblului <strong>Random Forest (18 arbori)</strong> și indicatorilor tehnici clasici (RSI, ADX, EMA, Volum).
-                  </p>
+            <div className="p-4 rounded-xl text-left border border-amber-500/30 bg-amber-500/10 text-white space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <Cpu className="w-4 h-4 text-amber-400" />
+                  <span className="text-xs font-bold text-amber-300">Random Forest Classifier (18 Arbori Decizionali)</span>
                 </div>
-                <div className="text-[10px] font-mono text-amber-400/80 pt-2 border-t border-amber-500/20 flex items-center justify-between">
-                  <span className="flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-                    <span>Inferență &lt; 1ms</span>
-                  </span>
-                  <span className="text-[9px] text-zinc-500">Decizie Tabelară</span>
-                </div>
-              </button>
-
-              {/* Option 2: Deep Learning TCN */}
-              <button
-                onClick={() => setMlModelType('tcn')}
-                className={cn(
-                  "p-4 rounded-xl text-left border transition-all relative flex flex-col justify-between space-y-3 cursor-pointer group",
-                  (mlModelType || 'both') === 'tcn'
-                    ? "bg-indigo-500/15 border-indigo-500/50 text-white shadow-lg shadow-indigo-950/50 ring-1 ring-indigo-500/30"
-                    : "bg-zinc-950/60 border-white/5 text-zinc-400 hover:bg-white/5 hover:border-white/10"
-                )}
-              >
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <Activity className="w-4 h-4 text-indigo-400" />
-                      <span className="text-xs font-bold text-indigo-300">2. Deep Learning TCN</span>
-                    </div>
-                    <span className="text-[9px] font-mono bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded font-bold">TCN Only</span>
-                  </div>
-                  <p className="text-[11px] text-zinc-300 leading-snug">
-                    Calculează semnalele exclusiv prin rețeaua neuronală secvențială <strong>Causal Conv1D (Temporal Convolutional Network)</strong> pe candele istorice.
-                  </p>
-                </div>
-                <div className="text-[10px] font-mono text-indigo-400/80 pt-2 border-t border-indigo-500/20 flex items-center justify-between">
-                  <span className="flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
-                    <span>TF.js WebGL / GPU</span>
-                  </span>
-                  <span className="text-[9px] text-zinc-500">Pattern Temporal</span>
-                </div>
-              </button>
-
-              {/* Option 3: Both (Hybrid Confluence) */}
-              <button
-                onClick={() => setMlModelType('both')}
-                className={cn(
-                  "p-4 rounded-xl text-left border transition-all relative flex flex-col justify-between space-y-3 cursor-pointer group",
-                  (mlModelType || 'both') === 'both'
-                    ? "bg-cyan-500/15 border-cyan-500/50 text-white shadow-lg shadow-cyan-950/50 ring-1 ring-cyan-500/30"
-                    : "bg-zinc-950/60 border-white/5 text-zinc-400 hover:bg-white/5 hover:border-white/10"
-                )}
-              >
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <GitMerge className="w-4 h-4 text-cyan-400" />
-                      <span className="text-xs font-bold text-cyan-300">3. Ambele (Hibrid Confluent)</span>
-                    </div>
-                    <span className="text-[9px] font-mono bg-cyan-500/20 text-cyan-300 px-1.5 py-0.5 rounded font-bold">Recomandat</span>
-                  </div>
-                  <p className="text-[11px] text-zinc-300 leading-snug">
-                    Calculează și <strong>combină ambele modele</strong> (Random Forest + TCN Causal Conv1D) cu filtrare automată a divergențelor pentru precizie maximă.
-                  </p>
-                </div>
-                <div className="text-[10px] font-mono text-cyan-400/80 pt-2 border-t border-cyan-500/20 flex items-center justify-between">
-                  <span className="flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></span>
-                    <span>Confluență Dublă</span>
-                  </span>
-                  <span className="text-[9px] text-cyan-400">Siguranță Maximă</span>
-                </div>
-              </button>
+                <span className="text-[9px] font-mono bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded font-bold">RF Active</span>
+              </div>
+              <p className="text-[11px] text-zinc-300 leading-snug">
+                Calculează semnalele pe baza ansamblului <strong>Random Forest (18 arbori decizionali)</strong>, evaluând în timp real indicatorii tehnici cheie (RSI, ADX, EMA, Volum, Reversals, Platt Calibration) cu inferență sub 1ms.
+              </p>
             </div>
           </div>
 
@@ -821,17 +668,17 @@ export function Settings() {
                   <div className="flex items-center gap-3">
                     <span className={cn(
                       "text-xs font-mono font-bold px-2.5 py-1 rounded border transition-colors",
-                      (scalpingConfig?.enableMaxNegativeHold ?? true)
+                      (scalpingConfig?.enableMaxNegativeHold ?? false)
                         ? "bg-rose-500/20 text-rose-300 border-rose-500/40"
                         : "bg-zinc-800 text-zinc-400 border-zinc-700"
                     )}>
-                      {(scalpingConfig?.enableMaxNegativeHold ?? true) ? `${scalpingConfig?.maxNegativeHoldMinutes ?? 1.0} minute` : 'DEZACTIVAT'}
+                      {(scalpingConfig?.enableMaxNegativeHold ?? false) ? `${scalpingConfig?.maxNegativeHoldMinutes ?? 1.0} minute` : 'DEZACTIVAT'}
                     </span>
                     {/* Toggle ON/OFF Switch */}
                     <label className="relative inline-flex items-center cursor-pointer">
                       <input 
                         type="checkbox" 
-                        checked={scalpingConfig?.enableMaxNegativeHold ?? true} 
+                        checked={scalpingConfig?.enableMaxNegativeHold ?? false} 
                         onChange={(e) => setEnableMaxNegativeHold(e.target.checked)}
                         className="sr-only peer" 
                       />
@@ -1268,6 +1115,46 @@ export function Settings() {
             </div>
           </div>
 
+          {/* Resetare Sold Acumulare Vault */}
+          <div className="bg-gradient-to-b from-amber-950/20 to-zinc-900/50 border border-amber-500/20 rounded-2xl p-6">
+            <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+              <h3 className="text-lg font-serif text-amber-200">Resetare Sold "Acumulare" (Vault)</h3>
+              <span className="text-xs font-mono font-bold px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                Sold: ${accumulationBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (Ciclu #{sessionCycleCount})
+              </span>
+            </div>
+            <p className="text-xs text-zinc-400 mb-4">
+              Resetează doar profitul conservat din Vault-ul de Acumulare la $0.00 și reinițializează numărul de cicluri la #1, fără a afecta balanța principală sau pozițiile active.
+            </p>
+            {confirmResetAcc ? (
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={async () => {
+                    await resetAccumulationVault();
+                    setConfirmResetAcc(false);
+                  }}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-mono font-bold transition-all cursor-pointer shadow-lg"
+                >
+                  Confirmi resetarea la $0.00?
+                </button>
+                <button
+                  onClick={() => setConfirmResetAcc(false)}
+                  className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-xs font-mono transition-all cursor-pointer"
+                >
+                  Anulează
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setConfirmResetAcc(true)}
+                className="px-4 py-2 bg-amber-500/20 hover:bg-rose-500/30 text-amber-200 hover:text-rose-200 border border-amber-500/40 hover:border-rose-500/50 rounded-lg text-xs font-mono font-semibold transition-all cursor-pointer flex items-center gap-2"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Resetează Sold "Acumulare" la $0.00
+              </button>
+            )}
+          </div>
+
           {/* Binance API Credentials */}
           <div className="bg-zinc-900/50 border border-white/5 rounded-2xl p-6">
             <div className="mb-4">
@@ -1500,439 +1387,44 @@ export function Settings() {
           {/* AI Cost Monitor Component */}
           <AICostMonitor />
 
-          {/* ML Calculation Engine Switch (3 Positions: RF / TCN / Ambele) */}
-          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/50 to-indigo-950/30 border border-indigo-500/20 rounded-2xl p-6 shadow-xl">
+          {/* ML Calculation Engine Card */}
+          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/50 to-amber-950/20 border border-amber-500/20 rounded-2xl p-6 shadow-xl">
             <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
               <div className="flex items-center gap-3">
-                <div className="p-2.5 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-400">
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400">
                   <BrainCircuit className="w-5 h-5" />
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="text-lg font-serif text-white">Comutator Mod Calcul Semnale ML</h3>
-                    <span className="text-[10px] bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded font-mono font-bold">
-                      RF • TCN • AMBELE
+                    <h3 className="text-lg font-serif text-white">Motor Calcul Semnale ML</h3>
+                    <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded font-mono font-bold">
+                      ACTIV
                     </span>
                   </div>
-                  <p className="text-xs text-indigo-300/80">
-                    Alege motorul activ cu care botul generează semnalele de tranzacționare și scorul composite de oportunitate.
+                  <p className="text-xs text-amber-300/80">
+                    Procesare ultra-rapidă și stabilă a probabilităților de intrare, oportunităților de piață și semnalelor de tranzacționare.
                   </p>
                 </div>
               </div>
               <div className="flex items-center gap-2 bg-zinc-950/80 border border-white/10 px-3 py-1.5 rounded-xl">
-                <span className="text-[11px] text-zinc-400">Mod Calcul:</span>
-                <span className={cn(
-                  "text-xs font-mono font-bold px-2 py-0.5 rounded",
-                  (mlModelType || 'both') === 'rf' ? "bg-amber-500/20 text-amber-300 border border-amber-500/30" :
-                  (mlModelType || 'both') === 'tcn' ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30" :
-                  "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
-                )}>
-                  {(mlModelType || 'both') === 'rf' ? '🌲 DOAR RANDOM FOREST (RF)' : (mlModelType || 'both') === 'tcn' ? '🧠 DOAR TCN DEEP LEARNING' : '⚡ AMBELE (HIBRID CONFLUENT)'}
+                <span className="text-[11px] text-zinc-400">Mod Activ:</span>
+                <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  🌲 RANDOM FOREST (RF)
                 </span>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              {/* Option 1: Random Forest (RF) */}
-              <button
-                onClick={() => setMlModelType('rf')}
-                className={cn(
-                  "p-4 rounded-xl text-left border transition-all relative flex flex-col justify-between space-y-3 cursor-pointer group",
-                  (mlModelType || 'both') === 'rf'
-                    ? "bg-amber-500/15 border-amber-500/50 text-white shadow-lg shadow-amber-950/50 ring-1 ring-amber-500/30"
-                    : "bg-zinc-950/60 border-white/5 text-zinc-400 hover:bg-white/5 hover:border-white/10"
-                )}
-              >
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <Cpu className="w-4 h-4 text-amber-400" />
-                      <span className="text-xs font-bold text-amber-300">1. Random Forest (RF)</span>
-                    </div>
-                    <span className="text-[9px] font-mono bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded font-bold">RF Only</span>
-                  </div>
-                  <p className="text-[11px] text-zinc-300 leading-snug">
-                    Calculează semnalele exclusiv pe baza ansamblului <strong>Random Forest (18 arbori)</strong> și indicatorilor tehnici clasici (RSI, ADX, EMA, Volum).
-                  </p>
+            <div className="p-4 rounded-xl text-left border border-amber-500/30 bg-amber-500/10 text-white space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <Cpu className="w-4 h-4 text-amber-400" />
+                  <span className="text-xs font-bold text-amber-300">Random Forest Classifier (18 Arbori Decizionali)</span>
                 </div>
-                <div className="text-[10px] font-mono text-amber-400/80 pt-2 border-t border-amber-500/20 flex items-center justify-between">
-                  <span className="flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-                    <span>Inferență &lt; 1ms</span>
-                  </span>
-                  <span className="text-[9px] text-zinc-500">Decizie Tabelară</span>
-                </div>
-              </button>
-
-              {/* Option 2: Deep Learning TCN */}
-              <button
-                onClick={() => setMlModelType('tcn')}
-                className={cn(
-                  "p-4 rounded-xl text-left border transition-all relative flex flex-col justify-between space-y-3 cursor-pointer group",
-                  (mlModelType || 'both') === 'tcn'
-                    ? "bg-indigo-500/15 border-indigo-500/50 text-white shadow-lg shadow-indigo-950/50 ring-1 ring-indigo-500/30"
-                    : "bg-zinc-950/60 border-white/5 text-zinc-400 hover:bg-white/5 hover:border-white/10"
-                )}
-              >
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <Activity className="w-4 h-4 text-indigo-400" />
-                      <span className="text-xs font-bold text-indigo-300">2. Deep Learning TCN</span>
-                    </div>
-                    <span className="text-[9px] font-mono bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded font-bold">TCN Only</span>
-                  </div>
-                  <p className="text-[11px] text-zinc-300 leading-snug">
-                    Calculează semnalele exclusiv prin rețeaua neuronală secvențială <strong>Causal Conv1D (Temporal Convolutional Network)</strong> pe candele istorice.
-                  </p>
-                </div>
-                <div className="text-[10px] font-mono text-indigo-400/80 pt-2 border-t border-indigo-500/20 flex items-center justify-between">
-                  <span className="flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
-                    <span>TF.js WebGL / GPU</span>
-                  </span>
-                  <span className="text-[9px] text-zinc-500">Pattern Temporal</span>
-                </div>
-              </button>
-
-              {/* Option 3: Both (Hybrid Confluence) */}
-              <button
-                onClick={() => setMlModelType('both')}
-                className={cn(
-                  "p-4 rounded-xl text-left border transition-all relative flex flex-col justify-between space-y-3 cursor-pointer group",
-                  (mlModelType || 'both') === 'both'
-                    ? "bg-cyan-500/15 border-cyan-500/50 text-white shadow-lg shadow-cyan-950/50 ring-1 ring-cyan-500/30"
-                    : "bg-zinc-950/60 border-white/5 text-zinc-400 hover:bg-white/5 hover:border-white/10"
-                )}
-              >
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <GitMerge className="w-4 h-4 text-cyan-400" />
-                      <span className="text-xs font-bold text-cyan-300">3. Ambele (Hibrid Confluent)</span>
-                    </div>
-                    <span className="text-[9px] font-mono bg-cyan-500/20 text-cyan-300 px-1.5 py-0.5 rounded font-bold">Recomandat</span>
-                  </div>
-                  <p className="text-[11px] text-zinc-300 leading-snug">
-                    Calculează și <strong>combină ambele modele</strong> (Random Forest + TCN Causal Conv1D) cu filtrare automată a divergențelor pentru precizie maximă.
-                  </p>
-                </div>
-                <div className="text-[10px] font-mono text-cyan-400/80 pt-2 border-t border-cyan-500/20 flex items-center justify-between">
-                  <span className="flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></span>
-                    <span>Confluență Dublă</span>
-                  </span>
-                  <span className="text-[9px] text-cyan-400">Siguranță Maximă</span>
-                </div>
-              </button>
-            </div>
-          </div>
-
-          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900 to-indigo-950/30 border border-indigo-500/20 rounded-2xl p-6">
-            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-              <div className="flex items-center gap-3">
-                <div className="p-2.5 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-400">
-                  <Activity className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-serif text-white flex items-center gap-2">
-                    Temporal Convolutional Network (TCN)
-                    <span className="text-[10px] bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded font-mono">TensorFlow.js WebGL</span>
-                  </h3>
-                  <p className="text-xs text-indigo-300/80">Rețea Neuronală Causal Conv1D Dilatată (1, 2, 4, 8) – Procesare Secvențială de Candele</p>
-                </div>
+                <span className="text-[9px] font-mono bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded font-bold">RF Active</span>
               </div>
-              <button
-                onClick={handleTrainTCNModel}
-                disabled={isTrainingTcn}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl font-medium text-xs flex items-center gap-2 shadow-lg shadow-indigo-600/20 transition-all cursor-pointer"
-              >
-                {isTrainingTcn ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
-                {isTrainingTcn ? 'Antrenare Online...' : 'Antrenează Model TCN (model.fit)'}
-              </button>
-            </div>
-
-            {isTrainingTcn && (
-              <div className="mb-4 bg-indigo-950/40 border border-indigo-500/30 p-3 rounded-xl space-y-2">
-                <div className="flex justify-between text-xs text-indigo-200">
-                  <span>Progres Antrenare Incrementală:</span>
-                  <span className="font-mono">{tcnTrainProgress}%</span>
-                </div>
-                <div className="w-full bg-zinc-800 h-2 rounded-full overflow-hidden">
-                  <div className="bg-indigo-500 h-full transition-all duration-300" style={{ width: `${tcnTrainProgress}%` }} />
-                </div>
-              </div>
-            )}
-
-            {tcnTrainStatus && (
-              <div className="mb-4 text-xs font-mono p-3 rounded-xl bg-zinc-950/80 border border-white/10 text-zinc-300">
-                {tcnTrainStatus}
-              </div>
-            )}
-
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
-              <div className="bg-zinc-950/60 border border-white/5 rounded-xl p-3.5 space-y-1.5">
-                <label className="text-xs font-semibold text-zinc-300">Timeframe Candelă (Min)</label>
-                <select
-                  value={tcnTimeframe}
-                  onChange={(e) => setTcnTimeframe(e.target.value as any)}
-                  className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 font-mono"
-                >
-                  <option value="1m">1 minut (Deținere 2 - 10 min)</option>
-                  <option value="2m">2 minute (Deținere 4 - 15 min)</option>
-                  <option value="3m">3 minute (Deținere 6 - 20 min)</option>
-                </select>
-                <p className="text-[10px] text-zinc-500">Aliniat cu fereastra scalping rapid.</p>
-              </div>
-
-              <div className="bg-zinc-950/60 border border-white/5 rounded-xl p-3.5 space-y-1.5">
-                <label className="text-xs font-semibold text-zinc-300">Fereastră N (Candele)</label>
-                <select
-                  value={tcnSequenceLength}
-                  onChange={(e) => setTcnSequenceLength(Number(e.target.value))}
-                  className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 font-mono"
-                >
-                  <option value={50}>50 candele (Rapid / High Frequency)</option>
-                  <option value={80}>80 candele (Echilibrat)</option>
-                  <option value={100}>100 candele (Standard Recomandat)</option>
-                  <option value={150}>150 candele (Deep Context Window)</option>
-                </select>
-                <p className="text-[10px] text-zinc-500">Istoric secvențial analizat per inferență.</p>
-              </div>
-
-              <div className="bg-zinc-950/60 border border-white/5 rounded-xl p-3.5 space-y-1.5">
-                <label className="text-xs font-semibold text-zinc-300">Filtre Causal Conv1D</label>
-                <select
-                  value={tcnFilters}
-                  onChange={(e) => setTcnFilters(Number(e.target.value))}
-                  className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 font-mono"
-                >
-                  <option value={16}>16 Filtre (Ultra-Rapid &lt; 3ms)</option>
-                  <option value={24}>24 Filtre (Optim Target &lt; 8ms)</option>
-                  <option value={32}>32 Filtre (Capacitate maximă)</option>
-                </select>
-                <p className="text-[10px] text-zinc-500">Layere Causal Conv1D Dilatate [1, 2, 4, 8].</p>
-              </div>
-
-              <div className="bg-zinc-950/60 border border-white/5 rounded-xl p-3.5 space-y-1.5">
-                <label className="text-xs font-semibold text-zinc-300">Epoci Antrenare (`model.fit`)</label>
-                <select
-                  value={tcnEpochs}
-                  onChange={(e) => setTcnEpochs(Number(e.target.value))}
-                  className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 font-mono"
-                >
-                  <option value={30}>30 Epoci (Rapid Warmup)</option>
-                  <option value={60}>60 Epoci (Recomandat Standard)</option>
-                  <option value={80}>80 Epoci (Convergență Adâncă)</option>
-                  <option value={100}>100 Epoci (Max Precision)</option>
-                </select>
-                <p className="text-[10px] text-zinc-500">Garantează scădere monotonă loss &lt; 0.693.</p>
-              </div>
-            </div>
-
-            {/* Metrics & Loss Curve Section */}
-            {(tcnCurrentLoss !== null || tcnLossHistory.length > 0) && (
-              <div className="mb-4 bg-zinc-950/80 border border-indigo-500/30 rounded-xl p-4 space-y-3">
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <div className="flex items-center gap-4 text-xs font-mono">
-                    <div>
-                      <span className="text-zinc-400 block text-[10px]">Pierdere (Loss Current):</span>
-                      <span className={`text-base font-bold ${tcnCurrentLoss !== null && tcnCurrentLoss < 0.693 ? 'text-emerald-400' : 'text-amber-400'}`}>
-                        {tcnCurrentLoss !== null ? tcnCurrentLoss.toFixed(4) : 'N/A'}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-zinc-400 block text-[10px]">Acuratețe Model (Acc):</span>
-                      <span className="text-base font-bold text-cyan-300">
-                        {tcnCurrentAcc !== null ? `${tcnCurrentAcc.toFixed(1)}%` : 'N/A'}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-zinc-400 block text-[10px]">Prag Random Baseline:</span>
-                      <span className="text-xs font-semibold text-zinc-400">0.6931</span>
-                    </div>
-                  </div>
-
-                  <div className="text-[11px] font-mono px-3 py-1 rounded-lg border bg-zinc-900">
-                    {tcnCurrentLoss !== null && tcnCurrentLoss < 0.693 ? (
-                      <span className="text-emerald-400 font-semibold flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                        Model Confluent Validat (Loss &lt; 0.693)
-                      </span>
-                    ) : (
-                      <span className="text-amber-400 font-semibold flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-amber-400" />
-                        Warmup Incomplet (Loss &ge; 0.693)
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* SVG Sparkline Loss Curve */}
-                {tcnLossHistory.length > 1 && (
-                  <div className="space-y-1">
-                    <div className="flex justify-between items-center text-[10px] text-zinc-400 font-mono">
-                      <span>Curbă Scădere Loss (Epoci 1 - {tcnLossHistory.length})</span>
-                      <span className="text-emerald-400">Tinta &lt; 0.693</span>
-                    </div>
-                    <div className="h-16 w-full bg-zinc-900/90 rounded-lg p-2 border border-white/5 relative overflow-hidden flex items-end">
-                      <svg className="w-full h-full overflow-visible" viewBox="0 0 100 40" preserveAspectRatio="none">
-                        {/* Baseline line at y = 0.693 (scaled between maxLoss and minLoss) */}
-                        {(() => {
-                          const maxL = Math.max(1.2, ...tcnLossHistory);
-                          const minL = Math.min(0.2, ...tcnLossHistory);
-                          const range = (maxL - minL) || 1;
-                          const baselineY = 40 - Math.max(0, Math.min(40, ((0.693 - minL) / range) * 40));
-                          
-                          const points = tcnLossHistory.map((val, idx) => {
-                            const x = (idx / (tcnLossHistory.length - 1)) * 100;
-                            const y = 40 - Math.max(0, Math.min(40, ((val - minL) / range) * 40));
-                            return `${x},${y}`;
-                          }).join(' ');
-
-                          return (
-                            <>
-                              {/* Baseline 0.693 */}
-                              <line x1="0" y1={baselineY} x2="100" y2={baselineY} stroke="#f59e0b" strokeDasharray="2,2" strokeWidth="0.7" opacity="0.8" />
-                              {/* Loss Curve */}
-                              <polyline fill="none" stroke="#10b981" strokeWidth="1.8" points={points} strokeLinecap="round" strokeLinejoin="round" />
-                            </>
-                          );
-                        })()}
-                      </svg>
-                    </div>
-                  </div>
-                )}
-
-                {/* Out-Of-Sample Validation & Benchmark Card */}
-                {tcnBenchmark && (
-                  <div className="p-3.5 bg-zinc-950 border border-indigo-500/40 rounded-xl space-y-3 text-xs">
-                    <div className="font-semibold text-white flex flex-wrap items-center justify-between gap-2">
-                      <span className="flex items-center gap-1.5 text-indigo-300">
-                        <span>📊</span>
-                        <span>Evaluare Out-of-Sample (Split Cronologic 80/20)</span>
-                      </span>
-                      <div className="flex items-center gap-2">
-                        <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
-                          🔒 Normalizare: Strict Train Set
-                        </span>
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${tcnBenchmark.overfitDelta > 15 ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'}`}>
-                          {tcnBenchmark.overfitDelta > 15 ? `⚠️ Overfitting (Delta ${tcnBenchmark.overfitDelta}%)` : '✅ Model Robust'}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Top Stats Grid */}
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-[11px]">
-                      <div className="p-2.5 bg-zinc-900/90 rounded-lg border border-white/5">
-                        <div className="text-zinc-400 text-[10px]">Test Set Acc (Real)</div>
-                        <div className="font-bold text-emerald-400 text-sm">{tcnBenchmark.testAccuracy}%</div>
-                        <div className="text-[9px] text-zinc-500">Out-of-sample ({tcnBenchmark.testSampleCount} probi)</div>
-                      </div>
-                      <div className="p-2.5 bg-zinc-900/90 rounded-lg border border-white/5">
-                        <div className="text-zinc-400 text-[10px]">Random Forest Benchmark</div>
-                        <div className="font-bold text-indigo-300 text-sm">{tcnBenchmark.randomForestAccuracy}%</div>
-                        <div className="text-[9px] text-zinc-500">Pe aceleași candele de test</div>
-                      </div>
-                      <div className="p-2.5 bg-zinc-900/90 rounded-lg border border-white/5">
-                        <div className="text-zinc-400 text-[10px]">Regim Trending</div>
-                        <div className="font-bold text-amber-300 text-sm">{tcnBenchmark.regimeAccuracy.trending}%</div>
-                        <div className="text-[9px] text-zinc-500">Acuratețe mișcare trend</div>
-                      </div>
-                      <div className="p-2.5 bg-zinc-900/90 rounded-lg border border-white/5">
-                        <div className="text-zinc-400 text-[10px]">Regim Ranging (Lateral)</div>
-                        <div className="font-bold text-cyan-300 text-sm">{tcnBenchmark.regimeAccuracy.ranging}%</div>
-                        <div className="text-[9px] text-zinc-500">Acuratețe consolidare</div>
-                      </div>
-                    </div>
-
-                    {/* Sample Distribution & Counts */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-2.5 bg-zinc-900/60 rounded-lg border border-white/5 font-mono text-[10px]">
-                      <div>
-                        <div className="text-indigo-300 font-semibold mb-1 flex items-center justify-between">
-                          <span>Train Set ({tcnBenchmark.trainSampleCount} secvențe)</span>
-                          <span className="text-zinc-400 font-normal">80% cronologic</span>
-                        </div>
-                        <div className="flex gap-2 text-zinc-300">
-                          <span className="px-1.5 py-0.5 bg-zinc-800 rounded">HOLD: <strong className="text-zinc-200">{tcnBenchmark.trainClassDistribution.hold}</strong></span>
-                          <span className="px-1.5 py-0.5 bg-emerald-950/60 text-emerald-300 rounded border border-emerald-500/20">BUY: <strong className="text-emerald-200">{tcnBenchmark.trainClassDistribution.buy}</strong></span>
-                          <span className="px-1.5 py-0.5 bg-rose-950/60 text-rose-300 rounded border border-rose-500/20">SELL: <strong className="text-rose-200">{tcnBenchmark.trainClassDistribution.sell}</strong></span>
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-indigo-300 font-semibold mb-1 flex items-center justify-between">
-                          <span>Test Set ({tcnBenchmark.testSampleCount} secvențe)</span>
-                          <span className="text-zinc-400 font-normal">20% neimplicat</span>
-                        </div>
-                        <div className="flex gap-2 text-zinc-300">
-                          <span className="px-1.5 py-0.5 bg-zinc-800 rounded">HOLD: <strong className="text-zinc-200">{tcnBenchmark.testClassDistribution.hold}</strong></span>
-                          <span className="px-1.5 py-0.5 bg-emerald-950/60 text-emerald-300 rounded border border-emerald-500/20">BUY: <strong className="text-emerald-200">{tcnBenchmark.testClassDistribution.buy}</strong></span>
-                          <span className="px-1.5 py-0.5 bg-rose-950/60 text-rose-300 rounded border border-rose-500/20">SELL: <strong className="text-rose-200">{tcnBenchmark.testClassDistribution.sell}</strong></span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Confusion Matrix (3x3 Table) */}
-                    <div className="p-2.5 bg-zinc-900/80 rounded-lg border border-white/5 space-y-1.5 font-mono text-[10px]">
-                      <div className="text-zinc-300 font-semibold flex items-center justify-between">
-                        <span>Matrix de Confuzie Out-of-Sample (Actual vs Predicție)</span>
-                        <span className="text-zinc-500 font-normal">Randuri = Real | Coloane = Predis</span>
-                      </div>
-                      
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-center border-collapse">
-                          <thead>
-                            <tr className="text-zinc-400 border-b border-white/10 text-[9px]">
-                              <th className="py-1 px-2 text-left font-normal">Actual \ Pred</th>
-                              <th className="py-1 px-2 text-zinc-300 font-bold bg-zinc-800/40">Pred HOLD</th>
-                              <th className="py-1 px-2 text-emerald-400 font-bold bg-emerald-950/30">Pred BUY</th>
-                              <th className="py-1 px-2 text-rose-400 font-bold bg-rose-950/30">Pred SELL</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {/* Row 0: True HOLD */}
-                            <tr className="border-b border-white/5">
-                              <td className="py-1 px-2 text-left font-bold text-zinc-300">True HOLD</td>
-                              <td className="py-1 px-2 font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">{tcnBenchmark.confusionMatrix.matrix[0][0]}</td>
-                              <td className="py-1 px-2 text-amber-300">{tcnBenchmark.confusionMatrix.matrix[0][1]}</td>
-                              <td className="py-1 px-2 text-amber-300">{tcnBenchmark.confusionMatrix.matrix[0][2]}</td>
-                            </tr>
-                            {/* Row 1: True BUY */}
-                            <tr className="border-b border-white/5">
-                              <td className="py-1 px-2 text-left font-bold text-emerald-400">True BUY</td>
-                              <td className="py-1 px-2 text-amber-300">{tcnBenchmark.confusionMatrix.matrix[1][0]}</td>
-                              <td className="py-1 px-2 font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">{tcnBenchmark.confusionMatrix.matrix[1][1]}</td>
-                              <td className="py-1 px-2 text-rose-400">{tcnBenchmark.confusionMatrix.matrix[1][2]}</td>
-                            </tr>
-                            {/* Row 2: True SELL */}
-                            <tr>
-                              <td className="py-1 px-2 text-left font-bold text-rose-400">True SELL</td>
-                              <td className="py-1 px-2 text-amber-300">{tcnBenchmark.confusionMatrix.matrix[2][0]}</td>
-                              <td className="py-1 px-2 text-rose-400">{tcnBenchmark.confusionMatrix.matrix[2][1]}</td>
-                              <td className="py-1 px-2 font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">{tcnBenchmark.confusionMatrix.matrix[2][2]}</td>
-                            </tr>
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-mono">
-              <div className="p-3 bg-zinc-950/60 border border-white/5 rounded-xl">
-                <span className="text-[11px] text-zinc-400 block">Timp Inferență WebGL:</span>
-                <span className="text-emerald-400 font-bold">&lt; 5.2 ms / fereastră</span>
-              </div>
-              <div className="p-3 bg-zinc-950/60 border border-white/5 rounded-xl">
-                <span className="text-[11px] text-zinc-400 block">Strategie Cold-Start:</span>
-                <span className="text-indigo-300 font-bold">Heuristic Fallback + Warmup</span>
-              </div>
-              <div className="p-3 bg-zinc-950/60 border border-white/5 rounded-xl">
-                <span className="text-[11px] text-zinc-400 block">Antrenare Incrementală:</span>
-                <span className="text-cyan-300 font-bold">Online Live Streams (`fit`)</span>
-              </div>
+              <p className="text-[11px] text-zinc-300 leading-snug">
+                Calculează semnalele pe baza ansamblului <strong>Random Forest (18 arbori decizionali)</strong>, evaluând în timp real indicatorii tehnici cheie (RSI, ADX, EMA, Volum, Reversals, Platt Calibration) cu inferență sub 1ms.
+              </p>
             </div>
           </div>
 
@@ -1943,7 +1435,7 @@ export function Settings() {
               </div>
               <div>
                 <h3 className="text-lg font-serif text-white">Modele Machine Learning Active</h3>
-                <p className="text-xs text-purple-300/80">Classifier Ensemble (TCN Causal Conv1D 2.0 + Random Forest + Meta-Model)</p>
+                <p className="text-xs text-purple-300/80">Classifier Ensemble (Random Forest + Meta-Model)</p>
               </div>
             </div>
 

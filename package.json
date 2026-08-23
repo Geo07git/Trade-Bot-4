@@ -1,10 +1,10 @@
 {
   "name": "gs-trade-bot",
-  "productName": "G&S-Trade-Bot",
-  "description": "G&S Trading Bot Desktop Application",
+  "productName": "GS-Trade-Bot",
+  "description": "GS Trading Bot Desktop Application",
   "author": "Georgeo Ciutan",
   "private": true,
-  "version": "3.0.0",
+  "version": "4.0.0",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -26,7 +26,7 @@
   },
   "build": {
     "appId": "com.gs.tradebot",
-    "productName": "G&S-Trade-Bot",
+    "productName": "GS-Trade-Bot",
     "directories": {
       "output": "dist-electron"
     },

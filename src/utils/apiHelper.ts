@@ -15,6 +15,13 @@ export function getApiUrl(endpoint: string): string {
   const serverUrl = useTradingStore.getState().serverUrl || '';
   const trimmedServer = serverUrl.trim().replace(/\/+$/, '');
 
+  // Safeguard: If running over HTTPS (e.g. cloud preview), ignore http://localhost or http://127.0.0.1 to prevent mixed-content blocks
+  if (typeof window !== 'undefined' && window.location.protocol === 'https:') {
+    if (trimmedServer.startsWith('http://localhost') || trimmedServer.startsWith('http://127.0.0.1')) {
+      return path;
+    }
+  }
+
   if (trimmedServer) {
     return `${trimmedServer}${path}`;
   }

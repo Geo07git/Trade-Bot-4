@@ -125,8 +125,8 @@ export default function App() {
           if (data.sessionCycleCount !== undefined && data.sessionCycleCount !== currentStore.sessionCycleCount) updates.sessionCycleCount = data.sessionCycleCount;
           if (data.accumulationTargetEnabled !== undefined && data.accumulationTargetEnabled !== currentStore.accumulationTargetEnabled) updates.accumulationTargetEnabled = data.accumulationTargetEnabled;
           if (data.positions && JSON.stringify(data.positions) !== JSON.stringify(currentStore.positions)) updates.positions = data.positions;
-          if (data.logs && (data.logs.length !== currentStore.logs.length || (data.logs[0]?.time !== currentStore.logs[0]?.time))) updates.logs = data.logs;
-          if (data.signalJournal && (data.signalJournal.length !== currentStore.signalJournal.length || (data.signalJournal[0]?.id !== currentStore.signalJournal[0]?.id))) updates.signalJournal = data.signalJournal;
+          if (data.logs && JSON.stringify(data.logs) !== JSON.stringify(currentStore.logs)) updates.logs = data.logs;
+          if (data.signalJournal && JSON.stringify(data.signalJournal) !== JSON.stringify(currentStore.signalJournal)) updates.signalJournal = data.signalJournal;
           if (data.tradeHistory && JSON.stringify(data.tradeHistory) !== JSON.stringify(currentStore.tradeHistory)) updates.tradeHistory = data.tradeHistory;
           if (data.watchlist && JSON.stringify(data.watchlist) !== JSON.stringify(currentStore.watchlist)) updates.watchlist = data.watchlist;
           if (data.marketOpportunities && JSON.stringify(data.marketOpportunities) !== JSON.stringify(currentStore.marketOpportunities)) updates.marketOpportunities = data.marketOpportunities;

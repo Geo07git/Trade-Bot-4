@@ -468,50 +468,119 @@ async function fetchValidBinanceSymbolsServer(): Promise<Set<string>> {
 }
 
 let batchPricesCache: { map: Map<string, number>; timestamp: number } | null = null;
+let isFetchingBatchPrices = false;
+let lastBatchErrorLogTime = 0;
+let lastPriceSuccessLogTime = 0;
 
-async function fetchBatchPricesServer(): Promise<Map<string, number>> {
-  if (batchPricesCache && (Date.now() - batchPricesCache.timestamp < 5000)) {
-    return batchPricesCache.map;
-  }
-
-  const priceMap = new Map<string, number>();
-  const endpoints = [
-    'https://api.binance.com/api/v3/ticker/price',
-    'https://api1.binance.com/api/v3/ticker/price',
-    'https://api3.binance.com/api/v3/ticker/price',
-    'https://data-api.binance.vision/api/v3/ticker/price'
-  ];
-
-  for (const url of endpoints) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 6000);
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeoutId);
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          for (const item of data) {
-            const p = parseFloat(item.price);
-            if (!isNaN(p) && p > 0) {
-              priceMap.set(item.symbol, p);
-            }
-          }
-          if (priceMap.size > 0) {
-            batchPricesCache = { map: priceMap, timestamp: Date.now() };
-            return priceMap;
+async function tryFetchTickerEndpoint(url: string, timeoutMs = 7000): Promise<Map<string, number> | null> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Accept': 'application/json'
+      }
+    });
+    clearTimeout(timeoutId);
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const pMap = new Map<string, number>();
+        for (const item of data) {
+          const p = parseFloat(item.price);
+          if (!isNaN(p) && p > 0) {
+            pMap.set(item.symbol, p);
           }
         }
+        if (pMap.size > 0) return pMap;
       }
-    } catch (err) {
-      // try next endpoint
     }
+  } catch (err) {
+    // silently ignore individual endpoint failures
   }
+  return null;
+}
 
-  if (batchPricesCache && (Date.now() - batchPricesCache.timestamp < 15000)) {
+async function fetchBatchPricesServer(): Promise<Map<string, number>> {
+  // 1. Fast path: Return cache if very recent (< 2000ms)
+  if (batchPricesCache && (Date.now() - batchPricesCache.timestamp < 2000)) {
     return batchPricesCache.map;
   }
-  return priceMap;
+
+  // 2. Prevent overlapping background requests if cache exists
+  if (isFetchingBatchPrices && batchPricesCache) {
+    return batchPricesCache.map;
+  }
+
+  isFetchingBatchPrices = true;
+
+  try {
+    const endpoints = [
+      'https://api.binance.com/api/v3/ticker/price',
+      'https://data-api.binance.vision/api/v3/ticker/price',
+      'https://api1.binance.com/api/v3/ticker/price',
+      'https://api3.binance.com/api/v3/ticker/price',
+      'https://fapi.binance.com/fapi/v1/ticker/price'
+    ];
+
+    // Fire all endpoints concurrently with Promise.any — fastest valid response wins immediately
+    const fetchPromises = endpoints.map(url =>
+      tryFetchTickerEndpoint(url, 7000).then(res => {
+        if (res && res.size > 0) return res;
+        throw new Error(`Empty response from ${url}`);
+      })
+    );
+
+    let freshMap: Map<string, number> | null = null;
+    try {
+      freshMap = await Promise.any(fetchPromises);
+    } catch (e) {
+      freshMap = null;
+    }
+
+    if (freshMap && freshMap.size > 0) {
+      if (!batchPricesCache) {
+        batchPricesCache = { map: freshMap, timestamp: Date.now() };
+      } else {
+        freshMap.forEach((v, k) => batchPricesCache!.map.set(k, v));
+        batchPricesCache.timestamp = Date.now();
+      }
+
+      const now = Date.now();
+      if (now - lastPriceSuccessLogTime > 20000) {
+        console.log(`[PRICE ENGINE 🟢] Prețuri actualizate cu succes (${freshMap.size} simboluri de la Binance).`);
+        lastPriceSuccessLogTime = now;
+      }
+      return batchPricesCache.map;
+    }
+
+    // Network error on all endpoints — fallback to existing cache
+    const now = Date.now();
+    if (batchPricesCache && batchPricesCache.map.size > 0) {
+      if (now - lastBatchErrorLogTime > 60000) {
+        const ageSec = ((now - batchPricesCache.timestamp) / 1000).toFixed(0);
+        console.warn(`[PRICE ENGINE 🛡️ CACHE DE REZERVĂ] Preluarea prețurilor Binance a întâmpinat o întârziere temporară. Se mențin ultimele cotații (${ageSec}s vechime, ${batchPricesCache.map.size} simboluri).`);
+        lastBatchErrorLogTime = now;
+      }
+      return batchPricesCache.map;
+    }
+
+    // Cold start fallback if no cache exists
+    if (now - lastBatchErrorLogTime > 60000) {
+      console.warn(`[PRICE ENGINE 🛡️ INITIALIZATION FALLBACK] Toate endpoint-urile Binance au eșuat la pornire. Se folosesc prețurile de bază de referință.`);
+      lastBatchErrorLogTime = now;
+    }
+
+    const fallbackMap = new Map<string, number>();
+    Object.entries(BASELINE_PRICES).forEach(([sym, p]) => fallbackMap.set(sym, p));
+    batchPricesCache = { map: fallbackMap, timestamp: Date.now() };
+    return fallbackMap;
+
+  } finally {
+    isFetchingBatchPrices = false;
+  }
 }
 
 async function fetchLivePriceServer(symbol: string): Promise<number | null> {
@@ -1029,6 +1098,8 @@ class ServerBotEngine {
       accumulationTargetPercent: this.state.accumulationTargetPercent || 3.0,
       sessionCycleCount: this.state.sessionCycleCount || 1,
       accumulationTargetEnabled: this.state.accumulationTargetEnabled !== false,
+      balance: this.state.balance || 10000,
+      initialBalance: this.state.initialBalance || 10000,
       positions: this.state.positions || [],
     };
   }
@@ -1072,6 +1143,8 @@ class ServerBotEngine {
           if (parsed.accumulationTargetPercent !== undefined) this.state.accumulationTargetPercent = parsed.accumulationTargetPercent;
           if (parsed.sessionCycleCount !== undefined) this.state.sessionCycleCount = parsed.sessionCycleCount;
           if (parsed.accumulationTargetEnabled !== undefined) this.state.accumulationTargetEnabled = parsed.accumulationTargetEnabled;
+          if (parsed.balance !== undefined) this.state.balance = parsed.balance;
+          if (parsed.initialBalance !== undefined) this.state.initialBalance = parsed.initialBalance;
         }
 
         // Fallback to process.env if empty
@@ -1251,10 +1324,16 @@ class ServerBotEngine {
   }
 
   public resetAccumulationVault(): { success: boolean } {
+    const currentEq = this.calculateEquity();
     this.state.accumulationBalance = 0;
     this.state.sessionCycleCount = 1;
-    this.addLog(`🏦 Soldul "Acumulare" a fost resetat la $0.00 USDT.`, 'info');
-    this.savePersistedState();
+    if (currentEq > 0) {
+      this.state.initialBalance = currentEq;
+    } else {
+      this.state.initialBalance = this.state.balance || 10000;
+    }
+    this.addLog(`🏦 Soldul "Acumulare" a fost resetat la $0.00 USDT. Ciclul de acumulare re-ancorat la $${this.state.initialBalance.toFixed(2)} USDT.`, 'info');
+    this.savePersistedState(true);
     return { success: true };
   }
 
@@ -1679,8 +1758,10 @@ class ServerBotEngine {
     this.state.logs = [];
     this.state.circuitBreakerTriggered = false;
     this.state.circuitBreakerReason = null;
-    this.addLog(`Portofoliu resetat la $${newBalance} pe server.`, 'warning');
-    this.savePersistedState();
+    this.state.accumulationBalance = 0;
+    this.state.sessionCycleCount = 1;
+    this.addLog(`Portofoliu resetat la $${newBalance} pe server. Sold Acumulare resetat.`, 'warning');
+    this.savePersistedState(true);
   }
 
   public addFunds(addedAmount: number) {
@@ -2686,12 +2767,19 @@ class ServerBotEngine {
         const price = parseFloat(item.lastPrice);
         const count = parseInt(item.count, 10) || 0;
         const change = Math.abs(parseFloat(item.priceChangePercent));
-        return !isNaN(quoteVol) && quoteVol >= 500000 && !isNaN(price) && price > 0 && count > 100 && !isNaN(change) && change >= 1.0;
+        return !isNaN(quoteVol) && quoteVol >= 500000 && !isNaN(price) && price > 0 && count > 100 && !isNaN(change) && change >= 0.3;
       });
 
       // Sort by 24h quote volume to analyze top 100 candidates
       filtered.sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume));
       const topCandidates = filtered.slice(0, 250);
+
+      const btcFiltered = filtered.find((i: any) => i.symbol === 'BTCUSDT');
+      const btcTop = topCandidates.find((i: any) => i.symbol === 'BTCUSDT');
+      const diagMsg = `[DIAGNOSTIC] BTCUSDT in filtered: ${!!btcFiltered}, in topCandidates: ${!!btcTop}` + 
+        (btcFiltered ? ` | Vol24h: $${parseFloat(btcFiltered.quoteVolume).toLocaleString('en-US')} | Var24h: ${btcFiltered.priceChangePercent}%` : '');
+      console.log(diagMsg);
+      this.addLog(diagMsg, 'info');
 
       const batchPriceMap = await fetchBatchPricesServer();
 
@@ -2714,6 +2802,8 @@ class ServerBotEngine {
           let klines: any[] = [];
           if (idx < 40) {
             klines = await fetchHistoricalKlines(symbol, 50).catch(() => []);
+          } else {
+            console.log(`[SCANNER 🛡️ PROTECȚIE RATE-LIMIT] Descărcare klines omisă pentru ${symbol} (#${idx + 1}). Măsură preventivă: prevenire depășire cota cereri Binance API (limita 1200 request/min).`);
           }
 
           // 1. Candlestick/Price Action (35% weight)
@@ -2776,6 +2866,8 @@ class ServerBotEngine {
             momentumAccelScore,
             rvolScore,
             structureScore: breakoutAtrScore,
+            breakoutAtrScore,
+            trendConfirmationScore,
             liquiditySpreadScore,
             rfProb,
             metaProb,
@@ -2800,11 +2892,29 @@ class ServerBotEngine {
         scannedCandidates.push(...batchResults);
       }
 
+      // DIAGNOSTIC: Log BTCUSDT scores after calculation and before sort
+      const btcBeforeSort = scannedCandidates.find(c => c.symbol === 'BTCUSDT');
+      if (btcBeforeSort) {
+        console.log(`[DIAGNOSTIC] BTCUSDT discoveryScore: ${btcBeforeSort.discoveryScore}, candlestickPatternScore: ${btcBeforeSort.candlestickPatternScore}, momentumAccelScore: ${btcBeforeSort.momentumAccelScore}, rvolScore: ${btcBeforeSort.rvolScore}, breakoutAtrScore: ${btcBeforeSort.breakoutAtrScore}, trendConfirmationScore: ${btcBeforeSort.trendConfirmationScore}`);
+      } else {
+        console.log('[DIAGNOSTIC] BTCUSDT not found in scannedCandidates after discoveryScore calculation');
+      }
+
       // STAGE 1: Sort all 500 candidates by Momentum/Pattern Discovery Score
       scannedCandidates.sort((a, b) => (b.discoveryScore || 0) - (a.discoveryScore || 0));
 
       // STAGE 2: Select TOP 50 Candidates for ML + MetaScore Analysis
       const top50Candidates = scannedCandidates.slice(0, 50);
+
+      // DIAGNOSTIC: Log BTCUSDT rank, TOP 50 inclusion, and candidate counts
+      const btcIndex = scannedCandidates.findIndex(c => c.symbol === 'BTCUSDT');
+      if (btcIndex !== -1) {
+        const btcRank = btcIndex + 1;
+        const isIncludedInTop50 = btcRank <= 50;
+        console.log(`[DIAGNOSTIC] BTCUSDT rank: ${btcRank}, included in TOP 50: ${isIncludedInTop50}, scannedCandidates count: ${scannedCandidates.length}, top50Candidates count: ${top50Candidates.length}`);
+      } else {
+        console.log(`[DIAGNOSTIC] BTCUSDT not found in scannedCandidates after sort. scannedCandidates count: ${scannedCandidates.length}, top50Candidates count: ${top50Candidates.length}`);
+      }
       const currentMlModel = this.state.mlModelType || 'both';
       await Promise.all(top50Candidates.map(async (op, idx) => {
         try {
@@ -2878,6 +2988,47 @@ class ServerBotEngine {
       this.lastScanTimestamp = Date.now();
       this.state.marketOpportunities = reorderedCandidates;
       this.state.lastScanAt = new Date().toISOString();
+
+      // Ensure signalJournal is populated with top candidate audit entries
+      if (!this.state.signalJournal) this.state.signalJournal = [];
+      const timeStr = new Intl.DateTimeFormat('ro-RO', {
+        timeZone: this.state.timezone || 'Europe/Bucharest',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+      }).format(new Date());
+
+      top50Candidates.slice(0, 25).forEach(op => {
+        const journalEntry: SignalJournalEntry = {
+          id: `${op.symbol}_${Date.now()}_${Math.random().toString(36).substring(2,6)}`,
+          timestamp: new Date().toISOString(),
+          time: timeStr,
+          symbol: op.symbol,
+          price: op.price,
+          rfProb: op.rfProb || 50,
+          metaProb: op.metaProb || 50,
+          reversalScore: (op as any).reversalScore || 0,
+          isReversal: op.reversalSignal === 'BULLISH_REVERSAL' || op.reversalSignal === 'BEARISH_REVERSAL',
+          reversalType: op.reversalSignal === 'BULLISH_REVERSAL' ? 'bullish' : (op.reversalSignal === 'BEARISH_REVERSAL' ? 'bearish' : undefined),
+          newsSentiment: op.sentimentLabel || 'neutral',
+          finalAction: (op as any).metaExecutionRule || (op.rfProb >= 65 ? 'BUY' : 'HOLD'),
+          vetoReason: op.reason || `MetaScore: ${(op as any).metaTradeScore || op.discoveryScore}/100`,
+          explanation: [
+            `Candlestick Pattern: ${op.candlestickPatternName || 'Standard'} (${op.candlestickPatternScore || 0}pt)`,
+            `Momentum Accel: ${op.momentumAccelScore || 0}pt | RVOL: ${op.rvolScore || 0}pt`,
+            `Breakout/ATR: ${op.breakoutAtrScore || 0}pt | Trend: ${op.trendConfirmationScore || 0}pt`
+          ]
+        };
+        const existingIdx = this.state.signalJournal.findIndex(s => s.symbol === op.symbol);
+        if (existingIdx !== -1) {
+          this.state.signalJournal[existingIdx] = journalEntry;
+        } else {
+          this.state.signalJournal.unshift(journalEntry);
+        }
+      });
+
+      const signalLimit = this.state.maxLogs || 2500;
+      if (this.state.signalJournal.length > signalLimit) {
+        this.state.signalJournal = this.state.signalJournal.slice(0, signalLimit);
+      }
 
       // AUTO ROTATION: Dynamic Watchlist updated with TOP 10 (with TOP 5 prioritized for execution)
       this.updateDynamicWatchlist(reorderedCandidates.slice(0, 10), 10);
@@ -2968,10 +3119,8 @@ class ServerBotEngine {
         this.secondsCounter += 5;
         this.state.lastCheckAt = new Date().toISOString();
 
-        // Check prices according to dataInterval (always update prices)
-        if (this.secondsCounter % Math.max(5, this.state.dataInterval) === 0) {
-          await this.checkPricesAndSLTP();
-        }
+        // Check prices every 5s loop (always update prices continuously)
+        await this.checkPricesAndSLTP();
 
         // Run ML analysis according to analysisInterval (always update AI signals)
         if (this.secondsCounter % Math.max(10, this.state.analysisInterval) === 0) {
@@ -3238,12 +3387,26 @@ class ServerBotEngine {
       await this.cleanupDelistedAssets();
       const batchMap = await fetchBatchPricesServer();
 
+      if (this.state.positions.length > 0) {
+        console.log(`[PREȚURI LIVE 🟢] Prețuri sincronizate cu succes pentru ${this.state.positions.length} poziții active și ${this.state.watchlist.filter(w => w.active).length} perechi.`);
+      }
+
       // 1. Update prices on active watchlist items
       for (const item of this.state.watchlist) {
         if (!item.active) continue;
         const livePrice = batchMap.get(item.symbol) || batchMap.get(`${item.symbol}USDT`) || item.price;
         if (livePrice && livePrice > 0) {
           item.price = livePrice;
+        }
+      }
+
+      // Update prices on market opportunities
+      if (this.state.marketOpportunities && Array.isArray(this.state.marketOpportunities)) {
+        for (const op of this.state.marketOpportunities) {
+          const livePrice = batchMap.get(op.symbol) || batchMap.get(`${op.symbol}USDT`) || op.price;
+          if (livePrice && livePrice > 0) {
+            op.price = livePrice;
+          }
         }
       }
 
@@ -3625,6 +3788,7 @@ class ServerBotEngine {
             };
 
             if (!scalpConfig.active) {
+              console.log(`[VETO 🛑 MOTOR INACTIV] ${item.symbol}: Semnal CUMPĂRARE omis. Explicație: Motorul de Scalping este dezactivat în Setări.`);
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
                 if (j) j.vetoReason = `Motor Scalping Dezactivat din Setări`;
@@ -3635,6 +3799,7 @@ class ServerBotEngine {
             // HARD FILTER 1: RF Probability Check
             const minRfProb = scalpConfig.minRfProb ?? 70;
             if (signal.prob < minRfProb) {
+              console.log(`[VETO 🛑 PROBABILITATE SCĂZUTĂ] ${item.symbol}: RF Prob ${signal.prob}% < pragul minim ${minRfProb}%. Ordin blocat pentru prevenire false intrări.`);
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
                 if (j) j.vetoReason = `RF Prob ${signal.prob}% < minim ${minRfProb}%`;
@@ -3645,6 +3810,7 @@ class ServerBotEngine {
             // HARD FILTER 2: Anti-whipsaw Trade Cooldown
             const cooldown = getSymbolCooldown(item.symbol);
             if (cooldown && cooldown.active) {
+              console.log(`[VETO 🛑 COOLDOWN ACTIV] ${item.symbol}: Cooldown anti-whipsaw activ (${cooldown.remainingMinutes}m rămase). Ordin blocat.`);
               this.addLog(`[Filtru Cooldown 🛑] ${item.symbol} în perioadă de cooldown anti-whipsaw (${cooldown.remainingMinutes}m rămase). Semnal BUY omis.`, 'warning');
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
@@ -3661,6 +3827,7 @@ class ServerBotEngine {
             const minRange = scalpConfig.minRange20pThreshold ?? 0.55;
 
             if (isStagnationEnabled && (atrPct < minAtr || range20pPct < minRange)) {
+              console.log(`[VETO 🛑 REGIM STAGNARE] ${item.symbol}: Volatilitate scăzută - ATR (${atrPct.toFixed(2)}% < ${minAtr}%) sau Range20 (${range20pPct.toFixed(2)}% < ${minRange}%). Intrarea blocată.`);
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
                 if (j) j.vetoReason = `Regim Stagnare: ATR (${atrPct.toFixed(2)}% < ${minAtr}%) sau Range20 (${range20pPct.toFixed(2)}% < ${minRange}%)`;
@@ -3693,23 +3860,27 @@ class ServerBotEngine {
             const isMetaApproved = metaBreakdown.finalTradeScore >= minMetaScore;
 
             if (!this.state.autoTradingActive) {
+              console.log(`[VETO 🛑 AUTO-TRADING OPRIT] ${item.symbol}: Semnal Valid (MetaScore ${metaBreakdown.finalTradeScore}/100, RF: ${signal.prob}%), dar trading-ul automat este oprit din interfață.`);
               this.addLog(`[Signal AI BUY] ${item.symbol} (MetaScore: ${metaBreakdown.finalTradeScore}/100 | RF: ${signal.prob}%), dar Auto-Trading este OPRIT.`, 'warning');
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
                 if (j) j.vetoReason = `Auto-Trading OPRIT (MetaScore ${metaBreakdown.finalTradeScore}/100)`;
               }
             } else if (isHolding) {
+              console.log(`[VETO 🛑 POZIȚIE EXISTENTĂ] ${item.symbol}: O poziție este deja deschisă. Intrarea suplimentară este blocată.`);
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
                 if (j) j.vetoReason = `Poziție Activă În Curs (${item.symbol})`;
               }
             } else if (!isMetaApproved) {
+              console.log(`[VETO 🛑 METASCORE SCĂZUT] ${item.symbol} omis: MetaScore ${metaBreakdown.finalTradeScore}/100 < minim necesar ${minMetaScore}. Motiv: ${metaBreakdown.vetoReason || 'Punctaj insuficient'}.`);
               this.addLog(`[Filtru MetaScore 🛡️] ${item.symbol} omis (MetaScore ${metaBreakdown.finalTradeScore}/100 < minim ${minMetaScore}).`, 'warning');
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
                 if (j) j.vetoReason = `MetaScore ${metaBreakdown.finalTradeScore}/100 < minim ${minMetaScore}`;
               }
             } else if (this.state.balance < 0.5) {
+              console.log(`[VETO 🛑 FONDURI INSUFICIENTE] ${item.symbol} (MetaScore ${metaBreakdown.finalTradeScore}/100): Balanță USDT disponibilă ($${this.state.balance.toFixed(2)}) sub minimul necesar.`);
               this.addLog(`[Signal AI BUY] ${item.symbol} (MetaScore: ${metaBreakdown.finalTradeScore}/100): Fonduri USDT insuficiente (${this.state.balance.toFixed(2)} USDT).`, 'warning');
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
