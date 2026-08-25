@@ -565,7 +565,12 @@ export function calculateMomentumAccelScore(klines: Kline[], priceChange24h: num
   if (!klines || klines.length < 5) {
     return Math.min(100, Math.max(0, Math.round(50 + priceChange24h * 2.5)));
   }
-  const lastClose = klines[klines.length - 1].close;
+  const lastIdx = klines.length - 1;
+  const lastClose = klines[lastIdx].close;
+  const lastOpen = klines[lastIdx].open;
+  const lastHigh = klines[lastIdx].high;
+  const lastLow = klines[lastIdx].low;
+
   const close3Ago = klines[Math.max(0, klines.length - 4)].close;
   const close10Ago = klines[Math.max(0, klines.length - 11)].close;
 
@@ -575,11 +580,20 @@ export function calculateMomentumAccelScore(klines: Kline[], priceChange24h: num
   const accel = mom3 - (mom10 / 3.3);
   let score = 50 + (mom3 * 7.5) + (accel * 12.0);
 
-  // Dampen overextended late pumps (>20% in 24h) to favor fresh momentum starters
+  // Anti-Exhaustion Protection: If latest candle is rejecting top (upper wick > 45% or red candle after pump)
+  const range = Math.max(0.000001, lastHigh - lastLow);
+  const upperWick = lastHigh - Math.max(lastOpen, lastClose);
+  if (upperWick / range >= 0.45 && mom3 > 1.5) {
+    score *= 0.55; // Severely penalize top wick rejection
+  } else if (lastClose < lastOpen && mom3 > 2.0) {
+    score *= 0.65; // Penalize red candle occurring at high momentum
+  }
+
+  // Dampen overextended late pumps (>12% or >20% in 24h) to favor fresh momentum starters
   if (priceChange24h > 20.0) {
-    score *= 0.82;
+    score *= 0.70;
   } else if (priceChange24h > 12.0) {
-    score *= 0.92;
+    score *= 0.85;
   }
 
   return Math.min(100, Math.max(0, Math.round(score)));
@@ -590,7 +604,8 @@ export function calculateBreakoutAtrExpansionScore(klines: Kline[], high24h: num
 
   // 1. ATR Expansion ratio: Current 1m candle range vs 14-period average candle range
   const lastIdx = klines.length - 1;
-  const currentCandleRange = Math.max(0.000001, klines[lastIdx].high - klines[lastIdx].low);
+  const lastCandle = klines[lastIdx];
+  const currentCandleRange = Math.max(0.000001, lastCandle.high - lastCandle.low);
 
   let sumRange = 0;
   const count = Math.min(14, klines.length - 1);
@@ -601,19 +616,28 @@ export function calculateBreakoutAtrExpansionScore(klines: Kline[], high24h: num
   const atrExpansionRatio = currentCandleRange / avgRange;
 
   let expansionScore = 50;
-  if (atrExpansionRatio >= 2.5) expansionScore = 98;
-  else if (atrExpansionRatio >= 1.8) expansionScore = 88;
+  if (atrExpansionRatio >= 2.5) expansionScore = 95;
+  else if (atrExpansionRatio >= 1.8) expansionScore = 85;
   else if (atrExpansionRatio >= 1.3) expansionScore = 75;
   else if (atrExpansionRatio >= 1.0) expansionScore = 60;
   else expansionScore = 40;
+
+  // Rejection check: If the expanding candle is RED or has a long upper wick, it's selling climax / exhaustion trap
+  const upperWick = lastCandle.high - Math.max(lastCandle.open, lastCandle.close);
+  const isUpperRejection = upperWick / currentCandleRange >= 0.40;
+  const isRed = lastCandle.close < lastCandle.open;
+
+  if (isRed || isUpperRejection) {
+    expansionScore = Math.min(30, Math.max(10, 50 - (atrExpansionRatio * 15)));
+  }
 
   // 2. Breakout closeness: Distance to recent 20-candle high
   const recent20High = Math.max(...klines.slice(-20).map(k => k.high));
   const distToHighPct = recent20High > 0 ? ((currentPrice - recent20High) / recent20High) * 100 : 0;
 
   let breakoutScore = 50;
-  if (distToHighPct >= -0.2) breakoutScore = 98;
-  else if (distToHighPct >= -1.0) breakoutScore = 85;
+  if (distToHighPct >= -0.2 && !isRed && !isUpperRejection) breakoutScore = 95;
+  else if (distToHighPct >= -1.0 && !isRed) breakoutScore = 80;
   else if (distToHighPct >= -2.0) breakoutScore = 70;
   else if (distToHighPct >= -4.0) breakoutScore = 50;
   else breakoutScore = 30;
@@ -710,6 +734,8 @@ export interface StrategyResult {
   signal: 'BUY' | 'SELL' | 'HOLD';
   probability: number;
   rfProb?: number;
+  dtwScore?: number;
+  dtwWinRate?: number;
   metaProb?: number;
   vetoReason?: string;
   targetScore?: number;
@@ -753,7 +779,7 @@ export async function fetchHistoricalKlines(symbol: string, limit = 1000): Promi
 
   try {
     const fetchLimit = Math.min(limit, 1000);
-    const url = `https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=1h&limit=${fetchLimit}`;
+    const url = `https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=5m&limit=${fetchLimit}`;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 3000);
     const res = await fetch(url, { signal: controller.signal });
@@ -2125,7 +2151,7 @@ export async function runRealStrategyAnalysis(
   const dataset: DataPoint[] = [];
 
   // PASUL 4: Build feature vectors with Triple Barrier Labeling (TP before SL)
-  const maxLookAhead = 12;
+  const maxLookAhead = 3;
   for (let i = 200; i < klines.length - maxLookAhead; i++) {
     const f = extractFeatures(
       klines, i, closes, rsiArr, macdObj, bollObj, sma50Arr, sma200Arr, atrArr,
@@ -2152,36 +2178,52 @@ export async function runRealStrategyAnalysis(
 
     let label = 0; // HOLD by default
 
+    // Independent forward barrier checking for BUY and SELL paths
+    let buyResolved = false;
+    let buySuccess = false;
+    let sellResolved = false;
+    let sellSuccess = false;
+
     for (let h = 1; h <= maxLookAhead; h++) {
       const futureBar = klines[i + h];
       if (!futureBar) break;
 
-      const hitBuyTP = futureBar.high >= buyTPPrice;
-      const hitBuySL = futureBar.low <= buySLPrice;
-      const hitSellTP = futureBar.low <= sellTPPrice;
-      const hitSellSL = futureBar.high >= sellSLPrice;
+      // Evaluate BUY trajectory
+      if (!buyResolved) {
+        if (futureBar.high >= buyTPPrice) {
+          buySuccess = true;
+          buyResolved = true;
+        } else if (futureBar.low <= buySLPrice) {
+          buySuccess = false;
+          buyResolved = true;
+        }
+      }
 
-      if (hitBuyTP && !hitBuySL) {
-        label = 1; // BUY target hit TP before SL
-        break;
+      // Evaluate SELL trajectory
+      if (!sellResolved) {
+        if (futureBar.low <= sellTPPrice) {
+          sellSuccess = true;
+          sellResolved = true;
+        } else if (futureBar.high >= sellSLPrice) {
+          sellSuccess = false;
+          sellResolved = true;
+        }
       }
-      if (hitSellTP && !hitSellSL) {
-        label = -1; // SELL target hit TP before SL
-        break;
-      }
-      if (hitBuySL || hitSellSL) {
-        label = 0; // Hit SL first or ambiguous
-        break;
-      }
+
+      if (buyResolved && sellResolved) break;
     }
 
-    // Secondary forward return check for candles that did not hit TP/SL within horizon
-    if (label === 0) {
+    if (buySuccess && !sellSuccess) {
+      label = 1;
+    } else if (sellSuccess && !buySuccess) {
+      label = -1;
+    } else {
+      // Secondary forward return check for candles that did not hit TP/SL within horizon
       const forward8Price = klines[i + 8] ? klines[i + 8].close : entryPrice;
       const ret8 = ((forward8Price - entryPrice) / entryPrice) * 100;
-      if (ret8 >= currentAtrPct * 0.4) {
+      if (ret8 >= currentAtrPct * 0.6) {
         label = 1;
-      } else if (ret8 <= -currentAtrPct * 0.4) {
+      } else if (ret8 <= -currentAtrPct * 0.6) {
         label = -1;
       }
     }
@@ -2254,10 +2296,10 @@ export async function runRealStrategyAnalysis(
   // Sunt acum centralizate aici și ușor înăsprite (ADX 15->18, Volum 0.70->0.80,
   // ATR% 0.20->0.25, prag Meta-Model 35%->48%) pentru a tăia intrările de calitate joasă
   // care dilua win rate-ul și profit factorul.
-  const MIN_ADX_FOR_ENTRY = 18;
-  const MIN_VOLUME_RATIO = 0.80;
-  const MIN_ATR_PCT = 0.25;
-  const META_MIN_PROFIT_PROB = 48;
+  const MIN_ADX_FOR_ENTRY = 12;
+  const MIN_VOLUME_RATIO = 0.40;
+  const MIN_ATR_PCT = 0.15;
+  const META_MIN_PROFIT_PROB = 30;
 
   // FIX: nEstimators/maxDepth defaults were duplicated as separate magic numbers in
   // 2 places (per-fold model below, and productionModel further down) — the exact
@@ -2294,8 +2336,11 @@ export async function runRealStrategyAnalysis(
     
     // Populate DTW module with patterns from training data
     const dtwModule = new DTWModule(modelParams.dtwWindow || 20, modelParams.dtwK || 10, modelParams.maxPatterns || 1000);
-    for (let i = 200; i < purgedTrainEnd; i++) {
-        dtwModule.addPattern(klines.slice(i - 20, i + 1), dataset[i].label !== 0 ? 1 : 0);
+    for (let j = 0; j < purgedTrainEnd; j++) {
+      const kIdx = 200 + j;
+      if (kIdx >= 20) {
+        dtwModule.addPattern(klines.slice(kIdx - 20, kIdx + 1), dataset[j].label === 1 ? 1 : 0);
+      }
     }
 
     if (fold === nFolds - 1) {
@@ -2541,6 +2586,15 @@ export async function runRealStrategyAnalysis(
   const productionModel = new RandomForest();
   productionModel.train(dataset, modelParams.nEstimators || DEFAULT_N_ESTIMATORS, modelParams.maxDepth || DEFAULT_MAX_DEPTH, 3);
 
+  // Train Production DTW Pattern Recognition Module on full resolved dataset
+  const productionDtwModule = new DTWModule(modelParams.dtwWindow || 20, modelParams.dtwK || 10, modelParams.maxPatterns || 1000);
+  for (let j = 0; j < dataset.length; j++) {
+    const kIdx = 200 + j;
+    if (kIdx >= 20) {
+      productionDtwModule.addPattern(klines.slice(kIdx - 20, kIdx + 1), dataset[j].label === 1 ? 1 : 0);
+    }
+  }
+
   if (onProgress) onProgress(75);
 
   if (position) {
@@ -2646,6 +2700,7 @@ export async function runRealStrategyAnalysis(
   
   const expPred = predictTree(explainerTree, currentFeatures);
   const currentPred = productionModel.predictDetailed(currentFeatures);
+  const liveDtwConf = productionDtwModule.predict(klines.slice(-21));
 
   // Feature Pruning: Filter features with importance >= 2.0%
   const featureImportances = finalModel.getPermutationImportances(lastFoldTestData.length > 0 ? lastFoldTestData : dataset.slice(-300));
@@ -2776,7 +2831,8 @@ export async function runRealStrategyAnalysis(
 
   const isBuyCandidate = currentPred.value === 1 || (currentPred.probBuy > currentPred.probSell && currentPred.probBuy >= 32);
   const isSellCandidate = currentPred.value === -1 || (currentPred.probSell > currentPred.probBuy && currentPred.probSell >= 52);
-  const baseScoreForUnification = calibratedProb;
+  // Unify Random Forest calibrated probability (60%) with DTW Pattern Recognition score (40%)
+  const baseScoreForUnification = Math.round((calibratedProb * 0.60) + (liveDtwConf.score * 0.40));
 
   // Veto Check: Primary RF Prob < 32%
   const minRfTarget = 32;
@@ -2865,6 +2921,39 @@ export async function runRealStrategyAnalysis(
     }
   }
 
+  // Veto Check 7: Anti-Top & Overbought Exhaustion Protection (Protecție Cumpărare la Vârf)
+  // Blochează cumpărarea impulsivă (FOMO) la vârful mișcărilor unde urmează dump sau pullback imediat.
+  if (!strictVetoTriggered && isBuyCandidate && !reversalSignal.isBullishReversal) {
+    const lastClosePrice = klines[lastI].close;
+    const lastOpenPrice = klines[lastI].open;
+    const lastHighPrice = klines[lastI].high;
+    const lastLowPrice = klines[lastI].low;
+    const candleTotalRange = Math.max(0.000001, lastHighPrice - lastLowPrice);
+    const upperWickSize = lastHighPrice - Math.max(lastOpenPrice, lastClosePrice);
+    const bodySize = Math.max(0.000001, Math.abs(lastClosePrice - lastOpenPrice));
+    const upperWickRatio = upperWickSize / candleTotalRange;
+
+    const isRsiOverboughtSevere = (rsiArr[lastI] || 50) >= 70;
+    const isStochRsiExtreme = stochRsiArr && stochRsiArr[lastI] !== undefined && stochRsiArr[lastI] >= 85 && (rsiArr[lastI] || 50) >= 65;
+    const isBollingerOverbought = bollObj.percentB[lastI] !== undefined && bollObj.percentB[lastI] >= 0.95;
+    const isUpperWickRejection = upperWickRatio >= 0.40 && upperWickSize >= 1.5 * bodySize;
+    const isOverextendedFromEma = curEma20 > 0 && ((lastClosePrice - curEma20) / curEma20) >= 0.025;
+    const isBearishReversalActive = reversalSignal.isBearishReversal;
+
+    const exhaustionReasons: string[] = [];
+    if (isBearishReversalActive) exhaustionReasons.push(`Semnal Reversal Urs activ (${reversalSignal.score}pt)`);
+    if (isRsiOverboughtSevere) exhaustionReasons.push(`RSI supracumpărat extrem (${(rsiArr[lastI] || 50).toFixed(1)} >= 70)`);
+    if (isStochRsiExtreme) exhaustionReasons.push(`StochRSI supracumpărat (${stochRsiArr[lastI].toFixed(1)} >= 85)`);
+    if (isBollingerOverbought) exhaustionReasons.push(`Plafon Bollinger (%B: ${(bollObj.percentB[lastI] || 1).toFixed(2)} >= 0.95)`);
+    if (isUpperWickRejection) exhaustionReasons.push(`Rejecție fitil superior ${(upperWickRatio * 100).toFixed(0)}% din lumânare`);
+    if (isOverextendedFromEma) exhaustionReasons.push(`Supra-extins +${(((lastClosePrice - curEma20) / curEma20) * 100).toFixed(1)}% peste EMA20`);
+
+    if (exhaustionReasons.length > 0) {
+      strictVetoTriggered = true;
+      vetoReason = `🛑 VETO Supra-Cumpărat / Rejecție Vârf (Anti-Dump): ${exhaustionReasons.join(', ')} - Risc major de cădere imediat după cumpărare.`;
+    }
+  }
+
   // 2. Continuous Adjustments Engine (Converting EMA, RSI, Volume, ADX, News into smooth score multipliers)
   const scoreAdjustments: string[] = [];
 
@@ -2914,7 +3003,8 @@ export async function runRealStrategyAnalysis(
   const metaAdjustment = Math.max(-10, Math.min(10, Math.round((metaProfitProb - 50) * 0.2)));
   scoreAdjustments.push(`${metaAdjustment >= 0 ? '+' : ''}${metaAdjustment}% Meta-Model (${metaProfitProb}%)`);
 
-  scoreAdjustments.push(`[Doar Random Forest Activ]`);
+  scoreAdjustments.push(`DTW Pattern: ${liveDtwConf.score.toFixed(1)}% (Win Rate: ${(liveDtwConf.winRate * 100).toFixed(0)}%)`);
+  scoreAdjustments.push(`[Random Forest + DTW Pattern Match Activ]`);
 
   // News & Macro Impact (+/- 3%..5%)
   scoreAdjustments.push(`${impactAdjustment >= 0 ? '+' : ''}${impactAdjustment}% News Sentiment (${newsSentiment.sentimentLabel})`);
@@ -3004,16 +3094,17 @@ export async function runRealStrategyAnalysis(
   const trendSign = trendAdjustment >= 0 ? `+${trendAdjustment}%` : `${trendAdjustment}%`;
   const metaSign = metaAdjustment >= 0 ? `+${metaAdjustment}%` : `${metaAdjustment}%`;
 
-  const modelEngineLabel = 'Doar Random Forest (18 Arbori Decizionali)';
+  const modelEngineLabel = 'Random Forest (18 Arbori) + DTW Dynamic Pattern Matching';
 
   const detailedExplanation: string[] = [
     `0. Mod Calcul Activ: ${modelEngineLabel}`,
     `1. Triple Barrier Labeling & Purged Walk-Forward CV: Antrenat pe 1000 lumânări cu aliniere trend.`,
-    `2. Probability Calibration (Platt Scaling): Probabilitate brută ${rawProb}% recalibrată la ${calibratedProb}%.`,
+    `2. Probability Calibration & Pattern Match: RF Prob ${calibratedProb}% | DTW Pattern Match ${liveDtwConf.score.toFixed(1)}% (${(liveDtwConf.winRate * 100).toFixed(0)}% Win Rate pe pattern-uri similare).`,
     `3. Reversal & Regime Detector: ${reversalSignal.isBullishReversal ? `⚡ CAPITULATION REBOUND BUY DETECTAT (${reversalSignal.reasons.join(', ')})` : reversalSignal.isBearishReversal ? `⚡ EUPHORIA REVERSAL SELL DETECTAT (${reversalSignal.reasons.join(', ')})` : `Reversal Inactiv | ADX=${lastAdx.toFixed(1)} (${adxSign}), VolRatio=${lastVolRatio.toFixed(2)} (${volSign})`}.`,
     `4. Contribuții Defalcate Scor Unificat:
        • Mod Calcul Selectat: ${modelEngineLabel}
-       • Random Forest (Bază Calibrată): ${calibratedProb}%
+       • Random Forest (Bază Calibrată 60%): ${calibratedProb}%
+       • DTW Pattern Match (Bază Dinamică 40%): ${liveDtwConf.score.toFixed(1)}%
        • Meta-Model Adjustment: ${metaSign}
        • EMA Trend Alignment: ${trendSign}
        • Volum Multiplier: ${volSign}
@@ -3045,6 +3136,8 @@ export async function runRealStrategyAnalysis(
     signal: action,
     probability: finalUnifiedScore,
     rfProb: calibratedProb,
+    dtwScore: parseFloat(liveDtwConf.score.toFixed(1)),
+    dtwWinRate: parseFloat(liveDtwConf.winRate.toFixed(2)),
     metaProb: metaProfitProb,
     vetoReason,
     targetScore: finalUnifiedScore,

@@ -16,7 +16,8 @@ import {
   calculateLiquiditySpreadScore,
   calculateBreakoutAtrExpansionScore,
   calculateTrendConfirmationScore,
-  fetchHistoricalKlines
+  fetchHistoricalKlines,
+  DTWModule
 } from '../src/services/ml';
 import { MarketOpportunity, SymbolPerformanceStat, MetaTradeScoreBreakdown, ScalpingConfig } from '../src/types';
 
@@ -192,6 +193,7 @@ export interface SignalJournalEntry {
   symbol: string;
   price: number;
   rfProb: number;
+  dtwScore?: number;
   metaProb: number;
   reversalScore: number;
   isReversal: boolean;
@@ -257,6 +259,7 @@ export interface BotState {
   totalTradesExecuted: number;
   smartGridActive?: boolean;
   scalpingConfig?: ScalpingConfig;
+  dtwModule?: any; // Persistent DTW module
   gridConfig?: {
     active: boolean;
     autoRegimeSwitch: boolean;
@@ -303,6 +306,8 @@ export interface BotState {
     allocatedCapitalPct: number;
     supportPrice: number;
     resistancePrice: number;
+    shockUntilMs?: number;
+    shockLevel?: 'MIC' | 'MEDIU' | 'EXTREM' | 'NONE';
     lastAction?: string;
     updatedAt: string;
   }>;
@@ -650,16 +655,15 @@ async function getCachedRealStrategyAnalysis(symbol: string, mlModelType: 'rf' |
     return cached.res;
   }
 
-  // Asynchronously trigger lightweight ML strategy calculation in background to warm cache
-  runRealStrategyAnalysis(cleanSymbol, 'rf', { fastMode: true }, undefined, mlModelType)
-    .then(res => {
-      if (res) {
-        realStrategyCache.set(cacheKey, { res, timestamp: Date.now() });
-      }
-    })
-    .catch(err => {
-      console.warn(`[ML Real Strategy Background Warning for ${cleanSymbol}]: ${err?.message || err}`);
-    });
+  try {
+    const res = await runRealStrategyAnalysis(cleanSymbol, 'rf', { fastMode: true }, undefined, mlModelType);
+    if (res) {
+      realStrategyCache.set(cacheKey, { res, timestamp: Date.now() });
+      return res;
+    }
+  } catch (err: any) {
+    console.warn(`[ML Real Strategy Warning for ${cleanSymbol}]: ${err?.message || err}`);
+  }
 
   return cached ? cached.res : null;
 }
@@ -693,7 +697,7 @@ async function generateSignalServer(symbol: string, currentPrice: number, mlMode
 
   // Technical Fallback calculation
   try {
-    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=1h&limit=100`);
+    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=5m&limit=100`);
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data) && data.length >= 30) {
@@ -752,6 +756,7 @@ export function calculateMetaTradeScore(params: {
   symbol: string;
   opportunityScore?: number;
   aiProbability: number;          // Random Forest Probability
+  dtwScore?: number;              // DTW Pattern Matching Score
   tcnProbability?: number;        // TCN Probability
   rangeProbability?: number;
   trendAlignment?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
@@ -767,10 +772,13 @@ export function calculateMetaTradeScore(params: {
   // 1. Random Forest Probability (0-100) -> 20% weight
   const rfProb = Math.min(100, Math.max(0, params.aiProbability || 50));
 
-  // 2. TCN Network Probability (0-100) -> 20% weight (falls back to RF if TCN not available)
+  // 2. DTW Pattern Recognition Score (0-100) -> 15% weight (falls back to RF if not specified)
+  const dtwScore = Math.min(100, Math.max(0, params.dtwScore ?? rfProb));
+
+  // 3. TCN Network Probability (0-100) -> 15% weight (falls back to RF if TCN not available)
   const tcnProb = Math.min(100, Math.max(0, params.tcnProbability ?? rfProb));
 
-  // 3. ADX Trend Strength Score (0-100) -> 10% weight
+  // 4. ADX Trend Strength Score (0-100) -> 10% weight
   const adxVal = params.adxValue ?? 25;
   let adxScore = 50;
   if (adxVal >= 35) adxScore = 100;
@@ -778,7 +786,7 @@ export function calculateMetaTradeScore(params: {
   else if (adxVal >= 18) adxScore = 60;
   else adxScore = 30;
 
-  // 4. EMA Trend Alignment Score (0-100) -> 10% weight
+  // 5. EMA Trend Alignment Score (0-100) -> 10% weight
   const trendAlign = params.trendAlignment || 'NEUTRAL';
   const pChange = params.priceChangePercent ?? 0;
   let emaTrendScore = 50;
@@ -786,7 +794,7 @@ export function calculateMetaTradeScore(params: {
   else if (trendAlign === 'NEUTRAL') emaTrendScore = 60;
   else if (trendAlign === 'BEARISH' || pChange <= -1.5) emaTrendScore = 20;
 
-  // 5. Volume Growth / Ratio Score (0-100) -> 10% weight
+  // 6. Volume Growth / Ratio Score (0-100) -> 10% weight
   const volRatio = params.volumeRatio ?? 1.0;
   let volumeScore = 50;
   if (volRatio >= 1.8) volumeScore = 100;
@@ -794,7 +802,7 @@ export function calculateMetaTradeScore(params: {
   else if (volRatio >= 0.8) volumeScore = 60;
   else volumeScore = 30;
 
-  // 6. Volatility (ATR %) Score (0-100) -> 10% weight
+  // 7. Volatility (ATR %) Score (0-100) -> 10% weight
   const atrPct = params.atrPercent ?? 0.40;
   let volatilityScore = 50;
   if (atrPct >= 0.80) volatilityScore = 100;
@@ -802,10 +810,10 @@ export function calculateMetaTradeScore(params: {
   else if (atrPct >= 0.30) volatilityScore = 65;
   else volatilityScore = 25;
 
-  // 7. Reversal Signal Score (0-100) -> 10% weight
+  // 8. Reversal Signal Score (0-100) -> 5% weight
   const revScore = Math.min(100, Math.max(0, params.reversalScore ?? 50));
 
-  // 8. News / AI Sentiment Score (0-100) -> 10% weight
+  // 9. News / AI Sentiment Score (0-100) -> 5% weight
   const sentLabel = (params.newsSentimentLabel || 'neutral').toLowerCase();
   let sentimentScore = 50;
   if (sentLabel.includes('bullish') || sentLabel.includes('pozitiv')) sentimentScore = 95;
@@ -813,16 +821,17 @@ export function calculateMetaTradeScore(params: {
   else sentimentScore = 55;
 
   // Standardized MetaScore Formula (0-100):
-  // RF (20%) + TCN (20%) + ADX (10%) + EMA Trend (10%) + Volum (10%) + Volatilitate (10%) + Reversal (10%) + Sentiment (10%)
+  // RF (20%) + DTW (15%) + TCN (15%) + ADX (10%) + EMA Trend (10%) + Volum (10%) + Volatilitate (10%) + Reversal (5%) + Sentiment (5%)
   const rawFinalScore = (
     0.20 * rfProb +
-    0.20 * tcnProb +
+    0.15 * dtwScore +
+    0.15 * tcnProb +
     0.10 * adxScore +
     0.10 * emaTrendScore +
     0.10 * volumeScore +
     0.10 * volatilityScore +
-    0.10 * revScore +
-    0.10 * sentimentScore
+    0.05 * revScore +
+    0.05 * sentimentScore
   );
 
   const finalTradeScore = Math.min(100, Math.max(0, Math.round(rawFinalScore)));
@@ -990,6 +999,7 @@ class ServerBotEngine {
       analysisInterval: 60,
       maxLogs: 2500,
       serverStartedAt: new Date().toISOString(),
+      dtwModule: new DTWModule(20, 10, 1000), // Initialized here
       apiKey: '',
       apiSecret: '',
       testnetApiKey: '',
@@ -1002,8 +1012,8 @@ class ServerBotEngine {
       smartGridActive: false,
       scalpingConfig: {
         active: true,
-        minRfProb: 70,
-        minMetaScore: 70,
+        minRfProb: 52,
+        minMetaScore: 45,
         stopLossPercent: 1.0,
         targetTakeProfit: 3.0,
         trailingStopActivation: 1.5,
@@ -1018,8 +1028,8 @@ class ServerBotEngine {
         enableDynamicSizing: true,
         minVolumeGrowth: 0.8,
         enableStagnationFilter: true,
-        minAtrPctThreshold: 0.30,
-        minRange20pThreshold: 0.55,
+        minAtrPctThreshold: 0.20,
+        minRange20pThreshold: 0.40,
         leverage: 1
       },
       gridConfig: {
@@ -1411,6 +1421,23 @@ class ServerBotEngine {
     this.state.initialBalance = currentEquity > 0 ? currentEquity : 10000;
     this.addLog(`[CIRCUIT BREAKER RESETAT] Circuit breaker eliberat. Capital re-ancorat la $${this.state.initialBalance.toFixed(2)} USDT. Auto-trading reluat.`, 'info', this.state.initialBalance);
     this.savePersistedState();
+  }
+
+  public async trainDtwModule(symbol: string) {
+    try {
+      const klines = await fetchHistoricalKlines(symbol, 500);
+      if (!Array.isArray(klines) || klines.length < 100) return;
+
+      const dtw = new DTWModule(20, 10, 1000);
+      for (let i = 20; i < klines.length - 1; i++) {
+        // Assume profitable for pattern training if next 1h price > current
+        const label = klines[i+1] && klines[i+1].close > klines[i].close ? 1 : 0;
+        dtw.addPattern(klines.slice(i - 20, i + 1), label);
+      }
+      this.state.dtwModule = dtw;
+    } catch (e) {
+      console.error(`[DTW TRAIN ERROR] ${symbol}:`, e);
+    }
   }
 
   public updateConfig(newConfig: Partial<BotState>) {
@@ -2209,11 +2236,18 @@ class ServerBotEngine {
           console.warn(`[Binance Account Pre-Check Warning] ${e?.message || e}`);
         }
 
+        const isHighLiquidity = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'].includes(symbol);
+        
         const orderParams: any = {
           symbol: symbol,
           side: action as any,
-          type: 'MARKET' as any,
+          type: isHighLiquidity ? 'MARKET' : 'LIMIT',
         };
+
+        if (!isHighLiquidity) {
+           const offset = action === 'BUY' ? 1.001 : 0.999;
+           orderParams.price = (price * offset).toFixed(8); // Safe precision
+        }
 
         if (action === 'BUY') {
           const requestedCost = price * amount;
@@ -3667,28 +3701,19 @@ class ServerBotEngine {
 
             let signal: { action: 'BUY' | 'SELL' | 'HOLD'; prob: number; modelName: string; reason: string } | null = null;
             if (mlRes) {
-              let effectiveAction: 'BUY' | 'SELL' | 'HOLD' = mlRes.signal;
+              const effectiveAction: 'BUY' | 'SELL' | 'HOLD' = mlRes.signal;
               const discScore = oppInfo?.discoveryScore || 0;
-              const candleScore = oppInfo?.candlestickPatternScore || 0;
-              
-              if (effectiveAction === 'HOLD' && (discScore >= 55 || candleScore >= 65 || oppScore >= 55 || (mlRes.probability && mlRes.probability >= 45))) {
-                effectiveAction = 'BUY';
-              }
-              const effectiveProb = Math.min(98, Math.max(50, Math.round(Math.max(mlRes.probability || 50, discScore, candleScore))));
+              const effectiveProb = Math.min(98, Math.max(10, Math.round(mlRes.probability || 50)));
 
               signal = {
                 action: effectiveAction,
                 prob: effectiveProb,
                 modelName: 'Random Forest Ensemble 2.0',
-                reason: mlRes.explanation?.find(e => e.includes('Semnal') || e.includes('Reversal') || e.includes('Pattern')) || `Scor Discovery: ${discScore}/100 | Pattern: ${oppInfo?.candlestickPatternName || 'Standard'}`
+                reason: mlRes.explanation?.find(e => e.includes('Semnal') || e.includes('Reversal') || e.includes('Pattern') || e.includes('VETO')) || (mlRes.vetoReason ? `VETO: ${mlRes.vetoReason}` : `Scor Discovery: ${discScore}/100 | Pattern: ${oppInfo?.candlestickPatternName || 'Standard'}`)
               };
               item.signal = { action: effectiveAction, prob: effectiveProb };
             } else {
               signal = await generateSignalServer(item.symbol, currentPrice);
-              if (signal && signal.action === 'HOLD' && oppInfo && (oppInfo.discoveryScore >= 55 || oppInfo.candlestickPatternScore >= 65)) {
-                signal.action = 'BUY';
-                signal.prob = Math.max(signal.prob, oppInfo.discoveryScore || 60);
-              }
               if (signal) item.signal = signal;
             }
 
@@ -3705,6 +3730,7 @@ class ServerBotEngine {
               symbol: item.symbol,
               price: currentPrice,
               rfProb: mlRes?.rfProb || signal?.prob || 50,
+              dtwScore: mlRes?.dtwScore ?? 50,
               metaProb: mlRes?.metaProb || 50,
               reversalScore: mlRes?.reversalSignal?.score || 0,
               isReversal: !!(mlRes?.reversalSignal?.isBullishReversal || mlRes?.reversalSignal?.isBearishReversal),
@@ -3774,8 +3800,8 @@ class ServerBotEngine {
           if (signal.action === 'BUY' && signal.prob >= 30) {
             const scalpConfig = this.state.scalpingConfig || {
               active: true,
-              minRfProb: 70,
-              minMetaScore: 70,
+              minRfProb: 52,
+              minMetaScore: 45,
               stopLossPercent: 1.0,
               targetTakeProfit: 3.0,
               trailingStopActivation: 1.5,
@@ -3844,6 +3870,7 @@ class ServerBotEngine {
               symbol: item.symbol,
               opportunityScore: oppScore,
               aiProbability: signal.prob,
+              dtwScore: mlRes?.dtwScore,
               tcnProbability: mlRes?.tcnPrediction?.probBuy,
               rangeProbability: oppInfo?.rfProb || (oppInfo?.regime === 'RANGING' ? 82 : 55),
               trendAlignment: oppInfo?.trendAlignment || (signal.prob >= 60 ? 'BULLISH' : 'NEUTRAL'),
@@ -3943,8 +3970,8 @@ class ServerBotEngine {
 
             const scalpCfg: ScalpingConfig = this.state.scalpingConfig || {
               active: true,
-              minRfProb: 70,
-              minMetaScore: 70,
+              minRfProb: 52,
+              minMetaScore: 45,
               stopLossPercent: 1.0,
               targetTakeProfit: 3.0,
               trailingStopActivation: 1.5,
@@ -3963,28 +3990,62 @@ class ServerBotEngine {
             const trailDistance = scalpCfg.trailingStopDistance ?? 0.5;
             const maxHoldMins = scalpCfg.maxHoldMinutes ?? 15;
 
+            // TP/SL Dinamic (Nou)
+            let dynamicSL = configuredSL;
+            let dynamicTP = configuredTP;
+            let usePartialTP = false;
+            let dynamicTrailDistance = trailDistance;
+
+            if (scalpCfg.enableDynamicTpSl) {
+                const opp = this.state.marketOpportunities.find(o => o.symbol === pos.symbol);
+                const atrPercent = opp?.atrPercent || 0.40;
+                const metaScore = (pos as any).metaTradeScore || 0;
+                
+                let multiplicator_tp = 0;
+                if (metaScore >= 85) multiplicator_tp = 2.2;
+                else if (metaScore >= 75) multiplicator_tp = 1.5;
+                else if (metaScore >= 60) multiplicator_tp = 1.0;
+                
+                if (multiplicator_tp > 0) {
+                    dynamicTP = multiplicator_tp * atrPercent;
+                    dynamicSL = 1.0 * atrPercent;
+                    usePartialTP = true; // Activează TP parțial
+                    dynamicTrailDistance = 1.0 * atrPercent; // Trailing dinamic ATR
+                }
+            }
+
             let shouldExecuteSell = false;
             let sellReasonCategory = '';
 
-            // 1. Take Profit (+3%)
-            if (pnlPercent >= configuredTP) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Țintă Take Profit Atingers (+${pnlPercent.toFixed(2)}% >= +${configuredTP}%)`;
+            // 1. Take Profit
+            if (pnlPercent >= dynamicTP) {
+              if (usePartialTP && !(pos as any).isPartiallySold) {
+                // Partial TP: Vinde 50%
+                this.addLog(`[Partial TP 50%] ${item.symbol}: Executăm vânzare parțială.`, 'info');
+                await this.executeTrade(item.symbol, 'SELL', currentPrice, pos!.amount * 0.5, {
+                    entryReason: `Partial TP (50% din volum)`
+                });
+                (pos as any).isPartiallySold = true;
+                // Nu închide poziția de tot, continuă trailing pentru restul de 50%
+              } else {
+                shouldExecuteSell = true;
+                sellReasonCategory = `Țintă Take Profit Atingers (+${pnlPercent.toFixed(2)}% >= +${dynamicTP.toFixed(2)}%)`;
+              }
             }
-            // 2. Trailing Stop (Activated if highest PnL reached +1.5%, triggers on drop of 0.5%)
-            else if (highestPnl >= trailActivation && pnlPercent <= (highestPnl - trailDistance)) {
+            // 2. Trailing Stop
+            else if (highestPnl >= trailActivation && pnlPercent <= (highestPnl - dynamicTrailDistance)) {
               shouldExecuteSell = true;
-              sellReasonCategory = `Trailing Stop Activat 🎯 (Peak PnL: +${highestPnl.toFixed(2)}% | PnL Curent: +${pnlPercent.toFixed(2)}% <= +${(highestPnl - trailDistance).toFixed(2)}%)`;
+              sellReasonCategory = `Trailing Stop Activat 🎯 (Peak PnL: +${highestPnl.toFixed(2)}% | PnL Curent: +${pnlPercent.toFixed(2)}% <= +${(highestPnl - dynamicTrailDistance).toFixed(2)}%)`;
             }
             // 3. Break-Even Protection (Activated if highest PnL reached +1.0%, protects at entry price + 0.10%)
             else if (highestPnl >= beActivation && pnlPercent <= 0.10) {
               shouldExecuteSell = true;
               sellReasonCategory = `Protecție Break-Even 🛡️ (Peak PnL: +${highestPnl.toFixed(2)}% | PnL Curent: ${pnlPercent.toFixed(2)}%)`;
             }
-            // 4. Stop Loss (-1%)
-            else if (pnlPercent <= -configuredSL) {
+            // 4. Stop Loss
+            else if (pnlPercent <= -dynamicSL) {
               shouldExecuteSell = true;
-              sellReasonCategory = `Stop Loss Configurat ✂️ (PnL: ${pnlPercent.toFixed(2)}% <= -${configuredSL.toFixed(1)}%)`;
+              sellReasonCategory = `Stop Loss Configurat ✂️ (PnL: ${pnlPercent.toFixed(2)}% <= -${dynamicSL.toFixed(2)}%)`;
             }
             // 5. Max Negative Hold Timeout (if enabled)
             else if (scalpCfg.enableMaxNegativeHold && pnlPercent < 0 && holdDurationMinutes >= (scalpCfg.maxNegativeHoldMinutes ?? 1.0)) {
