@@ -126,49 +126,63 @@ export function ScalpingBot() {
     }, 400);
   };
 
-  const applyPreset = (type: 'aggressive' | 'balanced' | 'conservative') => {
-    if (type === 'aggressive') {
-      setMinRfProb(40);
-      setMinMetaScore(40);
-      setStopLossPercent(3.0);
-      setTargetTakeProfit(1.5);
-      setTrailingStopActivation(1.5);
-      setTrailingStopDistance(0.6);
-      setBreakEvenActivation(0.8);
-      setPositionSizePercent(8.0);
-      setMaxHoldMinutes(30);
-      setMinOpportunityScore(45);
-      setCooldownMinutes(5);
-      setMinVolumeGrowth(0.6);
-      setEnableDynamicSizing(true);
-    } else if (type === 'balanced') {
-      setMinRfProb(50);
+  const applyPreset = (type: 'Conservator' | 'Free Trade' | 'Configurabil' | 'Dinamic' | 'aggressive' | 'balanced' | 'conservative') => {
+    if (type === 'Conservator' || type === 'conservative') {
+      setMinRfProb(75);
+      setMinMetaScore(55);
+      setStopLossPercent(0.55);
+      setTargetTakeProfit(0.85);
+      setTrailingStopActivation(0.50);
+      setTrailingStopDistance(0.15);
+      setBreakEvenActivation(0.35);
+      setPositionSizePercent(5.0);
+      setMaxHoldMinutes(8);
+      setMinOpportunityScore(55);
+      setCooldownMinutes(2);
+      setMinVolumeGrowth(0.8);
+      setEnableDynamicSizing(false);
+    } else if (type === 'Free Trade' || type === 'aggressive') {
+      setMinRfProb(70);
       setMinMetaScore(50);
-      setStopLossPercent(2.0);
-      setTargetTakeProfit(1.2);
-      setTrailingStopActivation(1.2);
+      setStopLossPercent(1.0);
+      setTargetTakeProfit(5.0);
+      setTrailingStopActivation(0.60);
+      setTrailingStopDistance(0.35);
+      setBreakEvenActivation(0.40);
+      setPositionSizePercent(5.0);
+      setMaxHoldMinutes(8);
+      setMinOpportunityScore(50);
+      setCooldownMinutes(2);
+      setMinVolumeGrowth(0.8);
+      setEnableDynamicSizing(true);
+    } else if (type === 'Configurabil' || type === 'balanced') {
+      setMinRfProb(70);
+      setMinMetaScore(70);
+      setStopLossPercent(1.0);
+      setTargetTakeProfit(3.0);
+      setTrailingStopActivation(1.5);
       setTrailingStopDistance(0.5);
       setBreakEvenActivation(1.0);
       setPositionSizePercent(5.0);
-      setMaxHoldMinutes(15);
+      setMaxHoldMinutes(8);
       setMinOpportunityScore(55);
-      setCooldownMinutes(8);
+      setCooldownMinutes(2);
       setMinVolumeGrowth(0.8);
       setEnableDynamicSizing(true);
-    } else if (type === 'conservative') {
-      setMinRfProb(65);
-      setMinMetaScore(75);
-      setStopLossPercent(1.5);
+    } else if (type === 'Dinamic') {
+      setMinRfProb(75);
+      setMinMetaScore(55);
+      setStopLossPercent(1.0);
       setTargetTakeProfit(1.0);
-      setTrailingStopActivation(1.0);
-      setTrailingStopDistance(0.4);
-      setBreakEvenActivation(0.8);
-      setPositionSizePercent(3.0);
-      setMaxHoldMinutes(10);
-      setMinOpportunityScore(65);
-      setCooldownMinutes(12);
-      setMinVolumeGrowth(1.1);
-      setEnableDynamicSizing(false);
+      setTrailingStopActivation(0.50);
+      setTrailingStopDistance(0.15);
+      setBreakEvenActivation(0.35);
+      setPositionSizePercent(5.0);
+      setMaxHoldMinutes(8);
+      setMinOpportunityScore(55);
+      setCooldownMinutes(2);
+      setMinVolumeGrowth(0.8);
+      setEnableDynamicSizing(true);
     }
   };
 
@@ -318,40 +332,60 @@ export function ScalpingBot() {
           <span className="text-xs text-zinc-400">Apasă un preset pentru a încărca configurația optimizată</span>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
           <button
             onClick={() => {
-              applyPreset('aggressive');
+              applyPreset('Conservator');
               setScalpingConfig({
-                minRfProb: 40,
-                minMetaScore: 40,
-                stopLossPercent: 3.0,
-                targetTakeProfit: 1.5,
-                trailingStopActivation: 1.5,
-                trailingStopDistance: 0.6,
-                breakEvenActivation: 0.8,
-                positionSizePercent: 8.0,
-                maxHoldMinutes: 30,
-                minOpportunityScore: 45,
-                cooldownMinutes: 5,
-                minVolumeGrowth: 0.6,
-                enableDynamicSizing: true
+                minRfProb: 75,
+                minMetaScore: 55,
+                stopLossPercent: 0.55,
+                targetTakeProfit: 0.85,
+                trailingStopActivation: 0.50,
+                trailingStopDistance: 0.15,
+                breakEvenActivation: 0.35,
+                maxHoldMinutes: 8,
               });
             }}
-            className="p-4 rounded-xl border border-orange-500/20 bg-orange-500/5 hover:bg-orange-500/10 text-left transition-all group"
+            className="p-4 rounded-xl border border-emerald-500/20 bg-emerald-500/5 hover:bg-emerald-500/10 text-left transition-all group"
           >
-            <div className="flex items-center justify-between font-semibold text-orange-400 text-sm mb-1">
-              <span>🚀 Agresiv (Volatilitate Ridicată)</span>
-              <span className="text-[10px] font-mono bg-orange-500/20 px-2 py-0.5 rounded text-orange-300">Size: 8%</span>
+            <div className="flex items-center justify-between font-semibold text-emerald-400 text-sm mb-1">
+              <span>🛡️ Conservator</span>
+              <span className="text-[10px] font-mono bg-emerald-500/20 px-2 py-0.5 rounded text-emerald-300">Default</span>
             </div>
             <p className="text-xs text-zinc-400">
-              RF: 40% | MetaScore: 40 | SL: 3.0% | TP: 1.5% | Hold: 30m | Frecvență ridicată de intrare.
+              RF: 75% | MetaScore: 55 | SL: 0.55% | TP: 0.85% | Trail: 0.5% | Hold: 8m
             </p>
           </button>
 
           <button
             onClick={() => {
-              applyPreset('balanced');
+              applyPreset('Free Trade');
+              setScalpingConfig({
+                minRfProb: 70,
+                minMetaScore: 50,
+                stopLossPercent: 1.0,
+                targetTakeProfit: 5.0,
+                trailingStopActivation: 0.60,
+                trailingStopDistance: 0.35,
+                breakEvenActivation: 0.40,
+                maxHoldMinutes: 8,
+              });
+            }}
+            className="p-4 rounded-xl border border-sky-500/20 bg-sky-500/5 hover:bg-sky-500/10 text-left transition-all group"
+          >
+            <div className="flex items-center justify-between font-semibold text-sky-400 text-sm mb-1">
+              <span>🚀 Free Trade</span>
+              <span className="text-[10px] font-mono bg-sky-500/20 px-2 py-0.5 rounded text-sky-300">Agresiv</span>
+            </div>
+            <p className="text-xs text-zinc-400">
+              RF: 70% | MetaScore: 50 | SL: 1.0% | TP: 5.0% | BE: 0.4% | Trail: 0.6%
+            </p>
+          </button>
+
+          <button
+            onClick={() => {
+              applyPreset('Configurabil');
               setScalpingConfig({
                 minRfProb: 70,
                 minMetaScore: 70,
@@ -360,54 +394,43 @@ export function ScalpingBot() {
                 trailingStopActivation: 1.5,
                 trailingStopDistance: 0.5,
                 breakEvenActivation: 1.0,
-                positionSizePercent: 5.0,
-                maxHoldMinutes: 15,
-                minOpportunityScore: 50,
-                cooldownMinutes: 2,
-                minVolumeGrowth: 0.8,
-                enableDynamicSizing: true,
-                minAtrPctThreshold: 0.30,
-                minRange20pThreshold: 0.55
+                maxHoldMinutes: 8,
               });
             }}
-            className="p-4 rounded-xl border border-emerald-500/20 bg-emerald-500/5 hover:bg-emerald-500/10 text-left transition-all group"
+            className="p-4 rounded-xl border border-amber-500/20 bg-amber-500/5 hover:bg-amber-500/10 text-left transition-all group"
           >
-            <div className="flex items-center justify-between font-semibold text-emerald-400 text-sm mb-1">
-              <span>⚖️ Standardizat ML (Recomandat)</span>
-              <span className="text-[10px] font-mono bg-emerald-500/20 px-2 py-0.5 rounded text-emerald-300">Size: 5%</span>
+            <div className="flex items-center justify-between font-semibold text-amber-400 text-sm mb-1">
+              <span>⚙️ Configurabil</span>
+              <span className="text-[10px] font-mono bg-amber-500/20 px-2 py-0.5 rounded text-amber-300">Custom</span>
             </div>
             <p className="text-xs text-zinc-400">
-              RF: 70% | MetaScore: 70 | SL: -1% | TP: +3% | BE: +1% | Trail: +1.5% | Hold: 15m | Cooldown: 2m
+              Setări manuale avansate. RF: 70% | MetaScore: 70 | TP: 3.0%
             </p>
           </button>
-
+          
           <button
             onClick={() => {
-              applyPreset('conservative');
+              applyPreset('Dinamic');
               setScalpingConfig({
-                minRfProb: 65,
-                minMetaScore: 75,
-                stopLossPercent: 1.5,
-                targetTakeProfit: 1.0,
-                trailingStopActivation: 1.0,
-                trailingStopDistance: 0.4,
-                breakEvenActivation: 0.8,
-                positionSizePercent: 3.0,
-                maxHoldMinutes: 10,
-                minOpportunityScore: 65,
-                cooldownMinutes: 12,
-                minVolumeGrowth: 1.1,
-                enableDynamicSizing: false
+                minRfProb: 75,
+                minMetaScore: 55,
+                stopLossPercent: 1.0, // Va fi suprascris
+                targetTakeProfit: 1.0, // Va fi suprascris
+                trailingStopActivation: 0.50,
+                trailingStopDistance: 0.15,
+                breakEvenActivation: 0.35,
+                maxHoldMinutes: 8,
+                enableDynamicTpSl: true
               });
             }}
-            className="p-4 rounded-xl border border-blue-500/20 bg-blue-500/5 hover:bg-blue-500/10 text-left transition-all group"
+            className="p-4 rounded-xl border border-purple-500/20 bg-purple-500/5 hover:bg-purple-500/10 text-left transition-all group"
           >
-            <div className="flex items-center justify-between font-semibold text-blue-400 text-sm mb-1">
-              <span>🛡️ Conservator (High-Winrate)</span>
-              <span className="text-[10px] font-mono bg-blue-500/20 px-2 py-0.5 rounded text-blue-300">Size: 3%</span>
+            <div className="flex items-center justify-between font-semibold text-purple-400 text-sm mb-1">
+              <span>⚡ Dinamic</span>
+              <span className="text-[10px] font-mono bg-purple-500/20 px-2 py-0.5 rounded text-purple-300">ATR-ML</span>
             </div>
             <p className="text-xs text-zinc-400">
-              RF: 65% | MetaScore: 75 | SL: 1.5% | TP: 1.0% | Hold: 10m | Filtru riguros anti-whipsaw.
+              TP/SL: Dinamic (Calculat în timp real de bot).
             </p>
           </button>
         </div>

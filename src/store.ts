@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware';
 import { registerSymbolCooldown } from './services/ml';
 import { scanClientSideMarketOpportunities } from './services/api';
 import { apiFetch, safeJson } from './utils/apiHelper';
-import { ViewState, MarketOpportunity, SymbolPerformanceStat, ScalpingConfig, ExecutionEngineMode, MlModelSelection, Position } from './types';
+import { ViewState, MarketOpportunity, SymbolPerformanceStat, ScalpingConfig, ExecutionEngineMode, MlModelSelection, Position, ScalpingPreset } from './types';
 
 export interface WatchlistItem {
   symbol: string;
@@ -22,6 +22,7 @@ export interface SignalJournalEntry {
   symbol: string;
   price: number;
   rfProb: number;
+  dtwScore?: number;
   metaProb: number;
   reversalScore: number;
   isReversal: boolean;
@@ -91,6 +92,7 @@ interface TradingStore {
   
   scalpingActive: boolean;
   scalpingConfig: ScalpingConfig;
+  presets: Record<'Conservator' | 'Free Trade' | 'Configurabil' | 'Dinamic', ScalpingPreset>;
   setScalpingConfig: (config: Partial<ScalpingConfig>) => void;
   toggleScalpingEngine: (active?: boolean) => void;
   resetScalpingEngine: () => Promise<any>;
@@ -214,29 +216,73 @@ export const useTradingStore = create<TradingStore>()(
   scalpingActive: true,
   scalpingConfig: {
     active: true,
-    minRfProb: 70,
-    minMetaScore: 70,
-    stopLossPercent: 1.0,
-    targetTakeProfit: 3.0,
-    trailingStopActivation: 1.5,
-    trailingStopDistance: 0.5,
-    breakEvenActivation: 1.0,
+    minRfProb: 52,
+    minMetaScore: 45,
+    stopLossPercent: 0.55,
+    targetTakeProfit: 0.85,
+    trailingStopActivation: 0.50,
+    trailingStopDistance: 0.15,
+    breakEvenActivation: 0.35,
     positionSizePercent: 5.0,
-    maxHoldMinutes: 15,
-    maxNegativeHoldMinutes: 1.0,
-    enableMaxNegativeHold: true,
+    maxHoldMinutes: 8,
+    maxNegativeHoldMinutes: 0.0,
+    enableMaxNegativeHold: false,
     dtwEnabled: true,
     dtwWindow: 20,
     dtwK: 10,
     dtwMinScore: 65,
     minOpportunityScore: 50,
     cooldownMinutes: 2,
-    enableDynamicSizing: true,
+    enableDynamicSizing: false,
     minVolumeGrowth: 0.8,
     enableStagnationFilter: true,
     minAtrPctThreshold: 0.30,
     minRange20pThreshold: 0.55,
-    leverage: 1
+    leverage: 1,
+    activePreset: 'Conservator'
+  },
+  presets: {
+    Conservator: {
+        minRfProb: 75,
+        minMetaScore: 55,
+        stopLossPercent: 0.55,
+        targetTakeProfit: 0.85,
+        trailingStopActivation: 0.50,
+        trailingStopDistance: 0.15,
+        breakEvenActivation: 0.35,
+        maxHoldMinutes: 8,
+    },
+    'Free Trade': {
+        minRfProb: 70,
+        minMetaScore: 50,
+        stopLossPercent: 1.0,
+        targetTakeProfit: 5.0,
+        trailingStopActivation: 0.60,
+        trailingStopDistance: 0.35,
+        breakEvenActivation: 0.40,
+        maxHoldMinutes: 8,
+    },
+    Configurabil: {
+        minRfProb: 70,
+        minMetaScore: 70,
+        stopLossPercent: 1.0,
+        targetTakeProfit: 3.0,
+        trailingStopActivation: 1.5,
+        trailingStopDistance: 0.5,
+        breakEvenActivation: 1.0,
+        maxHoldMinutes: 8,
+    },
+    Dinamic: {
+        minRfProb: 75,
+        minMetaScore: 55,
+        stopLossPercent: 1.0, // Va fi suprascris de dinamic
+        targetTakeProfit: 1.0, // Va fi suprascris de dinamic
+        trailingStopActivation: 0.50,
+        trailingStopDistance: 0.15,
+        breakEvenActivation: 0.35,
+        maxHoldMinutes: 8,
+        enableDynamicTpSl: true
+    }
   },
   reportConfig: {
     enabled: true,

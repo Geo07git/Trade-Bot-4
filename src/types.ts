@@ -24,11 +24,25 @@ export interface ScalpingConfig {
   minOpportunityScore: number;    // e.g. 50
   cooldownMinutes: number;        // e.g. 2
   enableDynamicSizing: boolean;   // e.g. true (3% - 8% based on MetaScore)
+  enableDynamicTpSl?: boolean;    // Dynamic TP/SL based on ATR and ML Score
   minVolumeGrowth?: number;       // e.g. 0.8x
   enableStagnationFilter?: boolean;  // Default: true (Filtru Stagnare & Volatilitate Scăzută NO-TRADE)
   minAtrPctThreshold?: number;     // Default: 0.30% (ATR minim pentru acoperire comisioane)
   minRange20pThreshold?: number;    // Default: 0.55% (Range 20 lumânări minim)
   leverage?: number;               // e.g. 1, 2, 3, 5, 10, 20 (Levier ajustabil scalping)
+  activePreset?: 'Conservator' | 'Free Trade' | 'Configurabil' | 'Dinamic';
+}
+
+export interface ScalpingPreset {
+    minRfProb: number;
+    minMetaScore: number;
+    stopLossPercent: number;
+    targetTakeProfit: number;
+    trailingStopActivation: number;
+    trailingStopDistance: number;
+    breakEvenActivation: number;
+    maxHoldMinutes: number;
+    enableDynamicTpSl?: boolean;
 }
 
 export interface MetaTradeScoreBreakdown {
@@ -214,6 +228,7 @@ export interface SignalJournalEntry {
   symbol: string;
   price: number;
   rfProb: number;
+  dtwScore?: number;
   metaProb: number;
   reversalScore: number;
   isReversal: boolean;

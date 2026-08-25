@@ -342,9 +342,12 @@ export function TradeLogs() {
 
                       <div className="flex items-center justify-between text-[11px] pt-0.5 border-t border-white/5">
                         <span className="text-zinc-400">Preț: <strong className="text-white">${sig.price < 1 ? sig.price.toFixed(5) : sig.price.toFixed(2)}</strong></span>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-1.5">
                           <span className={`px-1.5 py-0.2 rounded text-[10px] font-bold ${sig.rfProb >= 70 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-zinc-800 text-zinc-400'}`}>
                             RF: {sig.rfProb}%
+                          </span>
+                          <span className={`px-1.5 py-0.2 rounded text-[10px] font-bold ${(sig.dtwScore ?? sig.rfProb) >= 65 ? 'bg-cyan-500/20 text-cyan-300' : 'bg-zinc-800 text-zinc-400'}`}>
+                            DTW: {sig.dtwScore ?? sig.rfProb}%
                           </span>
                           <span className={`px-1.5 py-0.2 rounded text-[10px] font-bold ${sig.metaProb >= 60 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'}`}>
                             Meta: {sig.metaProb}%
@@ -377,6 +380,7 @@ export function TradeLogs() {
                       <th className="py-3 px-4">Simbol</th>
                       <th className="py-3 px-4">Preț Actual</th>
                       <th className="py-3 px-4">Random Forest (RF)</th>
+                      <th className="py-3 px-4">DTW Match</th>
                       <th className="py-3 px-4">Meta Model</th>
                       <th className="py-3 px-4">Reversal Setup</th>
                       <th className="py-3 px-4">Acțiune Finală</th>
@@ -387,7 +391,7 @@ export function TradeLogs() {
                   <tbody className="divide-y divide-white/5 text-xs font-mono">
                     {filteredSignals.length === 0 ? (
                       <tr>
-                        <td colSpan={9} className="py-12 text-center text-zinc-500 font-sans">
+                        <td colSpan={10} className="py-12 text-center text-zinc-500 font-sans">
                           {rawSignalList.length === 0 ? (
                             <div className="space-y-2">
                               <RefreshCw className="w-6 h-6 animate-spin text-emerald-400 mx-auto" />
@@ -427,6 +431,15 @@ export function TradeLogs() {
                                 'bg-zinc-800 text-zinc-400'
                               }`}>
                                 {sig.rfProb}%
+                              </span>
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+                                (sig.dtwScore ?? sig.rfProb) >= 65 ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' :
+                                (sig.dtwScore ?? sig.rfProb) >= 50 ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' :
+                                'bg-zinc-800 text-zinc-400'
+                              }`}>
+                                {sig.dtwScore ?? sig.rfProb}%
                               </span>
                             </td>
                             <td className="py-3 px-4">
@@ -611,21 +624,25 @@ export function TradeLogs() {
               </button>
             </div>
 
-            <div className="grid grid-cols-4 gap-2.5">
+            <div className="grid grid-cols-5 gap-2.5">
               <div className="bg-black/50 border border-white/5 rounded-xl p-2.5">
-                <span className="text-[10px] text-zinc-500 uppercase tracking-wider block">Random Forest (RF)</span>
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider block">Random Forest</span>
                 <span className="text-base font-mono font-bold text-emerald-400">{selectedSignal.rfProb}%</span>
+              </div>
+              <div className="bg-black/50 border border-white/5 rounded-xl p-2.5">
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider block">DTW Match</span>
+                <span className="text-base font-mono font-bold text-cyan-400">{selectedSignal.dtwScore ?? selectedSignal.rfProb}%</span>
               </div>
               <div className="bg-black/50 border border-white/5 rounded-xl p-2.5">
                 <span className="text-[10px] text-zinc-500 uppercase tracking-wider block">Meta Model</span>
                 <span className="text-base font-mono font-bold text-blue-400">{selectedSignal.metaProb}%</span>
               </div>
               <div className="bg-black/50 border border-white/5 rounded-xl p-2.5">
-                <span className="text-[10px] text-zinc-500 uppercase tracking-wider block">Reversal Score</span>
-                <span className="text-base font-mono font-bold text-cyan-400">{selectedSignal.reversalScore}%</span>
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider block">Reversal</span>
+                <span className="text-base font-mono font-bold text-violet-400">{selectedSignal.reversalScore}%</span>
               </div>
               <div className="bg-black/50 border border-emerald-500/20 rounded-xl p-2.5 bg-emerald-500/[0.03]">
-                <span className="text-[10px] text-zinc-400 uppercase tracking-wider block">Decizie Finală</span>
+                <span className="text-[10px] text-zinc-400 uppercase tracking-wider block">Decizie</span>
                 <span className={`text-base font-mono font-bold ${
                   selectedSignal.finalAction === 'BUY' ? 'text-emerald-400' : selectedSignal.finalAction === 'SELL' ? 'text-rose-400' : 'text-amber-400'
                 }`}>{selectedSignal.finalAction}</span>
@@ -660,7 +677,7 @@ export function TradeLogs() {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => {
-                    const textContent = `Audit Detaliat ${selectedSignal.symbol}\nOra: ${selectedSignal.time}\nPreț: $${selectedSignal.price}\nRandom Forest: ${selectedSignal.rfProb}%\nMeta Model: ${selectedSignal.metaProb}%\nReversal Score: ${selectedSignal.reversalScore}%\nDecizie Finală: ${selectedSignal.finalAction}\nMotiv/Confluență: ${selectedSignal.vetoReason}\n\nExplicare Pas cu Pas Pipeline AI:\n${(selectedSignal.explanation || []).join('\n')}`;
+                    const textContent = `Audit Detaliat ${selectedSignal.symbol}\nOra: ${selectedSignal.time}\nPreț: $${selectedSignal.price}\nRandom Forest: ${selectedSignal.rfProb}%\nDTW Pattern Match: ${selectedSignal.dtwScore ?? selectedSignal.rfProb}%\nMeta Model: ${selectedSignal.metaProb}%\nReversal Score: ${selectedSignal.reversalScore}%\nDecizie Finală: ${selectedSignal.finalAction}\nMotiv/Confluență: ${selectedSignal.vetoReason}\n\nExplicare Pas cu Pas Pipeline AI:\n${(selectedSignal.explanation || []).join('\n')}`;
                     navigator.clipboard.writeText(textContent);
                     alert('Auditul a fost copiat în clipboard!');
                   }}
@@ -670,7 +687,7 @@ export function TradeLogs() {
                 </button>
                 <button
                   onClick={() => {
-                    const textContent = `Audit Detaliat ${selectedSignal.symbol}\nOra: ${selectedSignal.time}\nPreț: $${selectedSignal.price}\nRandom Forest: ${selectedSignal.rfProb}%\nMeta Model: ${selectedSignal.metaProb}%\nReversal Score: ${selectedSignal.reversalScore}%\nDecizie Finală: ${selectedSignal.finalAction}\nMotiv/Confluență: ${selectedSignal.vetoReason}\n\nExplicare Pas cu Pas Pipeline AI:\n${(selectedSignal.explanation || []).join('\n')}`;
+                    const textContent = `Audit Detaliat ${selectedSignal.symbol}\nOra: ${selectedSignal.time}\nPreț: $${selectedSignal.price}\nRandom Forest: ${selectedSignal.rfProb}%\nDTW Pattern Match: ${selectedSignal.dtwScore ?? selectedSignal.rfProb}%\nMeta Model: ${selectedSignal.metaProb}%\nReversal Score: ${selectedSignal.reversalScore}%\nDecizie Finală: ${selectedSignal.finalAction}\nMotiv/Confluență: ${selectedSignal.vetoReason}\n\nExplicare Pas cu Pas Pipeline AI:\n${(selectedSignal.explanation || []).join('\n')}`;
                     const blob = new Blob(['\uFEFF' + textContent], { type: 'text/plain;charset=utf-8;' });
                     const url = URL.createObjectURL(blob);
                     const link = document.createElement('a');
