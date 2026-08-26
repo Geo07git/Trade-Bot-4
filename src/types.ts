@@ -27,6 +27,7 @@ export interface ScalpingConfig {
   enableDynamicTpSl?: boolean;    // Dynamic TP/SL based on ATR and ML Score
   minVolumeGrowth?: number;       // e.g. 0.8x
   enableStagnationFilter?: boolean;  // Default: true (Filtru Stagnare & Volatilitate Scăzută NO-TRADE)
+  timeframe: '1m' | '5m';
   minAtrPctThreshold?: number;     // Default: 0.30% (ATR minim pentru acoperire comisioane)
   minRange20pThreshold?: number;    // Default: 0.55% (Range 20 lumânări minim)
   leverage?: number;               // e.g. 1, 2, 3, 5, 10, 20 (Levier ajustabil scalping)

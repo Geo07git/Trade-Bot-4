@@ -71,6 +71,45 @@ export function ScalpingBot() {
   const [minRange20pThreshold, setMinRange20pThreshold] = useState<number>(scalpingConfig?.minRange20pThreshold ?? 0.55);
   const [leverage, setLeverage] = useState<number>(scalpingConfig?.leverage ?? 1);
 
+  const setTimeframe = (timeframe: '1m' | '5m') => {
+    const is5m = timeframe === '5m';
+    
+    // Configurații conform tabelului userului
+    const newConfig = {
+      timeframe,
+      minRfProb: is5m ? 60 : 65,
+      minMetaScore: is5m ? 55 : 58,
+      stopLossPercent: is5m ? 0.50 : 0.30,
+      targetTakeProfit: is5m ? 1.00 : 0.60,
+      trailingStopActivation: is5m ? 0.55 : 0.35,
+      trailingStopDistance: is5m ? 0.18 : 0.12,
+      breakEvenActivation: is5m ? 0.40 : 0.40,
+      maxHoldMinutes: is5m ? 25 : 5,
+      cooldownMinutes: is5m ? 5 : 1,
+      minAtrPctThreshold: is5m ? 0.12 : 0.05,
+      minRange20pThreshold: is5m ? 0.38 : 0.20,
+      positionSizePercent: 5.0,
+      leverage: 1,
+      enableMaxNegativeHold: false,
+      enableDynamicSizing: true
+    };
+
+    setScalpingConfig({ ...scalpingConfig, ...newConfig });
+    
+    // Resetează starea locală pentru form
+    setMinRfProb(newConfig.minRfProb);
+    setMinMetaScore(newConfig.minMetaScore);
+    setStopLossPercent(newConfig.stopLossPercent);
+    setTargetTakeProfit(newConfig.targetTakeProfit);
+    setTrailingStopActivation(newConfig.trailingStopActivation);
+    setTrailingStopDistance(newConfig.trailingStopDistance);
+    setBreakEvenActivation(newConfig.breakEvenActivation);
+    setMaxHoldMinutes(newConfig.maxHoldMinutes);
+    setCooldownMinutes(newConfig.cooldownMinutes);
+    setMinAtrPctThreshold(newConfig.minAtrPctThreshold);
+    setMinRange20pThreshold(newConfig.minRange20pThreshold);
+  };
+
   // Sync state when scalpingConfig changes or modal opens
   useEffect(() => {
     if (scalpingConfig) {
@@ -100,6 +139,7 @@ export function ScalpingBot() {
     setIsSaving(true);
     setScalpingConfig({
       active: scalpingActive,
+      timeframe: scalpingConfig?.timeframe || '5m',
       minRfProb,
       minMetaScore,
       stopLossPercent,
@@ -212,6 +252,28 @@ export function ScalpingBot() {
                 <span className={cn("w-2 h-2 rounded-full", scalpingActive ? "bg-emerald-400 animate-ping" : "bg-amber-400")} />
                 {scalpingActive ? 'ACTIV - SCANARE HIGH-FREQ' : 'ÎN AȘTEPTARE / STANDBY'}
               </span>
+              
+              {/* TIMEFRAME TOGGLE BUTTON */}
+              <div className="flex bg-zinc-900 rounded-lg p-0.5 border border-white/10">
+                <button
+                  onClick={() => setTimeframe('1m')}
+                  className={cn(
+                    "px-3 py-1 rounded-md text-xs font-bold transition-all",
+                    scalpingConfig?.timeframe === '1m' ? "bg-emerald-600 text-white" : "text-zinc-500 hover:text-zinc-300"
+                  )}
+                >
+                  1m
+                </button>
+                <button
+                  onClick={() => setTimeframe('5m')}
+                  className={cn(
+                    "px-3 py-1 rounded-md text-xs font-bold transition-all",
+                    scalpingConfig?.timeframe === '5m' ? "bg-emerald-600 text-white" : "text-zinc-500 hover:text-zinc-300"
+                  )}
+                >
+                  5m
+                </button>
+              </div>
             </div>
             <p className="text-zinc-400 text-xs mt-1 max-w-xl">
               Motorul de execuție rapidă bazat pe Random Forest Ensemble și MetaTradeScore. Execută scalping autonom pe oportunități cu volum și probabilitate ridicată.

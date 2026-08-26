@@ -217,6 +217,10 @@ export function TradingJournal() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isSavingManual, setIsSavingManual] = useState(false);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
+  
+  // Confirmation states
+  const [confirmClearEntries, setConfirmClearEntries] = useState(false);
+  const [confirmClearSnapshots, setConfirmClearSnapshots] = useState(false);
 
   // Manual Form Fields State
   const [newSymbol, setNewSymbol] = useState('BTCUSDT');
@@ -420,12 +424,12 @@ export function TradingJournal() {
   }, []);
 
   const handleClearSnapshots = async () => {
-    if (!window.confirm('Ești sigur că vrei să ștergi toate rapoartele zilnice și istoricul evoluției equity?')) return;
     try {
       const res = await apiFetch('/api/journal/clear-snapshots', { method: 'POST' });
       const data = await safeJson(res, { success: false });
       if (data && data.success) {
         setSnapshots([]);
+        setConfirmClearSnapshots(false);
       }
     } catch (err) {
       console.error('Eroare la ștergerea rapoartelor zilnice:', err);
@@ -433,13 +437,13 @@ export function TradingJournal() {
   };
 
   const handleClearEntries = async () => {
-    if (!window.confirm('Ești sigur că vrei să ștergi toate înregistrările din jurnalul de tranzacții?')) return;
     try {
       const res = await apiFetch('/api/journal/clear-entries', { method: 'POST' });
       const data = await safeJson(res, { success: false });
       if (data && data.success) {
         setEntries([]);
         useTradingStore.setState({ tradeHistory: [] });
+        setConfirmClearEntries(false);
       }
     } catch (err) {
       console.error('Eroare la ștergerea jurnalului:', err);
@@ -1118,23 +1122,57 @@ export function TradingJournal() {
         </div>
 
         <div className="flex items-center gap-2 shrink-0 flex-wrap">
-          <button
-            onClick={handleClearEntries}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 rounded-xl text-xs font-medium transition-all cursor-pointer shadow-sm"
-            title="Șterge definitiv toate ordinele și tranzacțiile din jurnal"
-          >
-            <Trash2 size={13} />
-            Șterge Toate Tranzacțiile
-          </button>
+          {confirmClearEntries ? (
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleClearEntries}
+                className="px-2 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold transition-all cursor-pointer"
+              >
+                Confirmi?
+              </button>
+              <button
+                onClick={() => setConfirmClearEntries(false)}
+                className="px-2 py-1.5 bg-zinc-800 text-zinc-300 rounded-xl text-xs font-medium transition-all cursor-pointer"
+              >
+                Nu
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmClearEntries(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 rounded-xl text-xs font-medium transition-all cursor-pointer shadow-sm"
+              title="Șterge definitiv toate ordinele și tranzacțiile din jurnal"
+            >
+              <Trash2 size={13} />
+              Șterge Toate Tranzacțiile
+            </button>
+          )}
 
-          <button
-            onClick={handleClearSnapshots}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-xl text-xs font-medium transition-all cursor-pointer shadow-sm"
-            title="Șterge definitiv rapoartele zilnice și graficul equity"
-          >
-            <Trash2 size={13} />
-            Șterge Rapoarte & Equity
-          </button>
+          {confirmClearSnapshots ? (
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleClearSnapshots}
+                className="px-2 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-bold transition-all cursor-pointer"
+              >
+                Confirmi?
+              </button>
+              <button
+                onClick={() => setConfirmClearSnapshots(false)}
+                className="px-2 py-1.5 bg-zinc-800 text-zinc-300 rounded-xl text-xs font-medium transition-all cursor-pointer"
+              >
+                Nu
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmClearSnapshots(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-xl text-xs font-medium transition-all cursor-pointer shadow-sm"
+              title="Șterge definitiv rapoartele zilnice și graficul equity"
+            >
+              <Trash2 size={13} />
+              Șterge Rapoarte & Equity
+            </button>
+          )}
         </div>
       </div>
 

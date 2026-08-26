@@ -40,6 +40,27 @@ export function registerSymbolCooldown(
   return durationMinutes;
 }
 
+/**
+ * Persist the current cooldown map state to a serializable format.
+ */
+export function exportCooldownState(): Record<string, CooldownEntry> {
+  const state: Record<string, CooldownEntry> = {};
+  symbolCooldownMap.forEach((value, key) => {
+    state[key] = value;
+  });
+  return state;
+}
+
+/**
+ * Restore the cooldown map state from a persisted format.
+ */
+export function importCooldownState(state: Record<string, CooldownEntry>): void {
+  symbolCooldownMap.clear();
+  Object.entries(state).forEach(([key, value]) => {
+    symbolCooldownMap.set(key, value);
+  });
+}
+
 export function getSymbolWatchMode(symbol: string): (CooldownEntry & { active: boolean; remainingMinutes: number }) | null {
   const cleanSym = symbol.toUpperCase().replace('USDT', '') + 'USDT';
   const entry = symbolCooldownMap.get(cleanSym);
@@ -581,11 +602,15 @@ export function calculateMomentumAccelScore(klines: Kline[], priceChange24h: num
   let score = 50 + (mom3 * 7.5) + (accel * 12.0);
 
   // Anti-Exhaustion Protection: If latest candle is rejecting top (upper wick > 45% or red candle after pump)
+  // FIX (recalibrare 1 minut): pragurile mom3 coborâte de la 1.5%/2.0% la 0.5%/0.8%.
+  // Pe date orare, o mișcare de 1.5% în 3 ore e relativ normală și merită penalizat
+  // doar în combinație cu rejection candle. Pe 1m, 0.5% în 3 minute = pump semnal
+  // semnificativ, suficient să detectezi epuizarea înainte de rejecție.
   const range = Math.max(0.000001, lastHigh - lastLow);
   const upperWick = lastHigh - Math.max(lastOpen, lastClose);
-  if (upperWick / range >= 0.45 && mom3 > 1.5) {
+  if (upperWick / range >= 0.45 && mom3 > 0.5) {
     score *= 0.55; // Severely penalize top wick rejection
-  } else if (lastClose < lastOpen && mom3 > 2.0) {
+  } else if (lastClose < lastOpen && mom3 > 0.8) {
     score *= 0.65; // Penalize red candle occurring at high momentum
   }
 
@@ -767,64 +792,94 @@ function getFallbackBasePrice(symbol: string): number {
 
 const klineCache = new Map<string, { klines: Kline[]; timestamp: number }>();
 
-// Fetch historical klines with 3-minute caching and single-batch fetching to prevent API rate-limiting
-export async function fetchHistoricalKlines(symbol: string, limit = 1000): Promise<Kline[]> {
+// FIX (recalibrare 1 minut): interval schimbat de la '1h' la '1m'. Tot pipeline-ul ML
+// (indicatori, Random Forest, DTW, detectorul de reversal) decidea anterior pe baza
+// ultimei lumânări de o ORĂ — care poate fi neînchisă cu până la 59 de minute în urmă
+// față de prețul live folosit la execuție. Combinat cu `maxLookAhead` (etichetare
+// orientată pe ore, nu pe minute), modelul învăța un orizont de predicție complet
+// nealiniat cu deținerea reală de poziție (Max Hold ~15 minute) — exact mecanismul
+// care explica intrările sistematic chiar înainte de o continuare de cădere pe care
+// modelul n-o putea vedea. Cache-ul a fost redus de la 3 minute la 20 secunde, pentru
+// că 3 minute de staleness pe date de 1 minut înseamnă până la 3 lumânări vechi din
+// fereastra de decizie — nesemnificativ pe date orare, foarte semnificativ aici.
+//
+// Binance limitează fiecare cerere la maxim 1000 lumânări; pentru `limit` mai mare,
+// paginăm înapoi cu `endTime` (secvențial, nu în paralel, ca să nu lovim rate-limit-ul).
+export async function fetchHistoricalKlines(symbol: string, limit = 1500, timeframe: '1m' | '5m' = '5m'): Promise<Kline[]> {
   const cleanSymbol = symbol.trim().toUpperCase();
-  const cached = klineCache.get(cleanSymbol);
+  const cached = klineCache.get(cleanSymbol + timeframe); // Cache specific pe timeframe
+  
+  const interval = timeframe === '5m' ? '5m' : '1m';
+  const cacheTtl = timeframe === '5m' ? 60000 : 20000;
 
-  // Return cached klines if fetched within the last 180 seconds (3 minutes)
-  if (cached && (Date.now() - cached.timestamp < 180000) && cached.klines.length >= Math.min(limit, 30)) {
+  if (cached && (Date.now() - cached.timestamp < cacheTtl) && cached.klines.length >= Math.min(limit, 30)) {
     return cached.klines.slice(-limit);
   }
 
   try {
-    const fetchLimit = Math.min(limit, 1000);
-    const url = `https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=5m&limit=${fetchLimit}`;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeoutId);
+    const collected: Kline[] = [];
+    let endTime: number | undefined = undefined;
+    let remaining = limit;
+    let guard = 0;
 
-    if (res.ok) {
+    while (remaining > 0 && guard < 5) {
+      guard++;
+      const fetchLimit = Math.min(remaining, 1000);
+      const url = `https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=${interval}&limit=${fetchLimit}`
+        + (endTime !== undefined ? `&endTime=${endTime}` : '');
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      if (!res.ok) break;
       const data = await res.json();
-      if (Array.isArray(data) && data.length >= 50) {
-        const parsed: Kline[] = data.map((d: any) => ({
-          timestamp: d[0],
-          open: parseFloat(d[1]),
-          high: parseFloat(d[2]),
-          low: parseFloat(d[3]),
-          close: parseFloat(d[4]),
-          volume: parseFloat(d[5]),
-        }));
-        parsed.sort((a, b) => a.timestamp - b.timestamp);
-        klineCache.set(cleanSymbol, { klines: parsed, timestamp: Date.now() });
-        return parsed.slice(-limit);
-      }
+      if (!Array.isArray(data) || data.length === 0) break;
+
+      const parsed: Kline[] = data.map((d: any) => ({
+        timestamp: d[0],
+        open: parseFloat(d[1]),
+        high: parseFloat(d[2]),
+        low: parseFloat(d[3]),
+        close: parseFloat(d[4]),
+        volume: parseFloat(d[5]),
+      }));
+
+      collected.unshift(...parsed);
+      remaining -= parsed.length;
+      endTime = parsed[0].timestamp - 1;
+      if (parsed.length < fetchLimit) break;
+    }
+
+    if (collected.length >= 50) {
+      collected.sort((a, b) => a.timestamp - b.timestamp);
+      klineCache.set(cleanSymbol + timeframe, { klines: collected, timestamp: Date.now() });
+      return collected.slice(-limit);
     }
   } catch (err) {
-    // If network error/timeout occurs and we have any previous cache, return cached!
     if (cached && cached.klines.length >= 50) {
       return cached.klines.slice(-limit);
     }
   }
 
-  // Fallback generator if Binance klines unavailable or rate-limited
+  // Fallback generator
   const klines: Kline[] = [];
   const basePrice = getFallbackBasePrice(cleanSymbol);
   let currentPrice = basePrice;
   const now = Date.now();
+  const msPerBar = timeframe === '5m' ? 300000 : 60000;
   for (let i = limit - 1; i >= 0; i--) {
-    const time = now - i * 3600000;
-    const changePct = (Math.sin(i / 15) * 0.008) + ((Math.random() - 0.485) * 0.012);
+    const time = now - i * msPerBar;
+    const changePct = (Math.sin(i / 15) * 0.0015) + ((Math.random() - 0.485) * 0.002);
     const open = currentPrice;
     const close = Math.max(0.0001, open * (1 + changePct));
-    const high = Math.max(open, close) * (1 + Math.random() * 0.005);
-    const low = Math.min(open, close) * (1 - Math.random() * 0.005);
+    const high = Math.max(open, close) * (1 + Math.random() * 0.001);
+    const low = Math.min(open, close) * (1 - Math.random() * 0.001);
     const volume = 1000 + Math.random() * 50000;
     klines.push({ timestamp: time, open, high, low, close, volume });
     currentPrice = close;
   }
-  klineCache.set(cleanSymbol, { klines, timestamp: Date.now() });
+  klineCache.set(cleanSymbol + timeframe, { klines, timestamp: Date.now() });
   return klines;
 }
 
@@ -1315,14 +1370,19 @@ export class TreeNode {
   prob?: number;
 }
 
+// FIX (recalibrare 1 minut): labelurile feature-urilor au fost redenumite din "H"
+// (ore) în "M" (minute) — anterior denumirile erau incorecte față de timeframe-ul
+// real al datelor. RSI(14) înseamnă acum 14 minute, nu 14 ore; Momentum 5M =
+// ultimele 5 lumânări de 1 minut etc. Nu afectează calculul, doar diagnosticul
+// afișat utilizatorului și raportul de feature importance din UI.
 export const FEATURE_NAMES = [
   'RSI (14)',
   'MACD Hist',
   'Bollinger %B',
   'Dist. SMA 50 (%)',
   'Dist. SMA 200 (%)',
-  'Momentum 5H (%)',
-  'Volatilitate 14H (%)',
+  'Momentum 5M (%)',
+  'Volatilitate 14M (%)',
   'ATR 14',
   'Dist. EMA 20 (%)',
   'Dist. EMA 50 (%)',
@@ -1331,7 +1391,7 @@ export const FEATURE_NAMES = [
   'ADX (14)',
   'Stoch RSI %K',
   'CCI (20)',
-  'OBV Change 14H (%)',
+  'OBV Change 14M (%)',
   'Volume / EMA Vol',
   'Dist. VWAP (%)',
   'ATR %',
@@ -1697,8 +1757,8 @@ export class RandomForest {
       'Bollinger %B': 'Volatility',
       'Dist. SMA 50 (%)': 'Trend',
       'Dist. SMA 200 (%)': 'Trend',
-      'Momentum 5H (%)': 'Momentum',
-      'Volatilitate 14H (%)': 'Volatility',
+      'Momentum 5M (%)': 'Momentum',
+      'Volatilitate 14M (%)': 'Volatility',
       'ATR 14': 'Volatility',
       'Dist. EMA 20 (%)': 'Trend',
       'Dist. EMA 50 (%)': 'Trend',
@@ -1707,7 +1767,7 @@ export class RandomForest {
       'ADX (14)': 'Trend',
       'Stoch RSI %K': 'Momentum',
       'CCI (20)': 'Momentum',
-      'OBV Change 14H (%)': 'Volume',
+      'OBV Change 14M (%)': 'Volume',
       'Volume / EMA Vol': 'Volume',
       'Dist. VWAP (%)': 'Volume',
       'ATR %': 'Volatility',
@@ -1761,8 +1821,8 @@ export class RandomForest {
       'Bollinger %B': 'Volatility',
       'Dist. SMA 50 (%)': 'Trend',
       'Dist. SMA 200 (%)': 'Trend',
-      'Momentum 5H (%)': 'Momentum',
-      'Volatilitate 14H (%)': 'Volatility',
+      'Momentum 5M (%)': 'Momentum',
+      'Volatilitate 14M (%)': 'Volatility',
       'ATR 14': 'Volatility',
       'Dist. EMA 20 (%)': 'Trend',
       'Dist. EMA 50 (%)': 'Trend',
@@ -1771,7 +1831,7 @@ export class RandomForest {
       'ADX (14)': 'Trend',
       'Stoch RSI %K': 'Momentum',
       'CCI (20)': 'Momentum',
-      'OBV Change 14H (%)': 'Volume',
+      'OBV Change 14M (%)': 'Volume',
       'Volume / EMA Vol': 'Volume',
       'Dist. VWAP (%)': 'Volume',
       'ATR %': 'Volatility',
@@ -1858,8 +1918,7 @@ export function detectMarketRegime(
   ema50: number,
   range20pPct?: number,
   volRatio?: number,
-  minAtrThreshold: number = 0.30,
-  minRangeThreshold: number = 0.55
+  timeframe: '1m' | '5m' = '5m'
 ): { 
   currentRegime: 'Trend' | 'Sideways' | 'High Volatility' | 'Stagnant (NO-TRADE)'; 
   regimeDescription: string; 
@@ -1867,8 +1926,14 @@ export function detectMarketRegime(
   isStagnant: boolean;
   stagnationReason?: string;
 } {
+  // Praguri dinamice per timeframe
+  const minAtrThreshold = timeframe === '5m' ? 0.25 : 0.05;
+  const minRangeThreshold = timeframe === '5m' ? 0.80 : 0.20;
+  const highVolAtr = timeframe === '5m' ? 0.5 : 1.0;
+  const highVolBb = timeframe === '5m' ? 1.5 : 2.5;
+
   // 1. High Volatility Check
-  if (atrPercent >= 3.2 || bbWidthPct >= 6.5) {
+  if (atrPercent >= highVolAtr || bbWidthPct >= highVolBb) {
     return {
       currentRegime: 'High Volatility',
       regimeDescription: 'Piață cu Volatilitate Ridicată / Șocuri de Preț (Risc crescut)',
@@ -1878,10 +1943,9 @@ export function detectMarketRegime(
   }
 
   // 2. Stagnation / Low Volatility Regime (NO-TRADE Filter)
-  // Prevents fee erosion when volatility/range is smaller than roundtrip fees (~0.15%-0.20%) + min profit
   const isAtrLow = atrPercent < minAtrThreshold;
   const isRangeLow = range20pPct !== undefined && range20pPct > 0 && range20pPct < minRangeThreshold;
-  const isSqueezeLow = bbWidthPct < 0.60 && adx < 18.0;
+  const isSqueezeLow = bbWidthPct < (timeframe === '5m' ? 0.5 : 0.25) && adx < 18.0;
   const hasNoVolumeSpike = (volRatio === undefined || volRatio < 1.8);
 
   if ((isAtrLow || isRangeLow || isSqueezeLow) && hasNoVolumeSpike) {
@@ -2117,7 +2181,13 @@ export async function runRealStrategyAnalysis(
   if (onProgress) onProgress(10);
   
   const fastMode = Boolean(modelParams?.fastMode);
-  const candleLimit = fastMode ? 300 : 1000;
+  // FIX (recalibrare 1 minut): limita de lumânări a fost ajustată pentru intervalul
+  // de 1m. Pe date orare, 1000 bare = ~41 zile de istoric — mult prea mult pentru
+  // scalping pe minute, și oricum irelevant (modelul trebuie să recunoască pattern-uri
+  // de minute, nu de luni). 1500 bare de 1m = ~25 ore de date = suficient pentru
+  // antrenare solidă + walk-forward pe 3 fold-uri. FastMode la 300 bare = ~5 ore,
+  // suficient pentru un scan rapid al watchlist-ului de 25+ de simboluri.
+  const candleLimit = fastMode ? 300 : 1500;
   const klines = await fetchHistoricalKlines(symbol, candleLimit);
   
   if (onProgress) onProgress(25);
@@ -2151,7 +2221,14 @@ export async function runRealStrategyAnalysis(
   const dataset: DataPoint[] = [];
 
   // PASUL 4: Build feature vectors with Triple Barrier Labeling (TP before SL)
-  const maxLookAhead = 3;
+  // FIX (recalibrare 1 minut): maxLookAhead coborât de la 12 la 15 bare.
+  // Pe date orare, 12 bare = 12 ore — modelul eticheta fiecare punct de intrare
+  // în funcție de ce s-a întâmplat în URMĂTOARELE 12 ORE. Dar bot-ul ținea o
+  // poziție maxim 15 MINUTE. Decalaj de 48x între orizontul de predicție și
+  // orizontul real de deținere — exact mecanismul care producea intrări înainte
+  // de căderi pe termen scurt. Pe 1m, 15 bare = 15 minute = aliniament perfect
+  // cu Max Hold Duration configurat (15 min).
+  const maxLookAhead = 15;
   for (let i = 200; i < klines.length - maxLookAhead; i++) {
     const f = extractFeatures(
       klines, i, closes, rsiArr, macdObj, bollObj, sma50Arr, sma200Arr, atrArr,
@@ -2162,14 +2239,15 @@ export async function runRealStrategyAnalysis(
     const currentAtr = atrArr[i] || entryPrice * 0.015;
     const currentAtrPct = (currentAtr / entryPrice) * 100;
 
-    // FIX PROFIT FACTOR #1: barierele de etichetare acum sunt IDENTICE cu SL/TP folosit
-    // mai jos la execuția reală (1.2x ATR SL / 2.4x ATR TP, aceleași plafoane).
-    // Înainte: eticheta se genera cu 1.0x/1.8x ATR, dar poziția reală era gestionată
-    // cu 1.2x/2.4x ATR -> modelul învăța să recunoască o altă tranzacție decât cea
-    // pe care o executa efectiv, ceea ce limita cât de bine probabilitatea prezisă
-    // putea reflecta profitabilitatea reală.
-    const dynSL = Math.max(0.6, Math.min(3.5, currentAtrPct * 1.2));
-    const dynTP = Math.max(1.2, Math.min(7.0, currentAtrPct * 2.4));
+    // FIX PROFIT FACTOR #1 + recalibrare 1 minut: plafonul barierei de etichetare
+    // a fost recalibrat pentru ATR-ul specific lumânărilor de 1 minut.
+    // Pe date orare, ATR% tipic era 0.5-2%/bar → cap de 0.6% SL era rezonabil.
+    // Pe date de 1m, ATR% tipic este 0.05-0.20%/bar → un cap de 0.6% SL înseamnă
+    // că NICIODATĂ nu s-ar fi folosit calculul ATR (0.05*1.2=0.06% << 0.6% floor),
+    // iar bariera ar fi fost efectiv fixă la 0.6%, ignorând volatilitatea reală.
+    // Noi cap-uri: SL 0.08-1.0%, TP 0.16-2.0% (1:2 R:R păstrat).
+    const dynSL = Math.max(0.08, Math.min(1.0, currentAtrPct * 1.2));
+    const dynTP = Math.max(0.16, Math.min(2.0, currentAtrPct * 2.4));
 
     const buyTPPrice = entryPrice * (1 + dynTP / 100);
     const buySLPrice = entryPrice * (1 - dynSL / 100);
@@ -2298,7 +2376,10 @@ export async function runRealStrategyAnalysis(
   // care dilua win rate-ul și profit factorul.
   const MIN_ADX_FOR_ENTRY = 12;
   const MIN_VOLUME_RATIO = 0.40;
-  const MIN_ATR_PCT = 0.15;
+  // FIX (recalibrare 1 minut): ATR% per bară pe 1m este tipic 0.05-0.20% față de
+  // 0.5-2.0% pe 1h — pragul a fost coborât de la 0.15% la 0.05% ca să nu filtreze
+  // toată activitatea normală din piețele de altcoin-uri pe date de 1m.
+  const MIN_ATR_PCT = 0.05;
   const META_MIN_PROFIT_PROB = 30;
 
   // FIX: nEstimators/maxDepth defaults were duplicated as separate magic numbers in
@@ -2395,12 +2476,20 @@ export async function runRealStrategyAnalysis(
         currentAtrPct,
         foldBbWidthPct,
         ema20Arr[klineIdx] || klines[klineIdx].close,
-        ema50Arr[klineIdx] || klines[klineIdx].close
+        ema50Arr[klineIdx] || klines[klineIdx].close,
+        undefined,
+        undefined,
+        '5m'
       );
 
       // Dynamic ATR SL/TP: 1.2x ATR SL, 2.4x ATR TP (1:2 Risk/Reward ratio)
-      const activeSlPct = Math.max(0.6, Math.min(3.5, currentAtrPct * 1.2));
-      const activeTpPct = Math.max(1.2, Math.min(7.0, currentAtrPct * 2.4));
+      const slCap = modelParams.timeframe === '5m' ? 1.5 : 1.0;
+      const tpCap = modelParams.timeframe === '5m' ? 3.0 : 2.0;
+      const minSl = modelParams.timeframe === '5m' ? 0.15 : 0.08;
+      const minTp = modelParams.timeframe === '5m' ? 0.30 : 0.16;
+
+      const activeSlPct = Math.max(minSl, Math.min(slCap, currentAtrPct * 1.2));
+      const activeTpPct = Math.max(minTp, Math.min(tpCap, currentAtrPct * 2.4));
 
       if (position) {
         let hitSL = false;
@@ -2424,10 +2513,11 @@ export async function runRealStrategyAnalysis(
            if (nextKline.low <= slPrice) { hitSL = true; exitPrice = slPrice; }
            else if (nextKline.high >= tpPrice) { hitTP = true; exitPrice = tpPrice; }
 
-           // Exit on opposite signal or 12-bar timeout
+           // Exit on opposite signal or max hold timeout
+           const maxBars = modelParams.timeframe === '5m' ? 5 : 5;
            const isOppositeSignal = pred.value === -1 && pred.prob >= 55;
            
-           if (hitSL || hitTP || isOppositeSignal || barsInTrade >= 12) {
+           if (hitSL || hitTP || isOppositeSignal || barsInTrade >= maxBars) {
              if (!hitSL && !hitTP) exitPrice = nextKline.close;
              exitPrice = exitPrice * (1 - slippageRate);
              const returnPct = ((exitPrice - position.entryPrice) / position.entryPrice) * 100 - (feeRate * 200);
@@ -2457,10 +2547,11 @@ export async function runRealStrategyAnalysis(
            if (nextKline.high >= slPrice) { hitSL = true; exitPrice = slPrice; }
            else if (nextKline.low <= tpPrice) { hitTP = true; exitPrice = tpPrice; }
 
-           // Exit on opposite signal or 12-bar timeout
+           // Exit on opposite signal or max hold timeout
+           const maxBars = modelParams.timeframe === '5m' ? 5 : 5;
            const isOppositeSignal = pred.value === 1 && pred.prob >= 55;
            
-           if (hitSL || hitTP || isOppositeSignal || barsInTrade >= 12) {
+           if (hitSL || hitTP || isOppositeSignal || barsInTrade >= maxBars) {
              if (!hitSL && !hitTP) exitPrice = nextKline.close;
              exitPrice = exitPrice * (1 + slippageRate);
              const returnPct = ((position.entryPrice - exitPrice) / position.entryPrice) * 100 - (feeRate * 200);
@@ -2514,7 +2605,7 @@ export async function runRealStrategyAnalysis(
       let backtestScore = metaScore;
       const inferenceTime = performance.now() - startTime;
       
-      console.log(`[DEBUG ML] RF Prob: ${pred.prob.toFixed(2)}, DTW Score: ${dtwConf.score.toFixed(2)}, Win Rate: ${dtwConf.winRate.toFixed(2)}, MetaScore: ${metaScore.toFixed(2)}, Inference Time: ${inferenceTime.toFixed(2)}ms`);
+      // console.log(`[DEBUG ML] RF Prob: ${pred.prob.toFixed(2)}, DTW Score: ${dtwConf.score.toFixed(2)}, Win Rate: ${dtwConf.winRate.toFixed(2)}, MetaScore: ${metaScore.toFixed(2)}, Inference Time: ${inferenceTime.toFixed(2)}ms`);
 
       if (pred.value === 1) {
         if (curEma20 >= curEma50) backtestScore += 4;
@@ -2728,9 +2819,6 @@ export async function runRealStrategyAnalysis(
   const range20pPct = low20 > 0 && high20 > low20 ? ((high20 - low20) / low20) * 100 : 0;
   const lastVolRatio = volumeEmaArr[klines.length - 1] ? klines[klines.length - 1].volume / volumeEmaArr[klines.length - 1] : 1;
 
-  const minAtrPctThreshold = modelParams.minAtrPctThreshold !== undefined ? modelParams.minAtrPctThreshold : 0.30;
-  const minRange20pThreshold = modelParams.minRange20pThreshold !== undefined ? modelParams.minRange20pThreshold : 0.55;
-
   const marketRegime = detectMarketRegime(
     lastAdx,
     lastAtrPct,
@@ -2739,8 +2827,7 @@ export async function runRealStrategyAnalysis(
     ema50Arr[lastI] || closes[lastI],
     range20pPct,
     lastVolRatio,
-    minAtrPctThreshold,
-    minRange20pThreshold
+    modelParams.timeframe || '5m'
   );
 
   // Meta Model Prediction
@@ -2937,7 +3024,12 @@ export async function runRealStrategyAnalysis(
     const isStochRsiExtreme = stochRsiArr && stochRsiArr[lastI] !== undefined && stochRsiArr[lastI] >= 85 && (rsiArr[lastI] || 50) >= 65;
     const isBollingerOverbought = bollObj.percentB[lastI] !== undefined && bollObj.percentB[lastI] >= 0.95;
     const isUpperWickRejection = upperWickRatio >= 0.40 && upperWickSize >= 1.5 * bodySize;
-    const isOverextendedFromEma = curEma20 > 0 && ((lastClosePrice - curEma20) / curEma20) >= 0.025;
+    // FIX (recalibrare 1 minut): pragul de supra-extindere față de EMA20 coborât
+    // de la 2.5% la 0.8%. Pe date orare, 2.5% față de EMA20 (20 ore) e o deviație
+    // rezonabilă care merită semnalată. Pe 1m, EMA20 = media ultimelor 20 de minute,
+    // iar 2.5% față de ea înseamnă un pump extrem de rar (flash pump) — botul n-ar
+    // mai prinde nicio supra-extindere cu pragul vechi. 0.8% pe 20 minute e realist.
+    const isOverextendedFromEma = curEma20 > 0 && ((lastClosePrice - curEma20) / curEma20) >= 0.008;
     const isBearishReversalActive = reversalSignal.isBearishReversal;
 
     const exhaustionReasons: string[] = [];
@@ -3094,11 +3186,11 @@ export async function runRealStrategyAnalysis(
   const trendSign = trendAdjustment >= 0 ? `+${trendAdjustment}%` : `${trendAdjustment}%`;
   const metaSign = metaAdjustment >= 0 ? `+${metaAdjustment}%` : `${metaAdjustment}%`;
 
-  const modelEngineLabel = 'Random Forest (18 Arbori) + DTW Dynamic Pattern Matching';
+  const modelEngineLabel = 'Random Forest (32 Arbori, 1m) + DTW Pattern-Match';
 
   const detailedExplanation: string[] = [
     `0. Mod Calcul Activ: ${modelEngineLabel}`,
-    `1. Triple Barrier Labeling & Purged Walk-Forward CV: Antrenat pe 1000 lumânări cu aliniere trend.`,
+    `1. Triple Barrier Labeling & Purged Walk-Forward CV: Antrenat pe 1500 lumânări de 1 minut (~25 ore) cu aliniere trend și maxLookAhead 15 bare.`,
     `2. Probability Calibration & Pattern Match: RF Prob ${calibratedProb}% | DTW Pattern Match ${liveDtwConf.score.toFixed(1)}% (${(liveDtwConf.winRate * 100).toFixed(0)}% Win Rate pe pattern-uri similare).`,
     `3. Reversal & Regime Detector: ${reversalSignal.isBullishReversal ? `⚡ CAPITULATION REBOUND BUY DETECTAT (${reversalSignal.reasons.join(', ')})` : reversalSignal.isBearishReversal ? `⚡ EUPHORIA REVERSAL SELL DETECTAT (${reversalSignal.reasons.join(', ')})` : `Reversal Inactiv | ADX=${lastAdx.toFixed(1)} (${adxSign}), VolRatio=${lastVolRatio.toFixed(2)} (${volSign})`}.`,
     `4. Contribuții Defalcate Scor Unificat:

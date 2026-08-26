@@ -7,6 +7,8 @@ import {
   runRealStrategyAnalysis, 
   registerSymbolCooldown, 
   getSymbolCooldown, 
+  exportCooldownState,
+  importCooldownState,
   calculateExitScore, 
   calculateTradeQualityScore,
   calculateCandlestickPatternScore,
@@ -16,10 +18,10 @@ import {
   calculateLiquiditySpreadScore,
   calculateBreakoutAtrExpansionScore,
   calculateTrendConfirmationScore,
-  fetchHistoricalKlines,
-  DTWModule
+  fetchHistoricalKlines
 } from '../src/services/ml';
 import { MarketOpportunity, SymbolPerformanceStat, MetaTradeScoreBreakdown, ScalpingConfig } from '../src/types';
+import { logger } from '../src/utils/logger';
 
 function createBinanceClient(options: { apiKey?: string; apiSecret?: string; httpBase?: string }) {
   const binanceFactory = typeof Binance === 'function' 
@@ -59,7 +61,7 @@ async function getSymbolFilters(client: any, symbol: string) {
       return exchangeInfoCache.get(symbol)!;
     }
   } catch (err: any) {
-    console.warn(`Could not fetch exchangeInfo for ${symbol} from Binance (using default heuristics): ${err?.message || err}`);
+    logger.warn(`Could not fetch exchangeInfo for ${symbol} from Binance (using default heuristics): ${err?.message || err}`);
   }
 
   let defaultStepSize = 0.0001;
@@ -193,7 +195,6 @@ export interface SignalJournalEntry {
   symbol: string;
   price: number;
   rfProb: number;
-  dtwScore?: number;
   metaProb: number;
   reversalScore: number;
   isReversal: boolean;
@@ -230,7 +231,11 @@ export interface BotState {
   maxNegativeHoldMinutes?: number; // Timp maxim de deținere de la intrarea pe minus (ex: 1.0 min).
   enableMaxNegativeHold?: boolean; // ON/OFF switch for max negative hold limit rule
   executionEngine?: 'both' | 'grid' | 'scalping'; // Execuție: amândouă, doar grid, sau doar scalping
-  mlModelType?: 'rf' | 'tcn' | 'both'; // Model ML: doar Random Forest, doar TCN, sau ambele hibrid
+  // FIX: was 'rf'|'tcn'|'both'. TCN/Hybrid never actually ran — ml.ts accepted the
+  // selectedModelType parameter but never read it, always running Random Forest + DTW.
+  // Kept as a field (rather than removed outright) only so old persisted bot_state.json
+  // files / API payloads with a stale 'tcn'/'both' value don't fail to parse.
+  mlModelType?: 'rf' | 'tcn' | 'both'; // Model ML — doar 'rf' are efect real; 'tcn'/'both' sunt valori vechi, tratate identic cu 'rf'.
   watchlist: WatchlistItem[];
   marketOpportunities: MarketOpportunity[];
   symbolStats: Record<string, SymbolPerformanceStat>;
@@ -259,7 +264,6 @@ export interface BotState {
   totalTradesExecuted: number;
   smartGridActive?: boolean;
   scalpingConfig?: ScalpingConfig;
-  dtwModule?: any; // Persistent DTW module
   gridConfig?: {
     active: boolean;
     autoRegimeSwitch: boolean;
@@ -306,8 +310,6 @@ export interface BotState {
     allocatedCapitalPct: number;
     supportPrice: number;
     resistancePrice: number;
-    shockUntilMs?: number;
-    shockLevel?: 'MIC' | 'MEDIU' | 'EXTREM' | 'NONE';
     lastAction?: string;
     updatedAt: string;
   }>;
@@ -567,7 +569,7 @@ async function fetchBatchPricesServer(): Promise<Map<string, number>> {
     if (batchPricesCache && batchPricesCache.map.size > 0) {
       if (now - lastBatchErrorLogTime > 60000) {
         const ageSec = ((now - batchPricesCache.timestamp) / 1000).toFixed(0);
-        console.warn(`[PRICE ENGINE 🛡️ CACHE DE REZERVĂ] Preluarea prețurilor Binance a întâmpinat o întârziere temporară. Se mențin ultimele cotații (${ageSec}s vechime, ${batchPricesCache.map.size} simboluri).`);
+        logger.warn(`[PRICE ENGINE 🛡️ CACHE DE REZERVĂ] Preluarea prețurilor Binance a întâmpinat o întârziere temporară. Se mențin ultimele cotații (${ageSec}s vechime, ${batchPricesCache.map.size} simboluri).`);
         lastBatchErrorLogTime = now;
       }
       return batchPricesCache.map;
@@ -575,7 +577,7 @@ async function fetchBatchPricesServer(): Promise<Map<string, number>> {
 
     // Cold start fallback if no cache exists
     if (now - lastBatchErrorLogTime > 60000) {
-      console.warn(`[PRICE ENGINE 🛡️ INITIALIZATION FALLBACK] Toate endpoint-urile Binance au eșuat la pornire. Se folosesc prețurile de bază de referință.`);
+      logger.warn(`[PRICE ENGINE 🛡️ INITIALIZATION FALLBACK] Toate endpoint-urile Binance au eșuat la pornire. Se folosesc prețurile de bază de referință.`);
       lastBatchErrorLogTime = now;
     }
 
@@ -647,41 +649,45 @@ async function fetchLivePriceServer(symbol: string): Promise<number | null> {
 const serverSignalCache = new Map<string, { result: { action: 'BUY' | 'SELL' | 'HOLD'; prob: number; modelName: string; reason: string }; timestamp: number }>();
 const realStrategyCache = new Map<string, { res: any; timestamp: number }>();
 
-async function getCachedRealStrategyAnalysis(symbol: string, mlModelType: 'rf' | 'tcn' | 'both' = 'both'): Promise<any> {
+async function getCachedRealStrategyAnalysis(symbol: string, mlModelType: 'rf' = 'rf'): Promise<any> {
   const cleanSymbol = symbol.trim().toUpperCase();
   const cacheKey = `${cleanSymbol}_${mlModelType}`;
   const cached = realStrategyCache.get(cacheKey);
-  if (cached && (Date.now() - cached.timestamp < 300000)) { // 5-minute cache
+  if (cached && (Date.now() - cached.timestamp < 60000)) { // FIX (1m): was 5-minute cache (300000ms) — on 1m candles that's 5 stale bars. Reduced to 60s (= 1 candle) to keep signals fresh.
     return cached.res;
   }
 
-  try {
-    const res = await runRealStrategyAnalysis(cleanSymbol, 'rf', { fastMode: true }, undefined, mlModelType);
-    if (res) {
-      realStrategyCache.set(cacheKey, { res, timestamp: Date.now() });
-      return res;
-    }
-  } catch (err: any) {
-    console.warn(`[ML Real Strategy Warning for ${cleanSymbol}]: ${err?.message || err}`);
-  }
+  // Asynchronously trigger lightweight ML strategy calculation in background to warm cache
+  runRealStrategyAnalysis(cleanSymbol, 'rf', { fastMode: true })
+    .then(res => {
+      if (res) {
+        realStrategyCache.set(cacheKey, { res, timestamp: Date.now() });
+      }
+    })
+    .catch(err => {
+      // logger.warn(`[ML Real Strategy Background Warning for ${cleanSymbol}]: ${err?.message || err}`);
+    });
 
   return cached ? cached.res : null;
 }
 
-async function generateSignalServer(symbol: string, currentPrice: number, mlModelType: 'rf' | 'tcn' | 'both' = 'both'): Promise<{ action: 'BUY' | 'SELL' | 'HOLD'; prob: number; modelName: string; reason: string }> {
+async function generateSignalServer(symbol: string, currentPrice: number): Promise<{ action: 'BUY' | 'SELL' | 'HOLD'; prob: number; modelName: string; reason: string }> {
   const cleanSymbol = symbol.trim().toUpperCase();
-  const cacheKey = `${cleanSymbol}_${mlModelType}`;
+  const cacheKey = `${cleanSymbol}_rf`;
   const cached = serverSignalCache.get(cacheKey);
-  if (cached && (Date.now() - cached.timestamp < 180000)) { // 3-minute cache
+  if (cached && (Date.now() - cached.timestamp < 30000)) { // FIX (1m): was 3-minute cache (180000ms) — on 1m candles, 3 minutes = 3 missed price bars. Reduced to 30s so BUY/SELL decisions use near-current data.
     return cached.result;
   }
 
   try {
-    const mlRes = await getCachedRealStrategyAnalysis(cleanSymbol, mlModelType);
+    const mlRes = await getCachedRealStrategyAnalysis(cleanSymbol);
     if (mlRes && mlRes.signal) {
-      const modelDisplayName = mlModelType === 'both' 
-        ? 'Hibrid Confluent (RF + TCN Conv1D)' 
-        : (mlModelType === 'tcn' ? 'TCN Causal Conv1D Network' : 'Random Forest Ensemble 2.0');
+      // FIX: this used to pick a label ("Hibrid Confluent (RF + TCN Conv1D)" /
+      // "TCN Causal Conv1D Network") based on the caller's requested `mlModelType`,
+      // even though ml.ts's `selectedModelType` parameter was never actually read —
+      // it always ran Random Forest + DTW regardless of what was requested. The label
+      // now reflects what genuinely runs.
+      const modelDisplayName = 'Random Forest + DTW Pattern-Match';
       const result = {
         action: mlRes.signal as 'BUY' | 'SELL' | 'HOLD',
         prob: mlRes.probability,
@@ -692,12 +698,12 @@ async function generateSignalServer(symbol: string, currentPrice: number, mlMode
       return result;
     }
   } catch (err: any) {
-    console.warn(`[ML Signal Server Warning] Could not run ML analysis for ${cleanSymbol}, using technical fallback: ${err?.message || err}`);
+    logger.warn(`[ML Signal Server Warning] Could not run ML analysis for ${cleanSymbol}, using technical fallback: ${err?.message || err}`);
   }
 
   // Technical Fallback calculation
   try {
-    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=5m&limit=100`);
+    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=1m&limit=100`);
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data) && data.length >= 30) {
@@ -727,7 +733,7 @@ async function generateSignalServer(symbol: string, currentPrice: number, mlMode
         let action: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
         let prob = 52;
 
-        if (rsi < 48 || (rsi < 55 && mom > 0.3)) {
+        if (rsi < 48 || (rsi < 55 && mom > 0.05)) {
           action = 'BUY';
           prob = Math.min(92, Math.max(55, Math.round(58 + (50 - rsi) * 1.1 + Math.max(0, mom * 5))));
         } else if (rsi > 65) {
@@ -756,8 +762,6 @@ export function calculateMetaTradeScore(params: {
   symbol: string;
   opportunityScore?: number;
   aiProbability: number;          // Random Forest Probability
-  dtwScore?: number;              // DTW Pattern Matching Score
-  tcnProbability?: number;        // TCN Probability
   rangeProbability?: number;
   trendAlignment?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
   volumeRatio?: number;
@@ -769,16 +773,15 @@ export function calculateMetaTradeScore(params: {
   reversalScore?: number;
   newsSentimentLabel?: string;
 }): MetaTradeScoreBreakdown {
-  // 1. Random Forest Probability (0-100) -> 20% weight
+  // 1. Random Forest (+ DTW Pattern-Match, blended in ml.ts) Probability (0-100) -> 40% weight.
+  // FIX: this used to be split 20% RF / 20% "TCN Network Probability", but TCN was
+  // never actually wired up here (`tcnProbability` was always undefined, so `tcnProb`
+  // silently fell back to `rfProb` every single time) — so this bucket was always a
+  // duplicate of RF anyway. Folding it into one 40% RF weight keeps the exact same
+  // numeric output as before, just without pretending a second model contributed.
   const rfProb = Math.min(100, Math.max(0, params.aiProbability || 50));
 
-  // 2. DTW Pattern Recognition Score (0-100) -> 15% weight (falls back to RF if not specified)
-  const dtwScore = Math.min(100, Math.max(0, params.dtwScore ?? rfProb));
-
-  // 3. TCN Network Probability (0-100) -> 15% weight (falls back to RF if TCN not available)
-  const tcnProb = Math.min(100, Math.max(0, params.tcnProbability ?? rfProb));
-
-  // 4. ADX Trend Strength Score (0-100) -> 10% weight
+  // 2. ADX Trend Strength Score (0-100) -> 10% weight
   const adxVal = params.adxValue ?? 25;
   let adxScore = 50;
   if (adxVal >= 35) adxScore = 100;
@@ -786,7 +789,7 @@ export function calculateMetaTradeScore(params: {
   else if (adxVal >= 18) adxScore = 60;
   else adxScore = 30;
 
-  // 5. EMA Trend Alignment Score (0-100) -> 10% weight
+  // 3. EMA Trend Alignment Score (0-100) -> 10% weight
   const trendAlign = params.trendAlignment || 'NEUTRAL';
   const pChange = params.priceChangePercent ?? 0;
   let emaTrendScore = 50;
@@ -794,7 +797,7 @@ export function calculateMetaTradeScore(params: {
   else if (trendAlign === 'NEUTRAL') emaTrendScore = 60;
   else if (trendAlign === 'BEARISH' || pChange <= -1.5) emaTrendScore = 20;
 
-  // 6. Volume Growth / Ratio Score (0-100) -> 10% weight
+  // 4. Volume Growth / Ratio Score (0-100) -> 10% weight
   const volRatio = params.volumeRatio ?? 1.0;
   let volumeScore = 50;
   if (volRatio >= 1.8) volumeScore = 100;
@@ -802,18 +805,24 @@ export function calculateMetaTradeScore(params: {
   else if (volRatio >= 0.8) volumeScore = 60;
   else volumeScore = 30;
 
-  // 7. Volatility (ATR %) Score (0-100) -> 10% weight
-  const atrPct = params.atrPercent ?? 0.40;
+  // 5. Volatility (ATR %) Score (0-100) -> 10% weight
+  // FIX (recalibrare 1 minut): pragurile ATR% au fost recalibrate pentru lumânări de
+  // 1 minut. Pe date orare, ATR% de 0.30-0.80% per bară e volatilitate normală-ridicată.
+  // Pe 1m, ATR% tipic al unui altcoin este 0.05-0.15% per bară — pragurile vechi
+  // (0.30%, 0.50%, 0.80%) ar fi dat scorul minim (25) pentru aproape toată activitatea
+  // normală de piață, făcând acest factor inutil. Pragurile noi sunt aliniate cu
+  // distribuția reală a ATR%-ului pe lumânări de 1 minut.
+  const atrPct = params.atrPercent ?? 0.10;
   let volatilityScore = 50;
-  if (atrPct >= 0.80) volatilityScore = 100;
-  else if (atrPct >= 0.50) volatilityScore = 80;
-  else if (atrPct >= 0.30) volatilityScore = 65;
+  if (atrPct >= 0.25) volatilityScore = 100;
+  else if (atrPct >= 0.15) volatilityScore = 80;
+  else if (atrPct >= 0.08) volatilityScore = 65;
   else volatilityScore = 25;
 
-  // 8. Reversal Signal Score (0-100) -> 5% weight
+  // 6. Reversal Signal Score (0-100) -> 10% weight
   const revScore = Math.min(100, Math.max(0, params.reversalScore ?? 50));
 
-  // 9. News / AI Sentiment Score (0-100) -> 5% weight
+  // 7. News / AI Sentiment Score (0-100) -> 10% weight
   const sentLabel = (params.newsSentimentLabel || 'neutral').toLowerCase();
   let sentimentScore = 50;
   if (sentLabel.includes('bullish') || sentLabel.includes('pozitiv')) sentimentScore = 95;
@@ -821,17 +830,15 @@ export function calculateMetaTradeScore(params: {
   else sentimentScore = 55;
 
   // Standardized MetaScore Formula (0-100):
-  // RF (20%) + DTW (15%) + TCN (15%) + ADX (10%) + EMA Trend (10%) + Volum (10%) + Volatilitate (10%) + Reversal (5%) + Sentiment (5%)
+  // RF+DTW (40%) + ADX (10%) + EMA Trend (10%) + Volum (10%) + Volatilitate (10%) + Reversal (10%) + Sentiment (10%)
   const rawFinalScore = (
-    0.20 * rfProb +
-    0.15 * dtwScore +
-    0.15 * tcnProb +
+    0.40 * rfProb +
     0.10 * adxScore +
     0.10 * emaTrendScore +
     0.10 * volumeScore +
     0.10 * volatilityScore +
-    0.05 * revScore +
-    0.05 * sentimentScore
+    0.10 * revScore +
+    0.10 * sentimentScore
   );
 
   const finalTradeScore = Math.min(100, Math.max(0, Math.round(rawFinalScore)));
@@ -886,7 +893,7 @@ async function sendWebhookServer(provider: 'discord' | 'telegram', urlOrToken: s
 
       if (!res.ok) {
         const errText = await res.text().catch(() => '');
-        console.warn(`[Telegram Webhook Warning] HTTP ${res.status}: ${errText}`);
+        logger.warn(`[Telegram Webhook Warning] HTTP ${res.status}: ${errText}`);
 
         // Fallback send plain text if HTML parsing has any edge case
         const plainText = message.replace(/\*\*/g, '').replace(/\*/g, '');
@@ -901,12 +908,12 @@ async function sendWebhookServer(provider: 'discord' | 'telegram', urlOrToken: s
 
         if (!fbRes.ok) {
           const fbErr = await fbRes.text().catch(() => '');
-          console.error(`[Telegram Webhook Fallback Error] HTTP ${fbRes.status}: ${fbErr}`);
+          logger.error(`[Telegram Webhook Fallback Error] HTTP ${fbRes.status}: ${fbErr}`);
         }
       }
     }
   } catch (err) {
-    console.error('Webhook error on server:', err);
+    logger.error('Webhook error on server:', err);
   }
 }
 
@@ -971,7 +978,7 @@ class ServerBotEngine {
       stopLossPercent: 2.0,
       maxHoldMinutes: 5,
       executionEngine: 'scalping',
-      mlModelType: 'both',
+      mlModelType: 'rf',
       lastScanAt: null,
       positions: [],
       logs: [
@@ -999,7 +1006,6 @@ class ServerBotEngine {
       analysisInterval: 60,
       maxLogs: 2500,
       serverStartedAt: new Date().toISOString(),
-      dtwModule: new DTWModule(20, 10, 1000), // Initialized here
       apiKey: '',
       apiSecret: '',
       testnetApiKey: '',
@@ -1012,24 +1018,25 @@ class ServerBotEngine {
       smartGridActive: false,
       scalpingConfig: {
         active: true,
-        minRfProb: 52,
-        minMetaScore: 45,
-        stopLossPercent: 1.0,
-        targetTakeProfit: 3.0,
-        trailingStopActivation: 1.5,
-        trailingStopDistance: 0.5,
-        breakEvenActivation: 1.0,
+        minRfProb: 60,
+        minMetaScore: 55,
+        stopLossPercent: 0.50,
+        targetTakeProfit: 1.00,
+        trailingStopActivation: 0.55,
+        trailingStopDistance: 0.18,
+        breakEvenActivation: 0.40,
         positionSizePercent: 5.0,
-        maxHoldMinutes: 15,
+        maxHoldMinutes: 25,
         maxNegativeHoldMinutes: 1.0,
-        enableMaxNegativeHold: true,
+        enableMaxNegativeHold: false,
         minOpportunityScore: 50,
-        cooldownMinutes: 2,
+        cooldownMinutes: 5,
         enableDynamicSizing: true,
         minVolumeGrowth: 0.8,
         enableStagnationFilter: true,
-        minAtrPctThreshold: 0.20,
-        minRange20pThreshold: 0.40,
+        timeframe: '5m',
+        minAtrPctThreshold: 0.12,
+        minRange20pThreshold: 0.38,
         leverage: 1
       },
       gridConfig: {
@@ -1112,6 +1119,8 @@ class ServerBotEngine {
       balance: this.state.balance || 10000,
       initialBalance: this.state.initialBalance || 10000,
       positions: this.state.positions || [],
+      // FIX: persist Watch Mode cooldowns so they survive process restarts.
+      symbolCooldowns: exportCooldownState(),
     };
   }
 
@@ -1156,6 +1165,9 @@ class ServerBotEngine {
           if (parsed.accumulationTargetEnabled !== undefined) this.state.accumulationTargetEnabled = parsed.accumulationTargetEnabled;
           if (parsed.balance !== undefined) this.state.balance = parsed.balance;
           if (parsed.initialBalance !== undefined) this.state.initialBalance = parsed.initialBalance;
+          // FIX: restore Watch Mode cooldowns saved before the last restart (only
+          // entries that haven't already expired are kept — see importCooldownState).
+          if (parsed.symbolCooldowns !== undefined) importCooldownState(parsed.symbolCooldowns);
         }
 
         // Fallback to process.env if empty
@@ -1190,7 +1202,7 @@ class ServerBotEngine {
           });
         }
 
-        console.log('[G&S-Trade-Bot] Configurația a fost încărcată din bot_state.json (AutoTrading:', this.state.autoTradingActive ? 'ACTIV' : 'OPRIT', ')');
+        logger.info('[G&S-Trade-Bot] Configurația a fost încărcată din bot_state.json (AutoTrading:', this.state.autoTradingActive ? 'ACTIV' : 'OPRIT', ')');
       }
 
       // Always fallback to process.env if credentials are empty
@@ -1202,7 +1214,7 @@ class ServerBotEngine {
       if (!this.state.telegramChatId && process.env.TELEGRAM_CHAT_ID) this.state.telegramChatId = process.env.TELEGRAM_CHAT_ID;
       if (!this.state.discordWebhookUrl && process.env.DISCORD_WEBHOOK_URL) this.state.discordWebhookUrl = process.env.DISCORD_WEBHOOK_URL;
     } catch (e) {
-      console.error('[G&S-Trade-Bot] Eroare la citirea bot_state.json:', e);
+      logger.error('[G&S-Trade-Bot] Eroare la citirea bot_state.json:', e);
     }
   }
 
@@ -1218,7 +1230,7 @@ class ServerBotEngine {
       try {
         fs.writeFileSync(this.stateFilePath, JSON.stringify(configToSave, null, 2));
       } catch (e) {
-        console.error('[G&S-Trade-Bot] Eroare la salvarea bot_state.json:', e);
+        logger.error('[G&S-Trade-Bot] Eroare la salvarea bot_state.json:', e);
       }
       return;
     }
@@ -1227,7 +1239,7 @@ class ServerBotEngine {
       this.saveTimer = setTimeout(() => {
         this.saveTimer = null;
         fs.writeFile(this.stateFilePath, JSON.stringify(configToSave, null, 2), (err) => {
-          if (err) console.error('[G&S-Trade-Bot] Eroare la salvarea bot_state.json:', err);
+          if (err) logger.error('[G&S-Trade-Bot] Eroare la salvarea bot_state.json:', err);
         });
       }, 1500);
     }
@@ -1423,23 +1435,6 @@ class ServerBotEngine {
     this.savePersistedState();
   }
 
-  public async trainDtwModule(symbol: string) {
-    try {
-      const klines = await fetchHistoricalKlines(symbol, 500);
-      if (!Array.isArray(klines) || klines.length < 100) return;
-
-      const dtw = new DTWModule(20, 10, 1000);
-      for (let i = 20; i < klines.length - 1; i++) {
-        // Assume profitable for pattern training if next 1h price > current
-        const label = klines[i+1] && klines[i+1].close > klines[i].close ? 1 : 0;
-        dtw.addPattern(klines.slice(i - 20, i + 1), label);
-      }
-      this.state.dtwModule = dtw;
-    } catch (e) {
-      console.error(`[DTW TRAIN ERROR] ${symbol}:`, e);
-    }
-  }
-
   public updateConfig(newConfig: Partial<BotState>) {
     if (newConfig.accumulationTargetPercent !== undefined) {
       this.state.accumulationTargetPercent = Math.max(0.5, Math.min(50, Number(newConfig.accumulationTargetPercent)));
@@ -1504,11 +1499,12 @@ class ServerBotEngine {
       this.addLog(`[Motor Execuție Modificat ⚙️] Modul de execuție a fost schimbat pe: ${modeLabel}.`, 'info');
     }
     if (newConfig.mlModelType !== undefined && ['rf', 'tcn', 'both'].includes(newConfig.mlModelType)) {
-      this.state.mlModelType = newConfig.mlModelType;
-      const modelLabel = newConfig.mlModelType === 'both' 
-        ? 'HIBRID CONFLUENT (Random Forest + TCN Causal Conv1D)' 
-        : (newConfig.mlModelType === 'tcn' ? 'DOAR TCN DEEP LEARNING (Causal Conv1D)' : 'DOAR RANDOM FOREST (18 Arbori)');
-      this.addLog(`[Model ML Modificat 🧠] Motorul de calcul al semnalelor a fost setat pe: ${modelLabel}.`, 'info');
+      // FIX: 'tcn'/'both' never actually selected a different model (ml.ts never read
+      // this value) — coerced to 'rf' here so state reflects what genuinely runs.
+      // Legacy values are still accepted (not rejected) so old clients/saved configs
+      // don't break, they just no longer produce a false "TCN"/"Hybrid" label.
+      this.state.mlModelType = 'rf';
+      this.addLog(`[Model ML Modificat 🧠] Motorul de calcul al semnalelor este: Random Forest + DTW Pattern-Match.`, 'info');
     }
     if (newConfig.gridConfig !== undefined && typeof newConfig.gridConfig === 'object') {
       this.state.gridConfig = { ...this.state.gridConfig, ...newConfig.gridConfig };
@@ -1640,7 +1636,7 @@ class ServerBotEngine {
               }
             }
           } catch (err: any) {
-            console.warn(`[RECONCILIERE] Nu s-au putut obține istoricul myTrades pentru ${symbol}: ${err?.message || err}`);
+            logger.warn(`[RECONCILIERE] Nu s-au putut obține istoricul myTrades pentru ${symbol}: ${err?.message || err}`);
           }
         }
 
@@ -1742,7 +1738,7 @@ class ServerBotEngine {
       }
     } catch (err: any) {
       const errMsg = err?.message || String(err);
-      console.warn(`[BINANCE ${mode.toUpperCase()}] Could not sync balance: ${errMsg}`);
+      logger.warn(`[BINANCE ${mode.toUpperCase()}] Could not sync balance: ${errMsg}`);
       this.addLog(`[BINANCE ${mode.toUpperCase()}] Eroare la sincronizarea balanței: ${errMsg}`, 'warning');
 
       if (mode === 'live') {
@@ -1906,11 +1902,11 @@ class ServerBotEngine {
         if (res.status === 409) {
           if (!this.webhookCleared) {
             this.webhookCleared = true;
-            console.log('[Telegram Bot] Removing webhook to resolve 409 conflict...');
+            logger.info('[Telegram Bot] Removing webhook to resolve 409 conflict...');
             await fetch(`https://api.telegram.org/bot${this.state.telegramBotToken}/deleteWebhook`);
           }
         } else {
-          console.warn(`[Telegram Polling Warning] HTTP ${res.status}: ${errText}`);
+          logger.warn(`[Telegram Polling Warning] HTTP ${res.status}: ${errText}`);
         }
         return;
       }
@@ -1931,7 +1927,7 @@ class ServerBotEngine {
             if (this.state.telegramChatId !== chatId) {
               this.state.telegramChatId = chatId;
               this.savePersistedState();
-              console.log(`[Telegram Bot] Updated active telegramChatId to ${chatId}`);
+              logger.info(`[Telegram Bot] Updated active telegramChatId to ${chatId}`);
             }
 
             await this.handleTelegramCommand(text, chatId);
@@ -2158,7 +2154,7 @@ class ServerBotEngine {
     meta?: { mlProbability?: number; modelName?: string; entryReason?: string; notes?: string; strategy?: 'grid' | 'scalping' | 'manual'; targetTP?: number; metaTradeScore?: number; entryPatternName?: string; candlestickPatternName?: string; leverage?: number; margin?: number }
   ) {
     if (!price || price <= 0 || isNaN(price) || !amount || amount <= 0 || isNaN(amount)) {
-      console.warn(`[SAFETY] Trade anulat pentru ${symbol}: Preț sau cantitate invalidă (preț: ${price}, cantitate: ${amount})`);
+      logger.warn(`[SAFETY] Trade anulat pentru ${symbol}: Preț sau cantitate invalidă (preț: ${price}, cantitate: ${amount})`);
       return;
     }
 
@@ -2179,12 +2175,12 @@ class ServerBotEngine {
         const diff = Math.abs(price - lastPrice) / lastPrice;
         if (diff > 0.20) {
           if (diff > 0.40) {
-            console.warn(`[SAFETY RE-SYNC] Re-calibrare preț stocat pentru ${symbol}: $${lastPrice} -> $${price}`);
+            logger.warn(`[SAFETY RE-SYNC] Re-calibrare preț stocat pentru ${symbol}: $${lastPrice} -> $${price}`);
             if (item) item.price = price;
             if (pos) pos.currentPrice = price;
           } else {
             this.addLog(`[SAFETY] Preț anormal ignorat pentru ${symbol}: $${lastPrice} -> $${price} (variație ${(diff * 100).toFixed(1)}%). Ordin anulat.`, 'warning');
-            console.warn(`Preț anormal pentru ${symbol}: ${lastPrice} -> ${price}`);
+            logger.warn(`Preț anormal pentru ${symbol}: ${lastPrice} -> ${price}`);
             return;
           }
         }
@@ -2233,21 +2229,14 @@ class ServerBotEngine {
             if (assetB) realFreeAsset = parseFloat(assetB.free) || 0;
           }
         } catch (e: any) {
-          console.warn(`[Binance Account Pre-Check Warning] ${e?.message || e}`);
+          logger.warn(`[Binance Account Pre-Check Warning] ${e?.message || e}`);
         }
 
-        const isHighLiquidity = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'].includes(symbol);
-        
         const orderParams: any = {
           symbol: symbol,
           side: action as any,
-          type: isHighLiquidity ? 'MARKET' : 'LIMIT',
+          type: 'MARKET' as any,
         };
-
-        if (!isHighLiquidity) {
-           const offset = action === 'BUY' ? 1.001 : 0.999;
-           orderParams.price = (price * offset).toFixed(8); // Safe precision
-        }
 
         if (action === 'BUY') {
           const requestedCost = price * amount;
@@ -2391,7 +2380,7 @@ class ServerBotEngine {
                     }
                   }
                 } catch (recErr: any) {
-                  console.warn(`[FEE RECOVERY] Recuperarea prin myTrades a eșuat: ${recErr?.message || recErr}`);
+                  logger.warn(`[FEE RECOVERY] Recuperarea prin myTrades a eșuat: ${recErr?.message || recErr}`);
                 }
               }
 
@@ -2407,7 +2396,7 @@ class ServerBotEngine {
               if (realFreeUSDT !== null) {
                 this.state.balance = realFreeUSDT;
               }
-              console.log(`[Binance Executed ${order.status}] ${action} ${symbol}: ${actualExecutedQty} @ $${actualEntryPrice.toFixed(4)} (Fee: $${actualFee.toFixed(4)})`);
+              logger.info(`[Binance Executed ${order.status}] ${action} ${symbol}: ${actualExecutedQty} @ $${actualEntryPrice.toFixed(4)} (Fee: $${actualFee.toFixed(4)})`);
             } else {
               orderSuccess = false;
               this.addLog(`[BINANCE] Ordinul ${symbol} a raportat status ${order.status}, dar cantitatea executată este 0. Nicio poziție locală creată.`, 'warning');
@@ -2423,7 +2412,7 @@ class ServerBotEngine {
         } catch (err: any) {
           orderSuccess = false;
           const errMsg = err?.message || String(err);
-          console.warn(`[Binance Order Error] ${errMsg}`);
+          logger.warn(`[Binance Order Error] ${errMsg}`);
           this.addLog(`Eroare Binance (${this.state.binanceMode}): ${errMsg}`, 'warning', this.calculateEquity());
 
           if (this.state.binanceMode === 'live') {
@@ -2754,7 +2743,7 @@ class ServerBotEngine {
 
       if (!Array.isArray(tickerData) || tickerData.length === 0) {
         if (!this.state.marketOpportunities || this.state.marketOpportunities.length === 0) {
-          console.warn('[Opportunity Scanner] Could not fetch Binance 24hr ticker data, populating top market liquid pairs fallback.');
+          logger.warn('[Opportunity Scanner] Could not fetch Binance 24hr ticker data, populating top market liquid pairs fallback.');
           const defaultTopPairs = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'LINKUSDT', 'NEARUSDT', 'SUIUSDT', 'FETUSDT', 'INJUSDT', 'PEPEUSDT', 'RNDRUSDT'];
           const fallbackOpps: MarketOpportunity[] = defaultTopPairs.map((symbol, idx) => ({
             symbol,
@@ -2766,7 +2755,6 @@ class ServerBotEngine {
             opportunityScore: 85 - idx * 2,
             rfProb: 75,
             metaProb: 70,
-            tcnProb: 68,
             recommendation: idx < 3 ? 'STRONG_BUY' : (idx < 8 ? 'BUY' : 'NEUTRAL'),
             reason: 'Top Liquid Pair (Active Market Scanner)',
             breakoutProbability: 75 - idx,
@@ -2813,7 +2801,7 @@ class ServerBotEngine {
       const btcTop = topCandidates.find((i: any) => i.symbol === 'BTCUSDT');
       const diagMsg = `[DIAGNOSTIC] BTCUSDT in filtered: ${!!btcFiltered}, in topCandidates: ${!!btcTop}` + 
         (btcFiltered ? ` | Vol24h: $${parseFloat(btcFiltered.quoteVolume).toLocaleString('en-US')} | Var24h: ${btcFiltered.priceChangePercent}%` : '');
-      console.log(diagMsg);
+      logger.info(diagMsg);
       this.addLog(diagMsg, 'info');
 
       const batchPriceMap = await fetchBatchPricesServer();
@@ -2833,10 +2821,15 @@ class ServerBotEngine {
           const highPrice = parseFloat(item.highPrice) || price * 1.02;
           const lowPrice = parseFloat(item.lowPrice) || price * 0.98;
 
-          // Fetch recent klines for top 40 candidates or if cached to avoid hitting Binance API rate limits
+          // FIX (recalibrare 1 minut): limita de kline crescută de la 50 la 100 bare.
+          // Pe date orare, 50 bare = ~2 zile — mult prea mult pentru discovery scanner.
+          // Pe 1m, 50 bare = 50 minute — suficient pentru detectarea pattern-urilor
+          // (minimul e 4 bare), dar insuficient pentru warmup-ul EMA21 folosit de
+          // calculateTrendConfirmationScore (are nevoie de cel puțin 21 bare).
+          // 100 bare de 1m = 100 minute — acoperă confortabil toate calculele.
           let klines: any[] = [];
           if (idx < 40) {
-            klines = await fetchHistoricalKlines(symbol, 50).catch(() => []);
+            klines = await fetchHistoricalKlines(symbol, 100).catch(() => []);
           }
 
           // 1. Candlestick/Price Action (35% weight)
@@ -2931,7 +2924,7 @@ class ServerBotEngine {
         // discoveryScore calculation logged silently
 
       } else {
-        console.log('[DIAGNOSTIC] BTCUSDT not found in scannedCandidates after discoveryScore calculation');
+        logger.info('[DIAGNOSTIC] BTCUSDT not found in scannedCandidates after discoveryScore calculation');
       }
 
       // STAGE 1: Sort all 500 candidates by Momentum/Pattern Discovery Score
@@ -2948,14 +2941,18 @@ class ServerBotEngine {
         // Rank logged silently
 
       } else {
-        console.log(`[DIAGNOSTIC] BTCUSDT not found in scannedCandidates after sort. scannedCandidates count: ${scannedCandidates.length}, top50Candidates count: ${top50Candidates.length}`);
+        logger.info(`[DIAGNOSTIC] BTCUSDT not found in scannedCandidates after sort. scannedCandidates count: ${scannedCandidates.length}, top50Candidates count: ${top50Candidates.length}`);
       }
-      const currentMlModel = this.state.mlModelType || 'both';
       await Promise.all(top50Candidates.map(async (op, idx) => {
         try {
-          // Fetch full ML strategy analysis for top 10 candidates or if already cached
-          if (idx < 10 || realStrategyCache.has(`${op.symbol.toUpperCase()}_${currentMlModel}`)) {
-            const mlRes = await getCachedRealStrategyAnalysis(op.symbol, currentMlModel);
+          // Fetch full ML strategy analysis for top 25 candidates or if already cached.
+          // FIX: was `idx < 10` — candidates ranked 11-25 got a fake `rfProb || 70`
+          // placeholder instead of a real computed probability, so the ranking that
+          // decided the execution watchlist was partly based on fabricated data for
+          // anyone beyond rank 10. Now matches the scope already used for
+          // SignalJournal logging below (top50Candidates.slice(0, 25)).
+          if (idx < 25 || realStrategyCache.has(`${op.symbol.toUpperCase()}_rf`)) {
+            const mlRes = await getCachedRealStrategyAnalysis(op.symbol);
             if (mlRes) {
               op.rfProb = mlRes.rfProb || op.rfProb;
               op.metaProb = mlRes.metaProb || op.metaProb;
@@ -2997,14 +2994,16 @@ class ServerBotEngine {
         }
       }));
 
-      // STAGE 3: Sort TOP 50 by MetaScore & ML Confirmation to determine TOP 10 for Scalping Execution
+      // STAGE 3: Sort TOP 50 by MetaScore & ML Confirmation to determine TOP 25 for Scalping Execution
       top50Candidates.sort((a, b) => {
         const scoreA = (a as any).metaTradeScore || a.discoveryScore || 0;
         const scoreB = (b as any).metaTradeScore || b.discoveryScore || 0;
         return scoreB - scoreA;
       });
 
-      const top5Candidates = top50Candidates.slice(0, 10);
+      // FIX: was `.slice(0, 10)` — widened to 25 to match the execution watchlist size
+      // below (variable name kept for minimal diff footprint; it holds the top 25).
+      const top5Candidates = top50Candidates.slice(0, 25);
 
       // Re-sort entire 500 candidates array putting top 50 first
       const otherCandidates = scannedCandidates.slice(50);
@@ -3013,7 +3012,9 @@ class ServerBotEngine {
       // Assign Ranks 1..500
       reorderedCandidates.forEach((op, index) => {
         op.rank = index + 1;
-        if (index < 10) {
+        // FIX: was `index < 10` — kept in sync with the widened execution watchlist
+        // below (25), so the UI's "in dynamic watchlist" flag doesn't undercount.
+        if (index < 25) {
           op.inDynamicWatchlist = true;
         } else {
           op.inDynamicWatchlist = false;
@@ -3065,18 +3066,23 @@ class ServerBotEngine {
         this.state.signalJournal = this.state.signalJournal.slice(0, signalLimit);
       }
 
-      // AUTO ROTATION: Dynamic Watchlist updated with TOP 10 (with TOP 5 prioritized for execution)
-      this.updateDynamicWatchlist(reorderedCandidates.slice(0, 10), 10);
+      // AUTO ROTATION: Dynamic Watchlist updated with TOP 25 (with TOP 5 prioritized for execution)
+      // FIX: was `.slice(0, 10), 10` — this was the actual bottleneck behind "missing
+      // opportunities": only the top 10 discovery-ranked symbols ever reached
+      // runMLAnalysis's real BUY/SELL decision loop, no matter how strong a candidate
+      // ranked #15-25 looked. Widened to top 25, matching what SignalJournal already
+      // logs and what the discovery-phase ML gate above now also computes.
+      this.updateDynamicWatchlist(reorderedCandidates.slice(0, 25), 25);
 
       const top5SymbolsStr = top5Candidates.map(c => `${c.symbol} (${(c as any).metaTradeScore || c.discoveryScore}/100)`).join(', ');
       this.addLog(
-        `[Funil Momentum-First 🚀] 500 perechi → TOP 50 Discovery (Candle 35%, Mom 25%, RVOL 20%, Breakout 10%, Trend 10%) → ML + MetaScore calculate → TOP 10 Execuție: ${top5SymbolsStr}`,
+        `[Funil Momentum-First 🚀] 500 perechi → TOP 50 Discovery (Candle 35%, Mom 25%, RVOL 20%, Breakout 10%, Trend 10%) → ML + MetaScore calculate → TOP 25 Execuție: ${top5SymbolsStr}`,
         'info'
       );
 
       return reorderedCandidates;
     } catch (err: any) {
-      console.warn(`[Market Opportunity Scanner Error]: ${err?.message || err}`);
+      logger.warn(`[Market Opportunity Scanner Error]: ${err?.message || err}`);
       return this.state.marketOpportunities || [];
     }
   }
@@ -3135,9 +3141,20 @@ class ServerBotEngine {
     if (this.intervalTimer) clearInterval(this.intervalTimer);
     if (this.telegramIntervalTimer) clearInterval(this.telegramIntervalTimer);
 
-    // Initial immediate scan on server startup for fast data population
+    // Initial immediate scan on server startup for fast data population.
+    // FIX: previously this ran outside the `isLoopRunning` guard used by the 5s
+    // heartbeat interval below, so if this startup call was still in-flight (slow
+    // Binance/price-feed network calls) when the first interval tick fired 5s later,
+    // both would run checkPricesAndSLTP/runMLAnalysis concurrently — a real race
+    // window where two evaluations of the same open position could overlap. Now it
+    // sets the same flag the interval checks, so the two paths can never overlap.
     setTimeout(() => {
-      this.checkPricesAndSLTP().then(() => this.runMLAnalysis());
+      if (this.isLoopRunning) return;
+      this.isLoopRunning = true;
+      this.checkPricesAndSLTP()
+        .then(() => this.runMLAnalysis())
+        .catch((err: any) => logger.warn(`[Startup Scan Warning] ${err?.message || err}`))
+        .finally(() => { this.isLoopRunning = false; });
     }, 500);
 
     // Dedicated fast Telegram Polling every 1.5s
@@ -3177,13 +3194,13 @@ class ServerBotEngine {
 
         this.savePersistedState();
       } catch (err: any) {
-        console.warn(`[Background Loop Warning] ${err?.message || err}`);
+        logger.warn(`[Background Loop Warning] ${err?.message || err}`);
       } finally {
         this.isLoopRunning = false;
       }
     }, 5000);
 
-    console.log('[G&S-Trade-Bot] Background 24/7 trading engine is active on server.');
+    logger.info('[G&S-Trade-Bot] Background 24/7 trading engine is active on server.');
   }
 
   private checkAndSendReports() {
@@ -3467,7 +3484,7 @@ class ServerBotEngine {
           const diff = Math.abs(livePrice - lastPrice) / lastPrice;
           if (diff > 0.20) {
             if (diff > 0.40) {
-              console.warn(`[SAFETY RE-SYNC] Re-calibrare preț pentru ${symbol}: $${lastPrice} -> $${livePrice}`);
+              logger.warn(`[SAFETY RE-SYNC] Re-calibrare preț pentru ${symbol}: $${lastPrice} -> $${livePrice}`);
               if (watchItem) watchItem.price = livePrice;
             } else {
               this.addLog(`[SAFETY] Preț anormal ignorat pentru ${symbol}: $${lastPrice} -> $${livePrice} (${(diff * 100).toFixed(1)}% variație)`, 'warning');
@@ -3538,7 +3555,7 @@ class ServerBotEngine {
         const holdDurationMinutes = (pos as any).openedAt ? (Date.now() - (pos as any).openedAt) / 60000 : 0;
         const maxHold = isGridStrategy 
           ? (this.state.gridConfig?.minRotationHoldMinutes ?? 90)
-          : (scalpConfig?.maxHoldMinutes ?? this.state.scalpingConfig?.maxHoldMinutes ?? this.state.maxHoldMinutes ?? 10);
+          : (scalpConfig?.maxHoldMinutes ?? (scalpConfig?.timeframe === '5m' ? 25 : 5));
 
         let soldInThisCycle = false;
 
@@ -3551,6 +3568,23 @@ class ServerBotEngine {
             entryReason: `Stop Loss Siguranță (${pnlPercent.toFixed(2)}% <= ${hardStopLossPct.toFixed(1)}%)`
           });
           this.sendNotification(`🚨 **[Stop Loss]** Vândut automat ${symbol} la $${livePrice} (PNL ${pnlPercent.toFixed(2)}% | ${pnlValueStr})`);
+          soldInThisCycle = true;
+        }
+        // A2. Fixed Target Take Profit (scalping only — Grid has its own fixed TP at check C below)
+        // FIX: this check used to live ONLY inside runMLAnalysis's separate "isHolding"
+        // exit block, which ran on a different cadence (tied to the ML scan cycle) and
+        // wasn't guaranteed to see every open position. Moved here so there is a single
+        // exit engine, run every heartbeat tick, that guarantees every open position is
+        // evaluated — see the removed duplicate block in runMLAnalysis for details.
+        else if (!isGridStrategy && pnlPercent >= (scalpConfig?.targetTakeProfit ?? 3.0)) {
+          const targetTP = scalpConfig?.targetTakeProfit ?? 3.0;
+          this.addLog(`[Take Profit Țintă Fixă 🎯] Țintă de profit configurată atinsă pentru ${symbol} (+${pnlPercent.toFixed(2)}% >= +${targetTP}%). Executăm vânzare.`, 'success');
+          await this.executeTrade(symbol, 'SELL', livePrice, amountToSell, {
+            mlProbability: (pos as any)?.entryMlProb || 50,
+            modelName: 'Fixed Target TP Engine',
+            entryReason: `Take Profit Țintă Fixă (+${pnlPercent.toFixed(2)}% >= +${targetTP}%)`
+          });
+          this.sendNotification(`🎯 **[Take Profit]** Vândut automat ${symbol} la $${livePrice} (PNL +${pnlPercent.toFixed(2)}% | ${pnlValueStr})`);
           soldInThisCycle = true;
         } 
         // B. Parabolic Take Profit (+12.0%)
@@ -3623,7 +3657,7 @@ class ServerBotEngine {
         }
 
         // F. MAX NEGATIVE HOLD TIME CHECK
-        const maxNegHold = scalpConfig?.maxNegativeHoldMinutes ?? this.state.scalpingConfig?.maxNegativeHoldMinutes ?? 15.0;
+        const maxNegHold = scalpConfig?.timeframe === '5m' ? 3.0 : 1.0;
         const enableMaxNegHold = scalpConfig?.enableMaxNegativeHold ?? this.state.scalpingConfig?.enableMaxNegativeHold ?? false;
         if (!soldInThisCycle && enableMaxNegHold && pnlPercent < 0 && (pos as any).negativeEnteredAt && maxNegHold > 0) {
           const negHoldDurationMinutes = (Date.now() - (pos as any).negativeEnteredAt) / 60000;
@@ -3642,7 +3676,7 @@ class ServerBotEngine {
 
       this.checkCircuitBreaker();
     } catch (err: any) {
-      console.warn(`[Price Check Warning] ${err?.message || err}`);
+      logger.warn(`[Price Check Warning] ${err?.message || err}`);
     } finally {
       this.isCheckingPrices = false;
     }
@@ -3693,23 +3727,31 @@ class ServerBotEngine {
             }
 
             const currentPrice = price || getFallbackBasePrice(item.symbol);
-            const currentMlModel = this.state.mlModelType || 'both';
-            const mlRes = await getCachedRealStrategyAnalysis(item.symbol, currentMlModel);
+            const mlRes = await getCachedRealStrategyAnalysis(item.symbol);
             
             const oppInfo = this.state.marketOpportunities.find(o => o.symbol === item.symbol);
             const oppScore = oppInfo ? oppInfo.opportunityScore : (item.opportunityScore || 50);
 
             let signal: { action: 'BUY' | 'SELL' | 'HOLD'; prob: number; modelName: string; reason: string } | null = null;
             if (mlRes) {
+              // FIX: previously, when the model said HOLD, this silently forced the
+              // decision to BUY if ANY of several weak, never-backtested heuristics
+              // were true (discovery score >= 55, candlestick score >= 65, opportunity
+              // score >= 55, or RF probability as low as 45%) — defeating the purpose
+              // of the model's own HOLD classification and opening trades on signals
+              // it explicitly did not endorse. The model's action is now respected;
+              // the discovery/pattern scores still appear in the reason text below
+              // for visibility, they just no longer override the decision.
               const effectiveAction: 'BUY' | 'SELL' | 'HOLD' = mlRes.signal;
               const discScore = oppInfo?.discoveryScore || 0;
-              const effectiveProb = Math.min(98, Math.max(10, Math.round(mlRes.probability || 50)));
+              const candleScore = oppInfo?.candlestickPatternScore || 0;
+              const effectiveProb = Math.min(98, Math.max(5, Math.round(mlRes.probability || 50)));
 
               signal = {
                 action: effectiveAction,
                 prob: effectiveProb,
                 modelName: 'Random Forest Ensemble 2.0',
-                reason: mlRes.explanation?.find(e => e.includes('Semnal') || e.includes('Reversal') || e.includes('Pattern') || e.includes('VETO')) || (mlRes.vetoReason ? `VETO: ${mlRes.vetoReason}` : `Scor Discovery: ${discScore}/100 | Pattern: ${oppInfo?.candlestickPatternName || 'Standard'}`)
+                reason: mlRes.explanation?.find(e => e.includes('Semnal') || e.includes('Reversal') || e.includes('Pattern')) || `Scor Discovery: ${discScore}/100 | Pattern: ${oppInfo?.candlestickPatternName || 'Standard'}`
               };
               item.signal = { action: effectiveAction, prob: effectiveProb };
             } else {
@@ -3730,7 +3772,6 @@ class ServerBotEngine {
               symbol: item.symbol,
               price: currentPrice,
               rfProb: mlRes?.rfProb || signal?.prob || 50,
-              dtwScore: mlRes?.dtwScore ?? 50,
               metaProb: mlRes?.metaProb || 50,
               reversalScore: mlRes?.reversalSignal?.score || 0,
               isReversal: !!(mlRes?.reversalSignal?.isBullishReversal || mlRes?.reversalSignal?.isBearishReversal),
@@ -3750,7 +3791,7 @@ class ServerBotEngine {
 
             return { item, currentPrice, signal, mlRes, oppScore, oppInfo };
           } catch (err: any) {
-            console.warn(`[ML Analysis Warning] Could not run ML analysis for ${item.symbol}: ${err?.message || err}`);
+            logger.warn(`[ML Analysis Warning] Could not run ML analysis for ${item.symbol}: ${err?.message || err}`);
             return { item, currentPrice: item.price || 0, signal: null, mlRes: null, oppScore: 50, oppInfo: undefined };
           }
         }));
@@ -3785,7 +3826,7 @@ class ServerBotEngine {
       try {
         this.updateSmartGridAnalysis(itemsWithSignals);
       } catch (gridErr) {
-        console.warn(`[Smart Grid Analysis Warning] ${gridErr}`);
+        logger.warn(`[Smart Grid Analysis Warning] ${gridErr}`);
       }
 
       // Phase 2: Sequential Execution of Scalping Signals (bypassed if executionEngine is 'grid')
@@ -3800,8 +3841,8 @@ class ServerBotEngine {
           if (signal.action === 'BUY' && signal.prob >= 30) {
             const scalpConfig = this.state.scalpingConfig || {
               active: true,
-              minRfProb: 52,
-              minMetaScore: 45,
+              minRfProb: 70,
+              minMetaScore: 70,
               stopLossPercent: 1.0,
               targetTakeProfit: 3.0,
               trailingStopActivation: 1.5,
@@ -3816,7 +3857,7 @@ class ServerBotEngine {
             };
 
             if (!scalpConfig.active) {
-              console.log(`[VETO 🛑 MOTOR INACTIV] ${item.symbol}: Semnal CUMPĂRARE omis. Explicație: Motorul de Scalping este dezactivat în Setări.`);
+              logger.info(`[VETO 🛑 MOTOR INACTIV] ${item.symbol}: Semnal CUMPĂRARE omis. Explicație: Motorul de Scalping este dezactivat în Setări.`);
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
                 if (j) j.vetoReason = `Motor Scalping Dezactivat din Setări`;
@@ -3827,7 +3868,7 @@ class ServerBotEngine {
             // HARD FILTER 1: RF Probability Check
             const minRfProb = scalpConfig.minRfProb ?? 70;
             if (signal.prob < minRfProb) {
-              console.log(`[VETO 🛑 PROBABILITATE SCĂZUTĂ] ${item.symbol}: RF Prob ${signal.prob}% < pragul minim ${minRfProb}%. Ordin blocat pentru prevenire false intrări.`);
+              logger.info(`[VETO 🛑 PROBABILITATE SCĂZUTĂ] ${item.symbol}: RF Prob ${signal.prob}% < pragul minim ${minRfProb}%. Ordin blocat pentru prevenire false intrări.`);
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
                 if (j) j.vetoReason = `RF Prob ${signal.prob}% < minim ${minRfProb}%`;
@@ -3838,7 +3879,7 @@ class ServerBotEngine {
             // HARD FILTER 2: Anti-whipsaw Trade Cooldown
             const cooldown = getSymbolCooldown(item.symbol);
             if (cooldown && cooldown.active) {
-              console.log(`[VETO 🛑 COOLDOWN ACTIV] ${item.symbol}: Cooldown anti-whipsaw activ (${cooldown.remainingMinutes}m rămase). Ordin blocat.`);
+              logger.info(`[VETO 🛑 COOLDOWN ACTIV] ${item.symbol}: Cooldown anti-whipsaw activ (${cooldown.remainingMinutes}m rămase). Ordin blocat.`);
               this.addLog(`[Filtru Cooldown 🛑] ${item.symbol} în perioadă de cooldown anti-whipsaw (${cooldown.remainingMinutes}m rămase). Semnal BUY omis.`, 'warning');
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
@@ -3848,14 +3889,17 @@ class ServerBotEngine {
             }
 
             // HARD FILTER 3 & 4: Stagnation / Volatility Protection (ATR & Range 20p)
-            const atrPct = mlRes?.lastAtrPct ?? oppInfo?.atrPercent ?? 0.40;
-            const range20pPct = mlRes?.range20pPct ?? 0.80;
+            const atrPct = mlRes?.lastAtrPct ?? oppInfo?.atrPercent ?? 0.10;
+            const range20pPct = mlRes?.range20pPct ?? 0.30;
             const isStagnationEnabled = scalpConfig.enableStagnationFilter !== false;
-            const minAtr = scalpConfig.minAtrPctThreshold ?? 0.30;
-            const minRange = scalpConfig.minRange20pThreshold ?? 0.55;
+            // FIX (recalibrare 1 minut): fallback-urile ?? coborâte de la 0.30%/0.55%
+            // la 0.05%/0.20% — valorile precedente ar fi blocat aproape toată activitatea
+            // normală pe lumânări de 1 minut, unde ATR% tipic este 0.05-0.15% per bară.
+            const minAtr = scalpConfig.minAtrPctThreshold ?? 0.05;
+            const minRange = scalpConfig.minRange20pThreshold ?? 0.20;
 
             if (isStagnationEnabled && (atrPct < minAtr || range20pPct < minRange)) {
-              console.log(`[VETO 🛑 REGIM STAGNARE] ${item.symbol}: Volatilitate scăzută - ATR (${atrPct.toFixed(2)}% < ${minAtr}%) sau Range20 (${range20pPct.toFixed(2)}% < ${minRange}%). Intrarea blocată.`);
+              logger.info(`[VETO 🛑 REGIM STAGNARE] ${item.symbol}: Volatilitate scăzută - ATR (${atrPct.toFixed(2)}% < ${minAtr}%) sau Range20 (${range20pPct.toFixed(2)}% < ${minRange}%). Intrarea blocată.`);
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
                 if (j) j.vetoReason = `Regim Stagnare: ATR (${atrPct.toFixed(2)}% < ${minAtr}%) sau Range20 (${range20pPct.toFixed(2)}% < ${minRange}%)`;
@@ -3870,8 +3914,6 @@ class ServerBotEngine {
               symbol: item.symbol,
               opportunityScore: oppScore,
               aiProbability: signal.prob,
-              dtwScore: mlRes?.dtwScore,
-              tcnProbability: mlRes?.tcnPrediction?.probBuy,
               rangeProbability: oppInfo?.rfProb || (oppInfo?.regime === 'RANGING' ? 82 : 55),
               trendAlignment: oppInfo?.trendAlignment || (signal.prob >= 60 ? 'BULLISH' : 'NEUTRAL'),
               volumeRatio: volRatio,
@@ -3889,27 +3931,27 @@ class ServerBotEngine {
             const isMetaApproved = metaBreakdown.finalTradeScore >= minMetaScore;
 
             if (!this.state.autoTradingActive) {
-              console.log(`[VETO 🛑 AUTO-TRADING OPRIT] ${item.symbol}: Semnal Valid (MetaScore ${metaBreakdown.finalTradeScore}/100, RF: ${signal.prob}%), dar trading-ul automat este oprit din interfață.`);
+              logger.info(`[VETO 🛑 AUTO-TRADING OPRIT] ${item.symbol}: Semnal Valid (MetaScore ${metaBreakdown.finalTradeScore}/100, RF: ${signal.prob}%), dar trading-ul automat este oprit din interfață.`);
               this.addLog(`[Signal AI BUY] ${item.symbol} (MetaScore: ${metaBreakdown.finalTradeScore}/100 | RF: ${signal.prob}%), dar Auto-Trading este OPRIT.`, 'warning');
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
                 if (j) j.vetoReason = `Auto-Trading OPRIT (MetaScore ${metaBreakdown.finalTradeScore}/100)`;
               }
             } else if (isHolding) {
-              console.log(`[VETO 🛑 POZIȚIE EXISTENTĂ] ${item.symbol}: O poziție este deja deschisă. Intrarea suplimentară este blocată.`);
+              logger.info(`[VETO 🛑 POZIȚIE EXISTENTĂ] ${item.symbol}: O poziție este deja deschisă. Intrarea suplimentară este blocată.`);
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
                 if (j) j.vetoReason = `Poziție Activă În Curs (${item.symbol})`;
               }
             } else if (!isMetaApproved) {
-              console.log(`[VETO 🛑 METASCORE SCĂZUT] ${item.symbol} omis: MetaScore ${metaBreakdown.finalTradeScore}/100 < minim necesar ${minMetaScore}. Motiv: ${metaBreakdown.vetoReason || 'Punctaj insuficient'}.`);
+              logger.info(`[VETO 🛑 METASCORE SCĂZUT] ${item.symbol} omis: MetaScore ${metaBreakdown.finalTradeScore}/100 < minim necesar ${minMetaScore}. Motiv: ${metaBreakdown.vetoReason || 'Punctaj insuficient'}.`);
               this.addLog(`[Filtru MetaScore 🛡️] ${item.symbol} omis (MetaScore ${metaBreakdown.finalTradeScore}/100 < minim ${minMetaScore}).`, 'warning');
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
                 if (j) j.vetoReason = `MetaScore ${metaBreakdown.finalTradeScore}/100 < minim ${minMetaScore}`;
               }
             } else if (this.state.balance < 0.5) {
-              console.log(`[VETO 🛑 FONDURI INSUFICIENTE] ${item.symbol} (MetaScore ${metaBreakdown.finalTradeScore}/100): Balanță USDT disponibilă ($${this.state.balance.toFixed(2)}) sub minimul necesar.`);
+              logger.info(`[VETO 🛑 FONDURI INSUFICIENTE] ${item.symbol} (MetaScore ${metaBreakdown.finalTradeScore}/100): Balanță USDT disponibilă ($${this.state.balance.toFixed(2)}) sub minimul necesar.`);
               this.addLog(`[Signal AI BUY] ${item.symbol} (MetaScore: ${metaBreakdown.finalTradeScore}/100): Fonduri USDT insuficiente (${this.state.balance.toFixed(2)} USDT).`, 'warning');
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
@@ -3955,117 +3997,17 @@ class ServerBotEngine {
               }
             }
           } else if (isHolding) {
-            // POSITION MANAGEMENT ENGINE (SL / TP / Break-Even / Trailing Stop / Max Hold)
-            const pnlPercent = pos ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100 : 0;
-            const holdDurationMinutes = pos && (pos as any).openedAt ? (Date.now() - (pos as any).openedAt) / 60000 : 0;
-
-            if (pos) {
-              const currentHighestPrice = Math.max((pos as any).highestPrice || pos.entryPrice, currentPrice);
-              (pos as any).highestPrice = currentHighestPrice;
-              const highestPnlPercent = ((currentHighestPrice - pos.entryPrice) / pos.entryPrice) * 100;
-              (pos as any).highestPnlPercent = Math.max((pos as any).highestPnlPercent || 0, highestPnlPercent);
-            }
-
-            const highestPnl = (pos as any)?.highestPnlPercent || Math.max(0, pnlPercent);
-
-            const scalpCfg: ScalpingConfig = this.state.scalpingConfig || {
-              active: true,
-              minRfProb: 52,
-              minMetaScore: 45,
-              stopLossPercent: 1.0,
-              targetTakeProfit: 3.0,
-              trailingStopActivation: 1.5,
-              trailingStopDistance: 0.5,
-              breakEvenActivation: 1.0,
-              positionSizePercent: 5.0,
-              maxHoldMinutes: 15,
-              minOpportunityScore: 50,
-              cooldownMinutes: 2,
-              enableDynamicSizing: true
-            };
-            const configuredSL = Math.abs(scalpCfg.stopLossPercent ?? 1.0);
-            const configuredTP = scalpCfg.targetTakeProfit ?? 3.0;
-            const beActivation = scalpCfg.breakEvenActivation ?? 1.0;
-            const trailActivation = scalpCfg.trailingStopActivation ?? 1.5;
-            const trailDistance = scalpCfg.trailingStopDistance ?? 0.5;
-            const maxHoldMins = scalpCfg.maxHoldMinutes ?? 15;
-
-            // TP/SL Dinamic (Nou)
-            let dynamicSL = configuredSL;
-            let dynamicTP = configuredTP;
-            let usePartialTP = false;
-            let dynamicTrailDistance = trailDistance;
-
-            if (scalpCfg.enableDynamicTpSl) {
-                const opp = this.state.marketOpportunities.find(o => o.symbol === pos.symbol);
-                const atrPercent = opp?.atrPercent || 0.40;
-                const metaScore = (pos as any).metaTradeScore || 0;
-                
-                let multiplicator_tp = 0;
-                if (metaScore >= 85) multiplicator_tp = 2.2;
-                else if (metaScore >= 75) multiplicator_tp = 1.5;
-                else if (metaScore >= 60) multiplicator_tp = 1.0;
-                
-                if (multiplicator_tp > 0) {
-                    dynamicTP = multiplicator_tp * atrPercent;
-                    dynamicSL = 1.0 * atrPercent;
-                    usePartialTP = true; // Activează TP parțial
-                    dynamicTrailDistance = 1.0 * atrPercent; // Trailing dinamic ATR
-                }
-            }
-
-            let shouldExecuteSell = false;
-            let sellReasonCategory = '';
-
-            // 1. Take Profit
-            if (pnlPercent >= dynamicTP) {
-              if (usePartialTP && !(pos as any).isPartiallySold) {
-                // Partial TP: Vinde 50%
-                this.addLog(`[Partial TP 50%] ${item.symbol}: Executăm vânzare parțială.`, 'info');
-                await this.executeTrade(item.symbol, 'SELL', currentPrice, pos!.amount * 0.5, {
-                    entryReason: `Partial TP (50% din volum)`
-                });
-                (pos as any).isPartiallySold = true;
-                // Nu închide poziția de tot, continuă trailing pentru restul de 50%
-              } else {
-                shouldExecuteSell = true;
-                sellReasonCategory = `Țintă Take Profit Atingers (+${pnlPercent.toFixed(2)}% >= +${dynamicTP.toFixed(2)}%)`;
-              }
-            }
-            // 2. Trailing Stop
-            else if (highestPnl >= trailActivation && pnlPercent <= (highestPnl - dynamicTrailDistance)) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Trailing Stop Activat 🎯 (Peak PnL: +${highestPnl.toFixed(2)}% | PnL Curent: +${pnlPercent.toFixed(2)}% <= +${(highestPnl - dynamicTrailDistance).toFixed(2)}%)`;
-            }
-            // 3. Break-Even Protection (Activated if highest PnL reached +1.0%, protects at entry price + 0.10%)
-            else if (highestPnl >= beActivation && pnlPercent <= 0.10) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Protecție Break-Even 🛡️ (Peak PnL: +${highestPnl.toFixed(2)}% | PnL Curent: ${pnlPercent.toFixed(2)}%)`;
-            }
-            // 4. Stop Loss
-            else if (pnlPercent <= -dynamicSL) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Stop Loss Configurat ✂️ (PnL: ${pnlPercent.toFixed(2)}% <= -${dynamicSL.toFixed(2)}%)`;
-            }
-            // 5. Max Negative Hold Timeout (if enabled)
-            else if (scalpCfg.enableMaxNegativeHold && pnlPercent < 0 && holdDurationMinutes >= (scalpCfg.maxNegativeHoldMinutes ?? 1.0)) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Limita Timp pe Minus Depășită ⏱️ (${Math.round(holdDurationMinutes)}m >= ${scalpCfg.maxNegativeHoldMinutes ?? 1.0}m | PnL: ${pnlPercent.toFixed(2)}%)`;
-            }
-            // 6. Max Position Hold Duration (15 min)
-            else if (maxHoldMins > 0 && holdDurationMinutes >= maxHoldMins && pnlPercent < configuredTP) {
-              shouldExecuteSell = true;
-              sellReasonCategory = `Timp Maxim Deținere Depășit ⏱️ (${Math.round(holdDurationMinutes)}m >= ${maxHoldMins}m | PnL: ${pnlPercent.toFixed(2)}%)`;
-            }
-
-            if (shouldExecuteSell && this.state.autoTradingActive) {
-              this.addLog(`[Exit Engine G&S-Trade-Bot] ${item.symbol}: SELL (${sellReasonCategory} | PnL: ${pnlPercent.toFixed(2)}% | Hold: ${Math.round(holdDurationMinutes)}m). Executăm vânzare.`, 'info');
-              await this.executeTrade(item.symbol, 'SELL', currentPrice, pos!.amount, {
-                mlProbability: signal.prob,
-                modelName: signal.modelName,
-                entryReason: `${sellReasonCategory}`
-              });
-            }
+            // FIX: this used to be a second, independent exit-management engine
+            // (SL / fixed-TP / trailing stop / break-even / max hold), running here on
+            // the ML-scan cadence, alongside `checkPricesAndSLTP()` which runs on every
+            // heartbeat tick against every open position. The two used different
+            // formulas for the same checks (e.g. two different break-even trigger
+            // conditions), so whichever happened to run first for a given tick decided
+            // the exit — silently inconsistent behavior with no coordination between
+            // them. Exit management is now handled exclusively by
+            // `checkPricesAndSLTP()`, which is called every tick and iterates all open
+            // positions directly, so no position exit slips through by skipping this
+            // branch here.
           }
         }
       }
@@ -4085,7 +4027,7 @@ class ServerBotEngine {
       );
       this.savePersistedState();
     } catch (err: any) {
-      console.warn(`[ML Analysis Error] ${err?.message || err}`);
+      logger.warn(`[ML Analysis Error] ${err?.message || err}`);
     } finally {
       this.isRunningML = false;
     }
