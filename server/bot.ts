@@ -232,7 +232,7 @@ export interface BotState {
   enableMaxNegativeHold?: boolean; // ON/OFF switch for max negative hold limit rule
   executionEngine?: 'both' | 'grid' | 'scalping'; // Execuție: amândouă, doar grid, sau doar scalping
   // FIX: was 'rf'|'tcn'|'both'. TCN/Hybrid never actually ran — ml.ts accepted the
-  // selectedModelType parameter but never read it, always running Random Forest + DTW.
+  // selectedModelType parameter but never read it, always running Random Forest only.
   // Kept as a field (rather than removed outright) only so old persisted bot_state.json
   // files / API payloads with a stale 'tcn'/'both' value don't fail to parse.
   mlModelType?: 'rf' | 'tcn' | 'both'; // Model ML — doar 'rf' are efect real; 'tcn'/'both' sunt valori vechi, tratate identic cu 'rf'.
@@ -311,6 +311,9 @@ export interface BotState {
     supportPrice: number;
     resistancePrice: number;
     lastAction?: string;
+    shockScore?: number;
+    shockLevel?: string;
+    shockUntilMs?: number;
     updatedAt: string;
   }>;
   gridHistory?: Array<{
@@ -665,7 +668,7 @@ async function getCachedRealStrategyAnalysis(symbol: string, mlModelType: 'rf' =
       }
     })
     .catch(err => {
-      // logger.warn(`[ML Real Strategy Background Warning for ${cleanSymbol}]: ${err?.message || err}`);
+      logger.warn(`[ML Real Strategy Background Warning for ${cleanSymbol}]: ${err?.message || err}`);
     });
 
   return cached ? cached.res : null;
@@ -685,9 +688,9 @@ async function generateSignalServer(symbol: string, currentPrice: number): Promi
       // FIX: this used to pick a label ("Hibrid Confluent (RF + TCN Conv1D)" /
       // "TCN Causal Conv1D Network") based on the caller's requested `mlModelType`,
       // even though ml.ts's `selectedModelType` parameter was never actually read —
-      // it always ran Random Forest + DTW regardless of what was requested. The label
+      // it always ran only Random Forest regardless of what was requested. The label
       // now reflects what genuinely runs.
-      const modelDisplayName = 'Random Forest + DTW Pattern-Match';
+      const modelDisplayName = 'Random Forest Ensemble (1m)';
       const result = {
         action: mlRes.signal as 'BUY' | 'SELL' | 'HOLD',
         prob: mlRes.probability,
@@ -702,8 +705,14 @@ async function generateSignalServer(symbol: string, currentPrice: number): Promi
   }
 
   // Technical Fallback calculation
+  // FIX (recalibrare 1 minut): interval schimbat de la '1h' la '1m', limita crescută
+  // de la 100 la 150 bare (150 minute = ~2.5 ore, suficient pentru warmup RSI(14) pe
+  // date de 1m). Pragurile de acțiune recalibrate pentru 1m: pe date orare,
+  // momentum de 0.3% per bară e o mișcare normală; pe 1m, 0.3% într-un minut e
+  // un spike semnificativ — pragul a fost coborât la 0.05%. RSI < 48 pentru BUY
+  // a rămas rezonabil pe 1m (piața de 1m e mai noisy, deci RSI fluctuează mai mult).
   try {
-    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=1m&limit=100`);
+    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=1m&limit=150`);
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data) && data.length >= 30) {
@@ -733,6 +742,8 @@ async function generateSignalServer(symbol: string, currentPrice: number): Promi
         let action: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
         let prob = 52;
 
+        // FIX: mom > 0.3 era calibrat pentru ore (0.3%/oră = mișcare normală);
+        // pe 1m, 0.05%/minut e deja o mișcare cu direcție clară.
         if (rsi < 48 || (rsi < 55 && mom > 0.05)) {
           action = 'BUY';
           prob = Math.min(92, Math.max(55, Math.round(58 + (50 - rsi) * 1.1 + Math.max(0, mom * 5))));
@@ -773,7 +784,7 @@ export function calculateMetaTradeScore(params: {
   reversalScore?: number;
   newsSentimentLabel?: string;
 }): MetaTradeScoreBreakdown {
-  // 1. Random Forest (+ DTW Pattern-Match, blended in ml.ts) Probability (0-100) -> 40% weight.
+  // 1. Random Forest Probability (0-100) -> 40% weight.
   // FIX: this used to be split 20% RF / 20% "TCN Network Probability", but TCN was
   // never actually wired up here (`tcnProbability` was always undefined, so `tcnProb`
   // silently fell back to `rfProb` every single time) — so this bucket was always a
@@ -830,7 +841,7 @@ export function calculateMetaTradeScore(params: {
   else sentimentScore = 55;
 
   // Standardized MetaScore Formula (0-100):
-  // RF+DTW (40%) + ADX (10%) + EMA Trend (10%) + Volum (10%) + Volatilitate (10%) + Reversal (10%) + Sentiment (10%)
+  // RF (40%) + ADX (10%) + EMA Trend (10%) + Volum (10%) + Volatilitate (10%) + Reversal (10%) + Sentiment (10%)
   const rawFinalScore = (
     0.40 * rfProb +
     0.10 * adxScore +
@@ -1018,25 +1029,28 @@ class ServerBotEngine {
       smartGridActive: false,
       scalpingConfig: {
         active: true,
-        minRfProb: 60,
-        minMetaScore: 55,
-        stopLossPercent: 0.50,
-        targetTakeProfit: 1.00,
-        trailingStopActivation: 0.55,
-        trailingStopDistance: 0.18,
-        breakEvenActivation: 0.40,
+        minRfProb: 70,
+        minMetaScore: 70,
+        stopLossPercent: 1.0,
+        targetTakeProfit: 3.0,
+        trailingStopActivation: 1.5,
+        trailingStopDistance: 0.5,
+        breakEvenActivation: 1.0,
         positionSizePercent: 5.0,
-        maxHoldMinutes: 25,
+        maxHoldMinutes: 15,
         maxNegativeHoldMinutes: 1.0,
-        enableMaxNegativeHold: false,
+        enableMaxNegativeHold: true,
         minOpportunityScore: 50,
-        cooldownMinutes: 5,
+        cooldownMinutes: 2,
         enableDynamicSizing: true,
         minVolumeGrowth: 0.8,
         enableStagnationFilter: true,
-        timeframe: '5m',
-        minAtrPctThreshold: 0.12,
-        minRange20pThreshold: 0.38,
+        timeframe: '1m',
+        // FIX (recalibrare 1 minut): pragurile de stagnare coborâte de la valorile
+        // pentru date orare (0.30% ATR, 0.55% range) la valorile pentru 1m (0.05%, 0.20%).
+        // Aceste valori sunt folosite ca fallback când scalpingConfig lipsește din state.
+        minAtrPctThreshold: 0.05,
+        minRange20pThreshold: 0.20,
         leverage: 1
       },
       gridConfig: {
@@ -1222,15 +1236,19 @@ class ServerBotEngine {
 
   public savePersistedState(immediate = false) {
     const configToSave = this.getPersistedConfigOnly();
+    const tempFilePath = `${this.stateFilePath}.tmp`;
+    const dataStr = JSON.stringify(configToSave, null, 2);
+
     if (immediate) {
       if (this.saveTimer) {
         clearTimeout(this.saveTimer);
         this.saveTimer = null;
       }
       try {
-        fs.writeFileSync(this.stateFilePath, JSON.stringify(configToSave, null, 2));
+        fs.writeFileSync(tempFilePath, dataStr);
+        fs.renameSync(tempFilePath, this.stateFilePath);
       } catch (e) {
-        logger.error('[G&S-Trade-Bot] Eroare la salvarea bot_state.json:', e);
+        logger.error('[G&S-Trade-Bot] Eroare la salvarea bot_state.json (atomic):', e);
       }
       return;
     }
@@ -1238,8 +1256,16 @@ class ServerBotEngine {
     if (!this.saveTimer) {
       this.saveTimer = setTimeout(() => {
         this.saveTimer = null;
-        fs.writeFile(this.stateFilePath, JSON.stringify(configToSave, null, 2), (err) => {
-          if (err) logger.error('[G&S-Trade-Bot] Eroare la salvarea bot_state.json:', err);
+        fs.writeFile(tempFilePath, dataStr, (err) => {
+          if (err) {
+            logger.error('[G&S-Trade-Bot] Eroare la scrierea fisierului temporar .tmp:', err);
+            return;
+          }
+          fs.rename(tempFilePath, this.stateFilePath, (renameErr) => {
+            if (renameErr) {
+              logger.error('[G&S-Trade-Bot] Eroare la redenumirea fisierului temporar in bot_state.json:', renameErr);
+            }
+          });
         });
       }, 1500);
     }
@@ -1504,7 +1530,7 @@ class ServerBotEngine {
       // Legacy values are still accepted (not rejected) so old clients/saved configs
       // don't break, they just no longer produce a false "TCN"/"Hybrid" label.
       this.state.mlModelType = 'rf';
-      this.addLog(`[Model ML Modificat 🧠] Motorul de calcul al semnalelor este: Random Forest + DTW Pattern-Match.`, 'info');
+      this.addLog(`[Model ML Modificat 🧠] Motorul de calcul al semnalelor este: Random Forest Ensemble (1m).`, 'info');
     }
     if (newConfig.gridConfig !== undefined && typeof newConfig.gridConfig === 'object') {
       this.state.gridConfig = { ...this.state.gridConfig, ...newConfig.gridConfig };
@@ -3555,7 +3581,7 @@ class ServerBotEngine {
         const holdDurationMinutes = (pos as any).openedAt ? (Date.now() - (pos as any).openedAt) / 60000 : 0;
         const maxHold = isGridStrategy 
           ? (this.state.gridConfig?.minRotationHoldMinutes ?? 90)
-          : (scalpConfig?.maxHoldMinutes ?? (scalpConfig?.timeframe === '5m' ? 25 : 5));
+          : (scalpConfig?.maxHoldMinutes ?? this.state.scalpingConfig?.maxHoldMinutes ?? this.state.maxHoldMinutes ?? 10);
 
         let soldInThisCycle = false;
 
@@ -3657,7 +3683,7 @@ class ServerBotEngine {
         }
 
         // F. MAX NEGATIVE HOLD TIME CHECK
-        const maxNegHold = scalpConfig?.timeframe === '5m' ? 3.0 : 1.0;
+        const maxNegHold = scalpConfig?.maxNegativeHoldMinutes ?? this.state.scalpingConfig?.maxNegativeHoldMinutes ?? 15.0;
         const enableMaxNegHold = scalpConfig?.enableMaxNegativeHold ?? this.state.scalpingConfig?.enableMaxNegativeHold ?? false;
         if (!soldInThisCycle && enableMaxNegHold && pnlPercent < 0 && (pos as any).negativeEnteredAt && maxNegHold > 0) {
           const negHoldDurationMinutes = (Date.now() - (pos as any).negativeEnteredAt) / 60000;
@@ -3853,7 +3879,12 @@ class ServerBotEngine {
               minOpportunityScore: 50,
               cooldownMinutes: 2,
               enableDynamicSizing: true,
-              minVolumeGrowth: 0.8
+              minVolumeGrowth: 0.8,
+              enableStagnationFilter: true,
+              timeframe: "1m",
+              minAtrPctThreshold: 0.05,
+              minRange20pThreshold: 0.20,
+              leverage: 1
             };
 
             if (!scalpConfig.active) {
@@ -4110,7 +4141,7 @@ class ServerBotEngine {
 
       const nowMs = Date.now();
       let shockUntilMs = existing?.shockUntilMs || 0;
-      let shockLevel: 'MIC' | 'MEDIU' | 'EXTREM' | 'NONE' = existing?.shockLevel || 'NONE';
+      let shockLevel: 'MIC' | 'MEDIU' | 'EXTREM' | 'NONE' = (existing?.shockLevel as 'NONE' | 'MIC' | 'MEDIU' | 'EXTREM') || 'NONE';
 
       // Detect Shock Event Trigger (ShockScore >= 70)
       if (shockScore >= 70) {

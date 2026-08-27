@@ -373,7 +373,7 @@ async function startServer() {
           minOpportunityScore: 55,
           cooldownMinutes: 8,
           enableDynamicSizing: true,
-          minVolumeGrowth: 0.8
+          minVolumeGrowth: 0.8, timeframe: "1m", minAtrPctThreshold: 0.05, minRange20pThreshold: 0.20, leverage: 1
         };
       }
 
@@ -438,7 +438,7 @@ async function startServer() {
           minOpportunityScore: 55,
           cooldownMinutes: 8,
           enableDynamicSizing: true,
-          minVolumeGrowth: 0.8
+          minVolumeGrowth: 0.8, timeframe: "1m", minAtrPctThreshold: 0.05, minRange20pThreshold: 0.20, leverage: 1
         };
       }
 
@@ -471,7 +471,7 @@ async function startServer() {
         minOpportunityScore: 55,
         cooldownMinutes: 8,
         enableDynamicSizing: true,
-        minVolumeGrowth: 0.8
+        minVolumeGrowth: 0.8, timeframe: "1m", minAtrPctThreshold: 0.05, minRange20pThreshold: 0.20, leverage: 1
       };
       botEngine.savePersistedState(true);
 

@@ -40,8 +40,13 @@ export async function apiFetch(endpoint: string, options?: RequestInit): Promise
     path = '/' + path;
   }
 
+  const defaultOptions: RequestInit = {
+    cache: 'no-store', // Prevent aggressive caching in preview/production environments
+    ...options
+  };
+
   const doFetch = async (targetUrl: string): Promise<Response> => {
-    return await fetch(targetUrl, options);
+    return await fetch(targetUrl, defaultOptions);
   };
 
   try {

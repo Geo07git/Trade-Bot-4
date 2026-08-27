@@ -17,10 +17,6 @@ export interface ScalpingConfig {
   maxHoldMinutes: number;         // e.g. 15
   maxNegativeHoldMinutes?: number; // e.g. 1.0 minute on drawdown/loss
   enableMaxNegativeHold?: boolean; // ON/OFF switch for max negative hold limit rule
-  dtwEnabled?: boolean;
-  dtwWindow?: number;
-  dtwK?: number;
-  dtwMinScore?: number;
   minOpportunityScore: number;    // e.g. 50
   cooldownMinutes: number;        // e.g. 2
   enableDynamicSizing: boolean;   // e.g. true (3% - 8% based on MetaScore)
@@ -229,7 +225,6 @@ export interface SignalJournalEntry {
   symbol: string;
   price: number;
   rfProb: number;
-  dtwScore?: number;
   metaProb: number;
   reversalScore: number;
   isReversal: boolean;

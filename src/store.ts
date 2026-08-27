@@ -22,7 +22,6 @@ export interface SignalJournalEntry {
   symbol: string;
   price: number;
   rfProb: number;
-  dtwScore?: number;
   metaProb: number;
   reversalScore: number;
   isReversal: boolean;
@@ -216,7 +215,7 @@ export const useTradingStore = create<TradingStore>()(
   scalpingActive: true,
   scalpingConfig: {
     active: true,
-    timeframe: '5m',
+    timeframe: '1m',
     minRfProb: 60,
     minMetaScore: 55,
     stopLossPercent: 0.50,
@@ -228,10 +227,6 @@ export const useTradingStore = create<TradingStore>()(
     maxHoldMinutes: 25,
     maxNegativeHoldMinutes: 0.0,
     enableMaxNegativeHold: false,
-    dtwEnabled: true,
-    dtwWindow: 20,
-    dtwK: 10,
-    dtwMinScore: 65,
     minOpportunityScore: 50,
     cooldownMinutes: 5,
     enableDynamicSizing: true,

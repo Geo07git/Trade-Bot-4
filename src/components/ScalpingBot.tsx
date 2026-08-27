@@ -108,6 +108,10 @@ export function ScalpingBot() {
     setCooldownMinutes(newConfig.cooldownMinutes);
     setMinAtrPctThreshold(newConfig.minAtrPctThreshold);
     setMinRange20pThreshold(newConfig.minRange20pThreshold);
+    setPositionSizePercent(newConfig.positionSizePercent);
+    setLeverage(newConfig.leverage);
+    setEnableMaxNegativeHold(newConfig.enableMaxNegativeHold);
+    setEnableDynamicSizing(newConfig.enableDynamicSizing);
   };
 
   // Sync state when scalpingConfig changes or modal opens
@@ -139,7 +143,7 @@ export function ScalpingBot() {
     setIsSaving(true);
     setScalpingConfig({
       active: scalpingActive,
-      timeframe: scalpingConfig?.timeframe || '5m',
+      timeframe: scalpingConfig?.timeframe || '1m',
       minRfProb,
       minMetaScore,
       stopLossPercent,

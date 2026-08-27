@@ -1,6 +1,8 @@
 // Technical Indicators & Machine Learning Engine for G&S-Trade-Bot
 // Performs real mathematical calculations and trains actual ML models on historical market klines.
 
+import { logger } from '../utils/logger';
+
 interface CooldownEntry {
   cooldownUntil: number;
   reason: string;
@@ -40,27 +42,6 @@ export function registerSymbolCooldown(
   return durationMinutes;
 }
 
-/**
- * Persist the current cooldown map state to a serializable format.
- */
-export function exportCooldownState(): Record<string, CooldownEntry> {
-  const state: Record<string, CooldownEntry> = {};
-  symbolCooldownMap.forEach((value, key) => {
-    state[key] = value;
-  });
-  return state;
-}
-
-/**
- * Restore the cooldown map state from a persisted format.
- */
-export function importCooldownState(state: Record<string, CooldownEntry>): void {
-  symbolCooldownMap.clear();
-  Object.entries(state).forEach(([key, value]) => {
-    symbolCooldownMap.set(key, value);
-  });
-}
-
 export function getSymbolWatchMode(symbol: string): (CooldownEntry & { active: boolean; remainingMinutes: number }) | null {
   const cleanSym = symbol.toUpperCase().replace('USDT', '') + 'USDT';
   const entry = symbolCooldownMap.get(cleanSym);
@@ -82,6 +63,29 @@ export function getSymbolWatchMode(symbol: string): (CooldownEntry & { active: b
 
 export function getSymbolCooldown(symbol: string) {
   return getSymbolWatchMode(symbol);
+}
+
+// FIX: symbolCooldownMap was purely in-memory — any process restart (deploy, crash,
+// PM2 restart) silently wiped every active Watch Mode cooldown, allowing immediate
+// re-entry into a symbol right after a Stop Loss/exit if the restart happened to land
+// in that window. These two functions let the caller (bot.ts) serialize the map into
+// its own persisted state file and restore it on startup.
+export function exportCooldownState(): Array<[string, CooldownEntry]> {
+  return Array.from(symbolCooldownMap.entries());
+}
+
+export function importCooldownState(entries: Array<[string, CooldownEntry]> | null | undefined): void {
+  if (!Array.isArray(entries)) return;
+  const now = Date.now();
+  for (const item of entries) {
+    if (!Array.isArray(item) || item.length !== 2) continue;
+    const [symbol, entry] = item;
+    // Only restore cooldowns that haven't already expired while the process was down —
+    // an already-expired entry would just be dead weight in the map.
+    if (symbol && entry && typeof entry.cooldownUntil === 'number' && entry.cooldownUntil > now) {
+      symbolCooldownMap.set(symbol, entry);
+    }
+  }
 }
 
 export interface ExitScoreFactors {
@@ -586,12 +590,7 @@ export function calculateMomentumAccelScore(klines: Kline[], priceChange24h: num
   if (!klines || klines.length < 5) {
     return Math.min(100, Math.max(0, Math.round(50 + priceChange24h * 2.5)));
   }
-  const lastIdx = klines.length - 1;
-  const lastClose = klines[lastIdx].close;
-  const lastOpen = klines[lastIdx].open;
-  const lastHigh = klines[lastIdx].high;
-  const lastLow = klines[lastIdx].low;
-
+  const lastClose = klines[klines.length - 1].close;
   const close3Ago = klines[Math.max(0, klines.length - 4)].close;
   const close10Ago = klines[Math.max(0, klines.length - 11)].close;
 
@@ -601,24 +600,11 @@ export function calculateMomentumAccelScore(klines: Kline[], priceChange24h: num
   const accel = mom3 - (mom10 / 3.3);
   let score = 50 + (mom3 * 7.5) + (accel * 12.0);
 
-  // Anti-Exhaustion Protection: If latest candle is rejecting top (upper wick > 45% or red candle after pump)
-  // FIX (recalibrare 1 minut): pragurile mom3 coborâte de la 1.5%/2.0% la 0.5%/0.8%.
-  // Pe date orare, o mișcare de 1.5% în 3 ore e relativ normală și merită penalizat
-  // doar în combinație cu rejection candle. Pe 1m, 0.5% în 3 minute = pump semnal
-  // semnificativ, suficient să detectezi epuizarea înainte de rejecție.
-  const range = Math.max(0.000001, lastHigh - lastLow);
-  const upperWick = lastHigh - Math.max(lastOpen, lastClose);
-  if (upperWick / range >= 0.45 && mom3 > 0.5) {
-    score *= 0.55; // Severely penalize top wick rejection
-  } else if (lastClose < lastOpen && mom3 > 0.8) {
-    score *= 0.65; // Penalize red candle occurring at high momentum
-  }
-
-  // Dampen overextended late pumps (>12% or >20% in 24h) to favor fresh momentum starters
+  // Dampen overextended late pumps (>20% in 24h) to favor fresh momentum starters
   if (priceChange24h > 20.0) {
-    score *= 0.70;
+    score *= 0.82;
   } else if (priceChange24h > 12.0) {
-    score *= 0.85;
+    score *= 0.92;
   }
 
   return Math.min(100, Math.max(0, Math.round(score)));
@@ -629,8 +615,7 @@ export function calculateBreakoutAtrExpansionScore(klines: Kline[], high24h: num
 
   // 1. ATR Expansion ratio: Current 1m candle range vs 14-period average candle range
   const lastIdx = klines.length - 1;
-  const lastCandle = klines[lastIdx];
-  const currentCandleRange = Math.max(0.000001, lastCandle.high - lastCandle.low);
+  const currentCandleRange = Math.max(0.000001, klines[lastIdx].high - klines[lastIdx].low);
 
   let sumRange = 0;
   const count = Math.min(14, klines.length - 1);
@@ -641,28 +626,19 @@ export function calculateBreakoutAtrExpansionScore(klines: Kline[], high24h: num
   const atrExpansionRatio = currentCandleRange / avgRange;
 
   let expansionScore = 50;
-  if (atrExpansionRatio >= 2.5) expansionScore = 95;
-  else if (atrExpansionRatio >= 1.8) expansionScore = 85;
+  if (atrExpansionRatio >= 2.5) expansionScore = 98;
+  else if (atrExpansionRatio >= 1.8) expansionScore = 88;
   else if (atrExpansionRatio >= 1.3) expansionScore = 75;
   else if (atrExpansionRatio >= 1.0) expansionScore = 60;
   else expansionScore = 40;
-
-  // Rejection check: If the expanding candle is RED or has a long upper wick, it's selling climax / exhaustion trap
-  const upperWick = lastCandle.high - Math.max(lastCandle.open, lastCandle.close);
-  const isUpperRejection = upperWick / currentCandleRange >= 0.40;
-  const isRed = lastCandle.close < lastCandle.open;
-
-  if (isRed || isUpperRejection) {
-    expansionScore = Math.min(30, Math.max(10, 50 - (atrExpansionRatio * 15)));
-  }
 
   // 2. Breakout closeness: Distance to recent 20-candle high
   const recent20High = Math.max(...klines.slice(-20).map(k => k.high));
   const distToHighPct = recent20High > 0 ? ((currentPrice - recent20High) / recent20High) * 100 : 0;
 
   let breakoutScore = 50;
-  if (distToHighPct >= -0.2 && !isRed && !isUpperRejection) breakoutScore = 95;
-  else if (distToHighPct >= -1.0 && !isRed) breakoutScore = 80;
+  if (distToHighPct >= -0.2) breakoutScore = 98;
+  else if (distToHighPct >= -1.0) breakoutScore = 85;
   else if (distToHighPct >= -2.0) breakoutScore = 70;
   else if (distToHighPct >= -4.0) breakoutScore = 50;
   else breakoutScore = 30;
@@ -759,8 +735,6 @@ export interface StrategyResult {
   signal: 'BUY' | 'SELL' | 'HOLD';
   probability: number;
   rfProb?: number;
-  dtwScore?: number;
-  dtwWinRate?: number;
   metaProb?: number;
   vetoReason?: string;
   targetScore?: number;
@@ -792,94 +766,65 @@ function getFallbackBasePrice(symbol: string): number {
 
 const klineCache = new Map<string, { klines: Kline[]; timestamp: number }>();
 
-// FIX (recalibrare 1 minut): interval schimbat de la '1h' la '1m'. Tot pipeline-ul ML
-// (indicatori, Random Forest, DTW, detectorul de reversal) decidea anterior pe baza
-// ultimei lumânări de o ORĂ — care poate fi neînchisă cu până la 59 de minute în urmă
-// față de prețul live folosit la execuție. Combinat cu `maxLookAhead` (etichetare
-// orientată pe ore, nu pe minute), modelul învăța un orizont de predicție complet
-// nealiniat cu deținerea reală de poziție (Max Hold ~15 minute) — exact mecanismul
-// care explica intrările sistematic chiar înainte de o continuare de cădere pe care
-// modelul n-o putea vedea. Cache-ul a fost redus de la 3 minute la 20 secunde, pentru
-// că 3 minute de staleness pe date de 1 minut înseamnă până la 3 lumânări vechi din
-// fereastra de decizie — nesemnificativ pe date orare, foarte semnificativ aici.
-//
-// Binance limitează fiecare cerere la maxim 1000 lumânări; pentru `limit` mai mare,
-// paginăm înapoi cu `endTime` (secvențial, nu în paralel, ca să nu lovim rate-limit-ul).
-export async function fetchHistoricalKlines(symbol: string, limit = 1500, timeframe: '1m' | '5m' = '5m'): Promise<Kline[]> {
+// Fetch historical klines with 3-minute caching and single-batch fetching to prevent API rate-limiting
+export async function fetchHistoricalKlines(symbol: string, limit = 1000, timeframe = '1m'): Promise<Kline[]> {
   const cleanSymbol = symbol.trim().toUpperCase();
-  const cached = klineCache.get(cleanSymbol + timeframe); // Cache specific pe timeframe
-  
-  const interval = timeframe === '5m' ? '5m' : '1m';
-  const cacheTtl = timeframe === '5m' ? 60000 : 20000;
+  const cacheKey = cleanSymbol + timeframe;
+  const cached = klineCache.get(cacheKey);
 
-  if (cached && (Date.now() - cached.timestamp < cacheTtl) && cached.klines.length >= Math.min(limit, 30)) {
+  // Return cached klines if fetched within the last 180 seconds (3 minutes)
+  if (cached && (Date.now() - cached.timestamp < 180000) && cached.klines.length >= Math.min(limit, 30)) {
     return cached.klines.slice(-limit);
   }
 
   try {
-    const collected: Kline[] = [];
-    let endTime: number | undefined = undefined;
-    let remaining = limit;
-    let guard = 0;
+    const fetchLimit = Math.min(limit, 1000);
+    const url = `https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=${timeframe}&limit=${fetchLimit}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
 
-    while (remaining > 0 && guard < 5) {
-      guard++;
-      const fetchLimit = Math.min(remaining, 1000);
-      const url = `https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=${interval}&limit=${fetchLimit}`
-        + (endTime !== undefined ? `&endTime=${endTime}` : '');
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000);
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeoutId);
-
-      if (!res.ok) break;
+    if (res.ok) {
       const data = await res.json();
-      if (!Array.isArray(data) || data.length === 0) break;
-
-      const parsed: Kline[] = data.map((d: any) => ({
-        timestamp: d[0],
-        open: parseFloat(d[1]),
-        high: parseFloat(d[2]),
-        low: parseFloat(d[3]),
-        close: parseFloat(d[4]),
-        volume: parseFloat(d[5]),
-      }));
-
-      collected.unshift(...parsed);
-      remaining -= parsed.length;
-      endTime = parsed[0].timestamp - 1;
-      if (parsed.length < fetchLimit) break;
-    }
-
-    if (collected.length >= 50) {
-      collected.sort((a, b) => a.timestamp - b.timestamp);
-      klineCache.set(cleanSymbol + timeframe, { klines: collected, timestamp: Date.now() });
-      return collected.slice(-limit);
+      if (Array.isArray(data) && data.length >= 50) {
+        const parsed: Kline[] = data.map((d: any) => ({
+          timestamp: d[0],
+          open: parseFloat(d[1]),
+          high: parseFloat(d[2]),
+          low: parseFloat(d[3]),
+          close: parseFloat(d[4]),
+          volume: parseFloat(d[5]),
+        }));
+        parsed.sort((a, b) => a.timestamp - b.timestamp);
+        klineCache.set(cacheKey, { klines: parsed, timestamp: Date.now() });
+        return parsed.slice(-limit);
+      }
     }
   } catch (err) {
+    // If network error/timeout occurs and we have any previous cache, return cached!
     if (cached && cached.klines.length >= 50) {
       return cached.klines.slice(-limit);
     }
   }
 
-  // Fallback generator
+  // Fallback generator if Binance klines unavailable or rate-limited
   const klines: Kline[] = [];
   const basePrice = getFallbackBasePrice(cleanSymbol);
   let currentPrice = basePrice;
   const now = Date.now();
-  const msPerBar = timeframe === '5m' ? 300000 : 60000;
   for (let i = limit - 1; i >= 0; i--) {
-    const time = now - i * msPerBar;
-    const changePct = (Math.sin(i / 15) * 0.0015) + ((Math.random() - 0.485) * 0.002);
+    const time = now - i * 3600000;
+    const changePct = (Math.sin(i / 15) * 0.008) + ((Math.random() - 0.485) * 0.012);
     const open = currentPrice;
     const close = Math.max(0.0001, open * (1 + changePct));
-    const high = Math.max(open, close) * (1 + Math.random() * 0.001);
-    const low = Math.min(open, close) * (1 - Math.random() * 0.001);
+    const high = Math.max(open, close) * (1 + Math.random() * 0.005);
+    const low = Math.min(open, close) * (1 - Math.random() * 0.005);
     const volume = 1000 + Math.random() * 50000;
     klines.push({ timestamp: time, open, high, low, close, volume });
     currentPrice = close;
   }
-  klineCache.set(cleanSymbol + timeframe, { klines, timestamp: Date.now() });
+  klineCache.set(cacheKey, { klines, timestamp: Date.now() });
   return klines;
 }
 
@@ -1172,11 +1117,17 @@ export function detectReversalPattern(
   let bearishScore = 0;
 
   // --- 1. BULLISH REVERSAL (Panic Capitulation Rebound BUY) ---
-  // Criteria: RSI < 30 (or <= 32), Price < Bollinger Lower Band (or percentB <= 0.05), Volume > 1.8x, ADX > 20
+  // Criteria: RSI < 30 (or <= 32), Price < Bollinger Lower Band (or percentB <= 0.05), Volume > 1.8x
+  // FIX: ADX >= 20 used to be a MANDATORY 4th criterion here, alongside RSI/Bollinger/Volume.
+  // That's backwards for a mean-reversion signal — ADX measures trend strength, but this
+  // detector's entire premise is "the market is NOT trending, it's about to revert."
+  // Requiring ADX >= 20 meant a reversal could only fire in a strongly TRENDING market,
+  // never in the calm/ranging conditions it's actually meant to catch — RSI/Bollinger/volume
+  // could all be at genuine extremes and the signal would still never trigger. ADX now
+  // stays as a scoring bonus only (+20pt below, unchanged), not a hard gate.
   const isRsiOversold = rsi <= 32;
   const isBollOversold = close <= bollLower || percentB <= 0.05;
   const isVolumeClimax = volRatio >= 1.8;
-  const isAdxPanic = adx >= 20;
 
   if (rsi <= 30) {
     bullishScore += 25;
@@ -1257,8 +1208,8 @@ export function detectReversalPattern(
     reasons.push(`CCI supracumpărat (${cci.toFixed(1)} >= 100)`);
   }
 
-  const isBullishReversal = isRsiOversold && isBollOversold && isVolumeClimax && isAdxPanic;
-  const isBearishReversal = isRsiOverbought && isBollOverbought && isVolumeClimax && isAdxPanic;
+  const isBullishReversal = isRsiOversold && isBollOversold && isVolumeClimax;
+  const isBearishReversal = isRsiOverbought && isBollOverbought && isVolumeClimax;
 
   const score = isBullishReversal ? Math.min(100, bullishScore) : (isBearishReversal ? Math.min(100, bearishScore) : 0);
 
@@ -1276,86 +1227,6 @@ export function detectReversalPattern(
 
 
 // ---------------- MACHINE LEARNING CORE (RANDOM FOREST) ----------------
-
-export async function runWalkForwardTest(klines: Kline[], params: any): Promise<any> {
-    // Walk-forward: 70% train, 30% test
-    const splitIdx = Math.floor(klines.length * 0.7);
-    
-    // Return empty results for now to fix build
-    return { rfOnly: {}, dtwOnly: {}, rfPlusDtw: {} };
-}
-
-export function zNormalize(series: number[]): number[] {
-  const mean = series.reduce((a, b) => a + b, 0) / series.length;
-  const std = Math.sqrt(series.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / series.length);
-  return series.map(v => std === 0 ? 0 : (v - mean) / std);
-}
-
-export function dtw(a: number[], b: number[]): number {
-  const n = a.length;
-  const m = b.length;
-  const dp = Array.from({ length: n + 1 }, () => Array(m + 1).fill(Infinity));
-  dp[0][0] = 0;
-  for (let i = 1; i <= n; i++) {
-    for (let j = 1; j <= m; j++) {
-      const cost = Math.abs(a[i - 1] - b[i - 1]);
-      dp[i][j] = cost + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
-    }
-  }
-  return dp[n][m];
-}
-
-export interface DtwConfirmation {
-  score: number; // 0-100
-  winRate: number;
-  nearestPatterns: number[]; // indices
-}
-
-export class DTWModule {
-  private patterns: number[][] = [];
-  private labels: number[] = []; // 1: profitable, 0: not
-  
-  constructor(private window: number, private k: number, private maxPatterns: number) {}
-  
-  addPattern(klines: Kline[], label: number) {
-    if (klines.length < this.window) return;
-    const closes = klines.slice(-this.window).map(k => k.close);
-    this.patterns.push(zNormalize(closes));
-    this.labels.push(label);
-    if (this.patterns.length > this.maxPatterns) {
-      this.patterns.shift();
-      this.labels.shift();
-    }
-  }
-  
-  predict(currentKlines: Kline[]): DtwConfirmation {
-    if (this.patterns.length < this.k) return { score: 50, winRate: 0, nearestPatterns: [] };
-    
-    const currentCloses = zNormalize(currentKlines.slice(-this.window).map(k => k.close));
-    
-    const distances = this.patterns.map((p, idx) => ({
-      dist: dtw(p, currentCloses),
-      idx
-    }));
-    
-    distances.sort((a, b) => a.dist - b.dist);
-    const nearest = distances.slice(0, this.k);
-    
-    let wins = 0;
-    for (const n of nearest) {
-      if (this.labels[n.idx] === 1) wins++;
-    }
-    
-    const winRate = wins / this.k;
-    const score = winRate * 100;
-    
-    return {
-      score,
-      winRate,
-      nearestPatterns: nearest.map(n => n.idx)
-    };
-  }
-}
 export interface DataPoint {
   features: number[];
   label: number;
@@ -1370,11 +1241,6 @@ export class TreeNode {
   prob?: number;
 }
 
-// FIX (recalibrare 1 minut): labelurile feature-urilor au fost redenumite din "H"
-// (ore) în "M" (minute) — anterior denumirile erau incorecte față de timeframe-ul
-// real al datelor. RSI(14) înseamnă acum 14 minute, nu 14 ore; Momentum 5M =
-// ultimele 5 lumânări de 1 minut etc. Nu afectează calculul, doar diagnosticul
-// afișat utilizatorului și raportul de feature importance din UI.
 export const FEATURE_NAMES = [
   'RSI (14)',
   'MACD Hist',
@@ -1918,7 +1784,8 @@ export function detectMarketRegime(
   ema50: number,
   range20pPct?: number,
   volRatio?: number,
-  timeframe: '1m' | '5m' = '5m'
+  minAtrThreshold: number = 0.30,
+  minRangeThreshold: number = 0.55
 ): { 
   currentRegime: 'Trend' | 'Sideways' | 'High Volatility' | 'Stagnant (NO-TRADE)'; 
   regimeDescription: string; 
@@ -1926,14 +1793,8 @@ export function detectMarketRegime(
   isStagnant: boolean;
   stagnationReason?: string;
 } {
-  // Praguri dinamice per timeframe
-  const minAtrThreshold = timeframe === '5m' ? 0.25 : 0.05;
-  const minRangeThreshold = timeframe === '5m' ? 0.80 : 0.20;
-  const highVolAtr = timeframe === '5m' ? 0.5 : 1.0;
-  const highVolBb = timeframe === '5m' ? 1.5 : 2.5;
-
   // 1. High Volatility Check
-  if (atrPercent >= highVolAtr || bbWidthPct >= highVolBb) {
+  if (atrPercent >= 3.2 || bbWidthPct >= 6.5) {
     return {
       currentRegime: 'High Volatility',
       regimeDescription: 'Piață cu Volatilitate Ridicată / Șocuri de Preț (Risc crescut)',
@@ -1943,9 +1804,10 @@ export function detectMarketRegime(
   }
 
   // 2. Stagnation / Low Volatility Regime (NO-TRADE Filter)
+  // Prevents fee erosion when volatility/range is smaller than roundtrip fees (~0.15%-0.20%) + min profit
   const isAtrLow = atrPercent < minAtrThreshold;
   const isRangeLow = range20pPct !== undefined && range20pPct > 0 && range20pPct < minRangeThreshold;
-  const isSqueezeLow = bbWidthPct < (timeframe === '5m' ? 0.5 : 0.25) && adx < 18.0;
+  const isSqueezeLow = bbWidthPct < 0.60 && adx < 18.0;
   const hasNoVolumeSpike = (volRatio === undefined || volRatio < 1.8);
 
   if ((isAtrLow || isRangeLow || isSqueezeLow) && hasNoVolumeSpike) {
@@ -2181,13 +2043,7 @@ export async function runRealStrategyAnalysis(
   if (onProgress) onProgress(10);
   
   const fastMode = Boolean(modelParams?.fastMode);
-  // FIX (recalibrare 1 minut): limita de lumânări a fost ajustată pentru intervalul
-  // de 1m. Pe date orare, 1000 bare = ~41 zile de istoric — mult prea mult pentru
-  // scalping pe minute, și oricum irelevant (modelul trebuie să recunoască pattern-uri
-  // de minute, nu de luni). 1500 bare de 1m = ~25 ore de date = suficient pentru
-  // antrenare solidă + walk-forward pe 3 fold-uri. FastMode la 300 bare = ~5 ore,
-  // suficient pentru un scan rapid al watchlist-ului de 25+ de simboluri.
-  const candleLimit = fastMode ? 300 : 1500;
+  const candleLimit = fastMode ? 300 : 1000;
   const klines = await fetchHistoricalKlines(symbol, candleLimit);
   
   if (onProgress) onProgress(25);
@@ -2221,14 +2077,7 @@ export async function runRealStrategyAnalysis(
   const dataset: DataPoint[] = [];
 
   // PASUL 4: Build feature vectors with Triple Barrier Labeling (TP before SL)
-  // FIX (recalibrare 1 minut): maxLookAhead coborât de la 12 la 15 bare.
-  // Pe date orare, 12 bare = 12 ore — modelul eticheta fiecare punct de intrare
-  // în funcție de ce s-a întâmplat în URMĂTOARELE 12 ORE. Dar bot-ul ținea o
-  // poziție maxim 15 MINUTE. Decalaj de 48x între orizontul de predicție și
-  // orizontul real de deținere — exact mecanismul care producea intrări înainte
-  // de căderi pe termen scurt. Pe 1m, 15 bare = 15 minute = aliniament perfect
-  // cu Max Hold Duration configurat (15 min).
-  const maxLookAhead = 15;
+  const maxLookAhead = 12;
   for (let i = 200; i < klines.length - maxLookAhead; i++) {
     const f = extractFeatures(
       klines, i, closes, rsiArr, macdObj, bollObj, sma50Arr, sma200Arr, atrArr,
@@ -2239,15 +2088,14 @@ export async function runRealStrategyAnalysis(
     const currentAtr = atrArr[i] || entryPrice * 0.015;
     const currentAtrPct = (currentAtr / entryPrice) * 100;
 
-    // FIX PROFIT FACTOR #1 + recalibrare 1 minut: plafonul barierei de etichetare
-    // a fost recalibrat pentru ATR-ul specific lumânărilor de 1 minut.
-    // Pe date orare, ATR% tipic era 0.5-2%/bar → cap de 0.6% SL era rezonabil.
-    // Pe date de 1m, ATR% tipic este 0.05-0.20%/bar → un cap de 0.6% SL înseamnă
-    // că NICIODATĂ nu s-ar fi folosit calculul ATR (0.05*1.2=0.06% << 0.6% floor),
-    // iar bariera ar fi fost efectiv fixă la 0.6%, ignorând volatilitatea reală.
-    // Noi cap-uri: SL 0.08-1.0%, TP 0.16-2.0% (1:2 R:R păstrat).
-    const dynSL = Math.max(0.08, Math.min(1.0, currentAtrPct * 1.2));
-    const dynTP = Math.max(0.16, Math.min(2.0, currentAtrPct * 2.4));
+    // FIX PROFIT FACTOR #1: barierele de etichetare acum sunt IDENTICE cu SL/TP folosit
+    // mai jos la execuția reală (1.2x ATR SL / 2.4x ATR TP, aceleași plafoane).
+    // Înainte: eticheta se genera cu 1.0x/1.8x ATR, dar poziția reală era gestionată
+    // cu 1.2x/2.4x ATR -> modelul învăța să recunoască o altă tranzacție decât cea
+    // pe care o executa efectiv, ceea ce limita cât de bine probabilitatea prezisă
+    // putea reflecta profitabilitatea reală.
+    const dynSL = Math.max(0.6, Math.min(3.5, currentAtrPct * 1.2));
+    const dynTP = Math.max(1.2, Math.min(7.0, currentAtrPct * 2.4));
 
     const buyTPPrice = entryPrice * (1 + dynTP / 100);
     const buySLPrice = entryPrice * (1 - dynSL / 100);
@@ -2256,52 +2104,36 @@ export async function runRealStrategyAnalysis(
 
     let label = 0; // HOLD by default
 
-    // Independent forward barrier checking for BUY and SELL paths
-    let buyResolved = false;
-    let buySuccess = false;
-    let sellResolved = false;
-    let sellSuccess = false;
-
     for (let h = 1; h <= maxLookAhead; h++) {
       const futureBar = klines[i + h];
       if (!futureBar) break;
 
-      // Evaluate BUY trajectory
-      if (!buyResolved) {
-        if (futureBar.high >= buyTPPrice) {
-          buySuccess = true;
-          buyResolved = true;
-        } else if (futureBar.low <= buySLPrice) {
-          buySuccess = false;
-          buyResolved = true;
-        }
-      }
+      const hitBuyTP = futureBar.high >= buyTPPrice;
+      const hitBuySL = futureBar.low <= buySLPrice;
+      const hitSellTP = futureBar.low <= sellTPPrice;
+      const hitSellSL = futureBar.high >= sellSLPrice;
 
-      // Evaluate SELL trajectory
-      if (!sellResolved) {
-        if (futureBar.low <= sellTPPrice) {
-          sellSuccess = true;
-          sellResolved = true;
-        } else if (futureBar.high >= sellSLPrice) {
-          sellSuccess = false;
-          sellResolved = true;
-        }
+      if (hitBuyTP && !hitBuySL) {
+        label = 1; // BUY target hit TP before SL
+        break;
       }
-
-      if (buyResolved && sellResolved) break;
+      if (hitSellTP && !hitSellSL) {
+        label = -1; // SELL target hit TP before SL
+        break;
+      }
+      if (hitBuySL || hitSellSL) {
+        label = 0; // Hit SL first or ambiguous
+        break;
+      }
     }
 
-    if (buySuccess && !sellSuccess) {
-      label = 1;
-    } else if (sellSuccess && !buySuccess) {
-      label = -1;
-    } else {
-      // Secondary forward return check for candles that did not hit TP/SL within horizon
+    // Secondary forward return check for candles that did not hit TP/SL within horizon
+    if (label === 0) {
       const forward8Price = klines[i + 8] ? klines[i + 8].close : entryPrice;
       const ret8 = ((forward8Price - entryPrice) / entryPrice) * 100;
-      if (ret8 >= currentAtrPct * 0.6) {
+      if (ret8 >= currentAtrPct * 0.4) {
         label = 1;
-      } else if (ret8 <= -currentAtrPct * 0.6) {
+      } else if (ret8 <= -currentAtrPct * 0.4) {
         label = -1;
       }
     }
@@ -2335,8 +2167,6 @@ export async function runRealStrategyAnalysis(
   // without slowing the scan down noticeably, and a 3rd fold gives a less noisy,
   // more representative out-of-fold estimate of accuracy/profitFactor/Sharpe
   // (more OOF trades feed the meta-model and the Platt calibrator too).
-  const dtwModule = new DTWModule(modelParams.dtwWindow || 20, modelParams.dtwK || 10, modelParams.maxPatterns || 1000);
-  
   const nFolds = fastMode ? 1 : 3;
   const minTrainSize = Math.floor(dataset.length * 0.5); // 50% training set
   const testSize = Math.floor((dataset.length - minTrainSize) / nFolds);
@@ -2374,13 +2204,10 @@ export async function runRealStrategyAnalysis(
   // Sunt acum centralizate aici și ușor înăsprite (ADX 15->18, Volum 0.70->0.80,
   // ATR% 0.20->0.25, prag Meta-Model 35%->48%) pentru a tăia intrările de calitate joasă
   // care dilua win rate-ul și profit factorul.
-  const MIN_ADX_FOR_ENTRY = 12;
-  const MIN_VOLUME_RATIO = 0.40;
-  // FIX (recalibrare 1 minut): ATR% per bară pe 1m este tipic 0.05-0.20% față de
-  // 0.5-2.0% pe 1h — pragul a fost coborât de la 0.15% la 0.05% ca să nu filtreze
-  // toată activitatea normală din piețele de altcoin-uri pe date de 1m.
-  const MIN_ATR_PCT = 0.05;
-  const META_MIN_PROFIT_PROB = 30;
+  const MIN_ADX_FOR_ENTRY = 18;
+  const MIN_VOLUME_RATIO = 0.80;
+  const MIN_ATR_PCT = 0.25;
+  const META_MIN_PROFIT_PROB = 48;
 
   // FIX: nEstimators/maxDepth defaults were duplicated as separate magic numbers in
   // 2 places (per-fold model below, and productionModel further down) — the exact
@@ -2414,15 +2241,6 @@ export async function runRealStrategyAnalysis(
     const numEstimators = modelParams.nEstimators || DEFAULT_N_ESTIMATORS;
     const maxTreeDepth = modelParams.maxDepth || DEFAULT_MAX_DEPTH;
     model.train(trainData, numEstimators, maxTreeDepth, 3);
-    
-    // Populate DTW module with patterns from training data
-    const dtwModule = new DTWModule(modelParams.dtwWindow || 20, modelParams.dtwK || 10, modelParams.maxPatterns || 1000);
-    for (let j = 0; j < purgedTrainEnd; j++) {
-      const kIdx = 200 + j;
-      if (kIdx >= 20) {
-        dtwModule.addPattern(klines.slice(kIdx - 20, kIdx + 1), dataset[j].label === 1 ? 1 : 0);
-      }
-    }
 
     if (fold === nFolds - 1) {
        finalModel = model;
@@ -2476,20 +2294,12 @@ export async function runRealStrategyAnalysis(
         currentAtrPct,
         foldBbWidthPct,
         ema20Arr[klineIdx] || klines[klineIdx].close,
-        ema50Arr[klineIdx] || klines[klineIdx].close,
-        undefined,
-        undefined,
-        '5m'
+        ema50Arr[klineIdx] || klines[klineIdx].close
       );
 
       // Dynamic ATR SL/TP: 1.2x ATR SL, 2.4x ATR TP (1:2 Risk/Reward ratio)
-      const slCap = modelParams.timeframe === '5m' ? 1.5 : 1.0;
-      const tpCap = modelParams.timeframe === '5m' ? 3.0 : 2.0;
-      const minSl = modelParams.timeframe === '5m' ? 0.15 : 0.08;
-      const minTp = modelParams.timeframe === '5m' ? 0.30 : 0.16;
-
-      const activeSlPct = Math.max(minSl, Math.min(slCap, currentAtrPct * 1.2));
-      const activeTpPct = Math.max(minTp, Math.min(tpCap, currentAtrPct * 2.4));
+      const activeSlPct = Math.max(0.6, Math.min(3.5, currentAtrPct * 1.2));
+      const activeTpPct = Math.max(1.2, Math.min(7.0, currentAtrPct * 2.4));
 
       if (position) {
         let hitSL = false;
@@ -2513,11 +2323,10 @@ export async function runRealStrategyAnalysis(
            if (nextKline.low <= slPrice) { hitSL = true; exitPrice = slPrice; }
            else if (nextKline.high >= tpPrice) { hitTP = true; exitPrice = tpPrice; }
 
-           // Exit on opposite signal or max hold timeout
-           const maxBars = modelParams.timeframe === '5m' ? 5 : 5;
+           // Exit on opposite signal or 12-bar timeout
            const isOppositeSignal = pred.value === -1 && pred.prob >= 55;
            
-           if (hitSL || hitTP || isOppositeSignal || barsInTrade >= maxBars) {
+           if (hitSL || hitTP || isOppositeSignal || barsInTrade >= 12) {
              if (!hitSL && !hitTP) exitPrice = nextKline.close;
              exitPrice = exitPrice * (1 - slippageRate);
              const returnPct = ((exitPrice - position.entryPrice) / position.entryPrice) * 100 - (feeRate * 200);
@@ -2547,11 +2356,10 @@ export async function runRealStrategyAnalysis(
            if (nextKline.high >= slPrice) { hitSL = true; exitPrice = slPrice; }
            else if (nextKline.low <= tpPrice) { hitTP = true; exitPrice = tpPrice; }
 
-           // Exit on opposite signal or max hold timeout
-           const maxBars = modelParams.timeframe === '5m' ? 5 : 5;
+           // Exit on opposite signal or 12-bar timeout
            const isOppositeSignal = pred.value === 1 && pred.prob >= 55;
            
-           if (hitSL || hitTP || isOppositeSignal || barsInTrade >= maxBars) {
+           if (hitSL || hitTP || isOppositeSignal || barsInTrade >= 12) {
              if (!hitSL && !hitTP) exitPrice = nextKline.close;
              exitPrice = exitPrice * (1 + slippageRate);
              const returnPct = ((position.entryPrice - exitPrice) / position.entryPrice) * 100 - (feeRate * 200);
@@ -2595,17 +2403,8 @@ export async function runRealStrategyAnalysis(
         cciArr[klineIdx]
       );
 
-      const startTime = performance.now();
-      // Get DTW score
-      const dtwConf = dtwModule.predict(klines.slice(klineIdx - 20, klineIdx + 1));
-      
-      // Dynamic Confluence Score calculation for backtest entry (replacing hard VETOs with soft penalties)
-      // MetaScore = 0.60 * RF Probability + 0.40 * DTW Score.
-      let metaScore = (pred.prob * 0.6) + (dtwConf.score * 0.4);
-      let backtestScore = metaScore;
-      const inferenceTime = performance.now() - startTime;
-      
-      // console.log(`[DEBUG ML] RF Prob: ${pred.prob.toFixed(2)}, DTW Score: ${dtwConf.score.toFixed(2)}, Win Rate: ${dtwConf.winRate.toFixed(2)}, MetaScore: ${metaScore.toFixed(2)}, Inference Time: ${inferenceTime.toFixed(2)}ms`);
+      // Confluence Score calculation for backtest entry (RF probability + EMA/volume soft adjustments)
+      let backtestScore = pred.prob;
 
       if (pred.value === 1) {
         if (curEma20 >= curEma50) backtestScore += 4;
@@ -2676,15 +2475,6 @@ export async function runRealStrategyAnalysis(
   // importance, care rămân pe `finalModel` ca înainte.
   const productionModel = new RandomForest();
   productionModel.train(dataset, modelParams.nEstimators || DEFAULT_N_ESTIMATORS, modelParams.maxDepth || DEFAULT_MAX_DEPTH, 3);
-
-  // Train Production DTW Pattern Recognition Module on full resolved dataset
-  const productionDtwModule = new DTWModule(modelParams.dtwWindow || 20, modelParams.dtwK || 10, modelParams.maxPatterns || 1000);
-  for (let j = 0; j < dataset.length; j++) {
-    const kIdx = 200 + j;
-    if (kIdx >= 20) {
-      productionDtwModule.addPattern(klines.slice(kIdx - 20, kIdx + 1), dataset[j].label === 1 ? 1 : 0);
-    }
-  }
 
   if (onProgress) onProgress(75);
 
@@ -2791,7 +2581,6 @@ export async function runRealStrategyAnalysis(
   
   const expPred = predictTree(explainerTree, currentFeatures);
   const currentPred = productionModel.predictDetailed(currentFeatures);
-  const liveDtwConf = productionDtwModule.predict(klines.slice(-21));
 
   // Feature Pruning: Filter features with importance >= 2.0%
   const featureImportances = finalModel.getPermutationImportances(lastFoldTestData.length > 0 ? lastFoldTestData : dataset.slice(-300));
@@ -2819,6 +2608,9 @@ export async function runRealStrategyAnalysis(
   const range20pPct = low20 > 0 && high20 > low20 ? ((high20 - low20) / low20) * 100 : 0;
   const lastVolRatio = volumeEmaArr[klines.length - 1] ? klines[klines.length - 1].volume / volumeEmaArr[klines.length - 1] : 1;
 
+  const minAtrPctThreshold = modelParams.minAtrPctThreshold !== undefined ? modelParams.minAtrPctThreshold : 0.30;
+  const minRange20pThreshold = modelParams.minRange20pThreshold !== undefined ? modelParams.minRange20pThreshold : 0.55;
+
   const marketRegime = detectMarketRegime(
     lastAdx,
     lastAtrPct,
@@ -2827,7 +2619,8 @@ export async function runRealStrategyAnalysis(
     ema50Arr[lastI] || closes[lastI],
     range20pPct,
     lastVolRatio,
-    modelParams.timeframe || '5m'
+    minAtrPctThreshold,
+    minRange20pThreshold
   );
 
   // Meta Model Prediction
@@ -2918,8 +2711,8 @@ export async function runRealStrategyAnalysis(
 
   const isBuyCandidate = currentPred.value === 1 || (currentPred.probBuy > currentPred.probSell && currentPred.probBuy >= 32);
   const isSellCandidate = currentPred.value === -1 || (currentPred.probSell > currentPred.probBuy && currentPred.probSell >= 52);
-  // Unify Random Forest calibrated probability (60%) with DTW Pattern Recognition score (40%)
-  const baseScoreForUnification = Math.round((calibratedProb * 0.60) + (liveDtwConf.score * 0.40));
+  // Base score for unified confidence = calibrated RF probability
+  const baseScoreForUnification = calibratedProb;
 
   // Veto Check: Primary RF Prob < 32%
   const minRfTarget = 32;
@@ -2988,61 +2781,27 @@ export async function runRealStrategyAnalysis(
     }
   }
 
-  // Veto Check 6 (BUG FIX): isAdxStrong / isVolumeConfirmed / isAtrAdequate / isMetaApproved
-  // were computed above (MIN_ADX_FOR_ENTRY, MIN_VOLUME_RATIO, MIN_ATR_PCT, META_MIN_PROFIT_PROB)
-  // but were never actually read anywhere afterward — dead code. The comment above their
-  // constants ("centralizate ... pentru a tăia intrările de calitate joasă") describes exactly
-  // this veto, but it was never wired in, so low-ADX / low-volume / low-ATR / low-meta-confidence
-  // trades were never actually being blocked by this filter, despite the log/comment implying
-  // they were. Reversal-pattern trades are still allowed to bypass it, consistent with the other
-  // veto checks above (a genuine capitulation/euphoria setup can occur outside "normal" trend regimes).
+  // Veto Check 6 (BUG FIX, then loosened to 3-of-4): isAdxStrong / isVolumeConfirmed /
+  // isAtrAdequate / isMetaApproved were computed above (MIN_ADX_FOR_ENTRY,
+  // MIN_VOLUME_RATIO, MIN_ATR_PCT, META_MIN_PROFIT_PROB) but were never actually read
+  // anywhere afterward — dead code. The comment above their constants ("centralizate
+  // ... pentru a tăia intrările de calitate joasă") describes exactly this veto, but it
+  // was never wired in. First wired as "all 4 required" — live data showed Meta-Model
+  // alone (chronically 25-43%, rarely near the 48% bar) was vetoing almost every
+  // otherwise-strong candidate (RF 84-92%) on its own. Loosened to "at least 3 of 4
+  // must pass": Meta-Model (or any single metric) can no longer single-handedly block
+  // a trade — it now takes at least 2 of the 4 failing together. Reversal-pattern
+  // trades still bypass this entirely, consistent with the other veto checks above.
   if (!strictVetoTriggered && (isBuyCandidate || isSellCandidate) && !reversalSignal.isBullishReversal && !reversalSignal.isBearishReversal) {
     const failedChecks: string[] = [];
     if (!isAdxStrong) failedChecks.push(`ADX ${lastAdx.toFixed(1)} < ${MIN_ADX_FOR_ENTRY}`);
     if (!isVolumeConfirmed) failedChecks.push(`Volum ${lastVolRatio.toFixed(2)}x < ${MIN_VOLUME_RATIO}x`);
     if (!isAtrAdequate) failedChecks.push(`ATR% ${lastAtrPct.toFixed(2)}% < ${MIN_ATR_PCT}%`);
     if (!isMetaApproved) failedChecks.push(`Meta-Model ${metaProfitProb}% < ${META_MIN_PROFIT_PROB}%`);
-    if (failedChecks.length > 0) {
+    const MIN_FAILURES_TO_VETO = 2; // block only when 2+ of the 4 checks fail together (i.e. fewer than 3 pass)
+    if (failedChecks.length >= MIN_FAILURES_TO_VETO) {
       strictVetoTriggered = true;
-      vetoReason = `🚫 VETO Filtre Hard (ADX/Volum/ATR/Meta): ${failedChecks.join(', ')}`;
-    }
-  }
-
-  // Veto Check 7: Anti-Top & Overbought Exhaustion Protection (Protecție Cumpărare la Vârf)
-  // Blochează cumpărarea impulsivă (FOMO) la vârful mișcărilor unde urmează dump sau pullback imediat.
-  if (!strictVetoTriggered && isBuyCandidate && !reversalSignal.isBullishReversal) {
-    const lastClosePrice = klines[lastI].close;
-    const lastOpenPrice = klines[lastI].open;
-    const lastHighPrice = klines[lastI].high;
-    const lastLowPrice = klines[lastI].low;
-    const candleTotalRange = Math.max(0.000001, lastHighPrice - lastLowPrice);
-    const upperWickSize = lastHighPrice - Math.max(lastOpenPrice, lastClosePrice);
-    const bodySize = Math.max(0.000001, Math.abs(lastClosePrice - lastOpenPrice));
-    const upperWickRatio = upperWickSize / candleTotalRange;
-
-    const isRsiOverboughtSevere = (rsiArr[lastI] || 50) >= 70;
-    const isStochRsiExtreme = stochRsiArr && stochRsiArr[lastI] !== undefined && stochRsiArr[lastI] >= 85 && (rsiArr[lastI] || 50) >= 65;
-    const isBollingerOverbought = bollObj.percentB[lastI] !== undefined && bollObj.percentB[lastI] >= 0.95;
-    const isUpperWickRejection = upperWickRatio >= 0.40 && upperWickSize >= 1.5 * bodySize;
-    // FIX (recalibrare 1 minut): pragul de supra-extindere față de EMA20 coborât
-    // de la 2.5% la 0.8%. Pe date orare, 2.5% față de EMA20 (20 ore) e o deviație
-    // rezonabilă care merită semnalată. Pe 1m, EMA20 = media ultimelor 20 de minute,
-    // iar 2.5% față de ea înseamnă un pump extrem de rar (flash pump) — botul n-ar
-    // mai prinde nicio supra-extindere cu pragul vechi. 0.8% pe 20 minute e realist.
-    const isOverextendedFromEma = curEma20 > 0 && ((lastClosePrice - curEma20) / curEma20) >= 0.008;
-    const isBearishReversalActive = reversalSignal.isBearishReversal;
-
-    const exhaustionReasons: string[] = [];
-    if (isBearishReversalActive) exhaustionReasons.push(`Semnal Reversal Urs activ (${reversalSignal.score}pt)`);
-    if (isRsiOverboughtSevere) exhaustionReasons.push(`RSI supracumpărat extrem (${(rsiArr[lastI] || 50).toFixed(1)} >= 70)`);
-    if (isStochRsiExtreme) exhaustionReasons.push(`StochRSI supracumpărat (${stochRsiArr[lastI].toFixed(1)} >= 85)`);
-    if (isBollingerOverbought) exhaustionReasons.push(`Plafon Bollinger (%B: ${(bollObj.percentB[lastI] || 1).toFixed(2)} >= 0.95)`);
-    if (isUpperWickRejection) exhaustionReasons.push(`Rejecție fitil superior ${(upperWickRatio * 100).toFixed(0)}% din lumânare`);
-    if (isOverextendedFromEma) exhaustionReasons.push(`Supra-extins +${(((lastClosePrice - curEma20) / curEma20) * 100).toFixed(1)}% peste EMA20`);
-
-    if (exhaustionReasons.length > 0) {
-      strictVetoTriggered = true;
-      vetoReason = `🛑 VETO Supra-Cumpărat / Rejecție Vârf (Anti-Dump): ${exhaustionReasons.join(', ')} - Risc major de cădere imediat după cumpărare.`;
+      vetoReason = `🚫 VETO Filtre Hard (${failedChecks.length}/4 eșuate — ADX/Volum/ATR/Meta): ${failedChecks.join(', ')}`;
     }
   }
 
@@ -3095,8 +2854,7 @@ export async function runRealStrategyAnalysis(
   const metaAdjustment = Math.max(-10, Math.min(10, Math.round((metaProfitProb - 50) * 0.2)));
   scoreAdjustments.push(`${metaAdjustment >= 0 ? '+' : ''}${metaAdjustment}% Meta-Model (${metaProfitProb}%)`);
 
-  scoreAdjustments.push(`DTW Pattern: ${liveDtwConf.score.toFixed(1)}% (Win Rate: ${(liveDtwConf.winRate * 100).toFixed(0)}%)`);
-  scoreAdjustments.push(`[Random Forest + DTW Pattern Match Activ]`);
+  scoreAdjustments.push(`[Random Forest Ensemble Activ]`);
 
   // News & Macro Impact (+/- 3%..5%)
   scoreAdjustments.push(`${impactAdjustment >= 0 ? '+' : ''}${impactAdjustment}% News Sentiment (${newsSentiment.sentimentLabel})`);
@@ -3186,17 +2944,16 @@ export async function runRealStrategyAnalysis(
   const trendSign = trendAdjustment >= 0 ? `+${trendAdjustment}%` : `${trendAdjustment}%`;
   const metaSign = metaAdjustment >= 0 ? `+${metaAdjustment}%` : `${metaAdjustment}%`;
 
-  const modelEngineLabel = 'Random Forest (32 Arbori, 1m) + DTW Pattern-Match';
+  const modelEngineLabel = 'Random Forest (32 Arbori, 1m)';
 
   const detailedExplanation: string[] = [
     `0. Mod Calcul Activ: ${modelEngineLabel}`,
     `1. Triple Barrier Labeling & Purged Walk-Forward CV: Antrenat pe 1500 lumânări de 1 minut (~25 ore) cu aliniere trend și maxLookAhead 15 bare.`,
-    `2. Probability Calibration & Pattern Match: RF Prob ${calibratedProb}% | DTW Pattern Match ${liveDtwConf.score.toFixed(1)}% (${(liveDtwConf.winRate * 100).toFixed(0)}% Win Rate pe pattern-uri similare).`,
+    `2. Probability Calibration (Platt Scaling): Probabilitate brută ${rawProb}% recalibrată la ${calibratedProb}%.`,
     `3. Reversal & Regime Detector: ${reversalSignal.isBullishReversal ? `⚡ CAPITULATION REBOUND BUY DETECTAT (${reversalSignal.reasons.join(', ')})` : reversalSignal.isBearishReversal ? `⚡ EUPHORIA REVERSAL SELL DETECTAT (${reversalSignal.reasons.join(', ')})` : `Reversal Inactiv | ADX=${lastAdx.toFixed(1)} (${adxSign}), VolRatio=${lastVolRatio.toFixed(2)} (${volSign})`}.`,
     `4. Contribuții Defalcate Scor Unificat:
        • Mod Calcul Selectat: ${modelEngineLabel}
-       • Random Forest (Bază Calibrată 60%): ${calibratedProb}%
-       • DTW Pattern Match (Bază Dinamică 40%): ${liveDtwConf.score.toFixed(1)}%
+       • Random Forest (Bază Calibrată): ${calibratedProb}%
        • Meta-Model Adjustment: ${metaSign}
        • EMA Trend Alignment: ${trendSign}
        • Volum Multiplier: ${volSign}
@@ -3228,8 +2985,6 @@ export async function runRealStrategyAnalysis(
     signal: action,
     probability: finalUnifiedScore,
     rfProb: calibratedProb,
-    dtwScore: parseFloat(liveDtwConf.score.toFixed(1)),
-    dtwWinRate: parseFloat(liveDtwConf.winRate.toFixed(2)),
     metaProb: metaProfitProb,
     vetoReason,
     targetScore: finalUnifiedScore,
@@ -3306,7 +3061,7 @@ export async function runMultiSymbolBacktest(
         generalizationStatus: status,
       });
     } catch (e) {
-      console.error(`Multi-symbol backtest error for ${sym}:`, e);
+      logger.error(`Multi-symbol backtest error for ${sym}:`, e);
     }
   }
 
