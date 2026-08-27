@@ -3920,8 +3920,8 @@ class ServerBotEngine {
             }
 
             // HARD FILTER 3 & 4: Stagnation / Volatility Protection (ATR & Range 20p)
-            const atrPct = mlRes?.lastAtrPct ?? oppInfo?.atrPercent ?? 0.10;
-            const range20pPct = mlRes?.range20pPct ?? 0.30;
+            const atrPct = mlRes?.marketRegime?.atrPercent ?? oppInfo?.atrPercent ?? 0.10;
+            const range20pPct = mlRes?.marketRegime?.range20pPct ?? 0;
             const isStagnationEnabled = scalpConfig.enableStagnationFilter !== false;
             // FIX (recalibrare 1 minut): fallback-urile ?? coborâte de la 0.30%/0.55%
             // la 0.05%/0.20% — valorile precedente ar fi blocat aproape toată activitatea

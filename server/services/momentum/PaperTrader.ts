@@ -41,6 +41,11 @@ export class PaperTrader {
   constructor(config: MomentumConfig) {
     this.config = config;
     this.state = this.loadState();
+    
+    if (this.state.active) {
+      this.log('Reactivating paper trading from state...');
+      this.start();
+    }
   }
 
   private loadState(): PaperState {
