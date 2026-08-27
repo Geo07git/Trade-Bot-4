@@ -10,6 +10,7 @@ import { Sidebar } from './components/Sidebar';
 import { SuperDashboard } from './components/SuperDashboard';
 import { Dashboard } from './components/Dashboard';
 import { ScalpingBot } from './components/ScalpingBot';
+import { MomentumPaperView } from './components/MomentumPaperView';
 import { TradeLogs } from './components/TradeLogs';
 import { TradingJournal } from './components/TradingJournal';
 import { Settings } from './components/Settings';
@@ -222,6 +223,7 @@ export default function App() {
     'superDashboard', 
     'dashboard', 
     'scalping',
+    'momentumPaper',
     'journal', 
     'logs', 
     'settings'
@@ -337,6 +339,7 @@ export default function App() {
           {activeView === 'superDashboard' && <SuperDashboard onSwitchToFullDashboard={() => setCurrentView('dashboard')} />}
           {activeView === 'dashboard' && <Dashboard />}
           {activeView === 'scalping' && <ScalpingBot />}
+          {activeView === 'momentumPaper' && <MomentumPaperView />}
           {activeView === 'journal' && <TradingJournal />}
           {activeView === 'logs' && <TradeLogs />}
           {activeView === 'settings' && <Settings />}

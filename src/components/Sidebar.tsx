@@ -34,6 +34,7 @@ export function Sidebar({ currentView, onViewChange, isOpenMobile, onCloseMobile
     { id: 'superDashboard', label: '⚡ Super Dashboard' },
     { id: 'dashboard', label: 'Dashboard Complet' },
     { id: 'scalping', label: '⚡ Motor Scalping ML' },
+    { id: 'momentumPaper', label: '🚀 Momentum Paper' },
     { id: 'journal', label: 'Trading Journal' },
     { id: 'logs', label: 'Trade Logs' },
     { id: 'settings', label: 'Settings' },

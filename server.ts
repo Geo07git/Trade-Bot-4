@@ -6,6 +6,8 @@ import { GoogleGenAI } from '@google/genai';
 import { botEngine } from './server/bot';
 import { getAccountInfo, getMyTrades, getOpenOrders } from './server/services/BinanceService';
 import { journalService } from './server/services/JournalService';
+import momentumBacktestRouter from './server/api/momentum-backtest';
+import momentumPaperRouter from './server/api/momentum-paper';
 
 dotenv.config();
 
@@ -246,6 +248,9 @@ async function startServer() {
   });
 
   // Smart AI Grid Bot API Routes
+  app.use('/api/momentum', momentumBacktestRouter);
+  app.use('/api/momentum/paper', momentumPaperRouter);
+
   app.post('/api/grid-bot/config', (req, res) => {
     try {
       const { 

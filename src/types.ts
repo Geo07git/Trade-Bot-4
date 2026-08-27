@@ -1,4 +1,4 @@
-export type ViewState = 'superDashboard' | 'dashboard' | 'scalping' | 'journal' | 'analyst' | 'alerts' | 'logs' | 'settings' | 'calibration';
+export type ViewState = 'superDashboard' | 'dashboard' | 'scalping' | 'momentumPaper' | 'journal' | 'analyst' | 'alerts' | 'logs' | 'settings' | 'calibration';
 
 export type ExecutionEngineMode = 'both' | 'scalping';
 
