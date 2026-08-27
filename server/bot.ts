@@ -3929,13 +3929,20 @@ class ServerBotEngine {
             const minAtr = scalpConfig.minAtrPctThreshold ?? 0.05;
             const minRange = scalpConfig.minRange20pThreshold ?? 0.20;
 
-            if (isStagnationEnabled && (atrPct < minAtr || range20pPct < minRange)) {
-              logger.info(`[VETO 🛑 REGIM STAGNARE] ${item.symbol}: Volatilitate scăzută - ATR (${atrPct.toFixed(2)}% < ${minAtr}%) sau Range20 (${range20pPct.toFixed(2)}% < ${minRange}%). Intrarea blocată.`);
-              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
-                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
-                if (j) j.vetoReason = `Regim Stagnare: ATR (${atrPct.toFixed(2)}% < ${minAtr}%) sau Range20 (${range20pPct.toFixed(2)}% < ${minRange}%)`;
+            if (isStagnationEnabled) {
+              const vetoReasons: string[] = [];
+              if (atrPct < minAtr) vetoReasons.push(`ATR ${atrPct.toFixed(2)}% < ${minAtr}%`);
+              if (range20pPct > 0 && range20pPct < minRange) vetoReasons.push(`Range20 ${range20pPct.toFixed(2)}% < ${minRange}%`);
+
+              if (vetoReasons.length > 0) {
+                const vetoMsg = `Regim Stagnare: ${vetoReasons.join(' și ')}`;
+                logger.info(`[VETO 🛑 REGIM STAGNARE] ${item.symbol}: ${vetoMsg}. Intrarea blocată.`);
+                if (this.state.signalJournal && this.state.signalJournal.length > 0) {
+                  const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
+                  if (j) j.vetoReason = vetoMsg;
+                }
+                continue;
               }
-              continue;
             }
 
             // Unified 8-Factor MetaScore Calculation

@@ -1784,8 +1784,8 @@ export function detectMarketRegime(
   ema50: number,
   range20pPct?: number,
   volRatio?: number,
-  minAtrThreshold: number = 0.30,
-  minRangeThreshold: number = 0.55
+  minAtrThreshold: number = 0.05,
+  minRangeThreshold: number = 0.20
 ): { 
   currentRegime: 'Trend' | 'Sideways' | 'High Volatility' | 'Stagnant (NO-TRADE)'; 
   regimeDescription: string; 
@@ -1811,15 +1811,16 @@ export function detectMarketRegime(
   const hasNoVolumeSpike = (volRatio === undefined || volRatio < 1.8);
 
   if ((isAtrLow || isRangeLow || isSqueezeLow) && hasNoVolumeSpike) {
-    const atrMsg = `ATR=${atrPercent.toFixed(2)}% (<${minAtrThreshold.toFixed(2)}%)`;
-    const rangeMsg = range20pPct !== undefined ? `, Range20p=${range20pPct.toFixed(2)}% (<${minRangeThreshold.toFixed(2)}%)` : '';
-    const adxMsg = `ADX=${adx.toFixed(1)}`;
+    const reasons: string[] = [];
+    if (isAtrLow) reasons.push(`ATR=${atrPercent.toFixed(2)}% (<${minAtrThreshold.toFixed(2)}%)`);
+    if (isRangeLow) reasons.push(`Range20p=${range20pPct!.toFixed(2)}% (<${minRangeThreshold.toFixed(2)}%)`);
+    
     return {
       currentRegime: 'Stagnant (NO-TRADE)',
-      regimeDescription: `🧊 Regim Stagnare / Volatilitate Scăzută (${atrMsg}${rangeMsg}, ${adxMsg}). Conservare capital - comisioanele depășesc profitul potențial.`,
+      regimeDescription: `🧊 Regim Stagnare: ${reasons.join(', ')}.`,
       regimeCode: -1,
       isStagnant: true,
-      stagnationReason: `Mediul de tranzacționare are volatilitate redusă (${atrMsg}${rangeMsg}). Profitul potențial nu acoperă costurile comisioanelor.`
+      stagnationReason: reasons.join(' și ')
     };
   }
 
