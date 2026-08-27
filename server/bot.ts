@@ -3804,7 +3804,7 @@ class ServerBotEngine {
               reversalType: mlRes?.reversalSignal?.isBullishReversal ? 'bullish' : (mlRes?.reversalSignal?.isBearishReversal ? 'bearish' : undefined),
               newsSentiment: mlRes?.newsSentiment?.sentimentLabel || 'neutral',
               finalAction: signal?.action || 'HOLD',
-              vetoReason: mlRes?.vetoReason || (signal?.action === 'HOLD' ? 'Consolidare / Filtru Confluență' : 'Semnal Aprobat'),
+              vetoReason: signal?.action === 'HOLD' ? 'Consolidare / Filtru Confluență' : 'Semnal Aprobat',
               explanation: mlRes?.explanation
             };
 
