@@ -2,7 +2,6 @@ import { Router } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { paperTrader } from '../services/momentum/PaperTrader';
-import { requireAdminAuth } from '../utils/auth';
 
 const router = Router();
 
@@ -20,7 +19,7 @@ router.get('/status', (req, res) => {
 });
 
 // Update paper trading config (minMomentumScore, intervalMinutes)
-router.post('/config', requireAdminAuth, (req, res) => {
+router.post('/config', (req, res) => {
   try {
     const { minMomentumScore, intervalMinutes } = req.body;
     if (minMomentumScore !== undefined) {
@@ -33,7 +32,7 @@ router.post('/config', requireAdminAuth, (req, res) => {
 });
 
 // Start paper trading loop
-router.post('/start', requireAdminAuth, (req, res) => {
+router.post('/start', (req, res) => {
   try {
     const { intervalMinutes, minMomentumScore } = req.body;
     if (minMomentumScore !== undefined) {
@@ -47,7 +46,7 @@ router.post('/start', requireAdminAuth, (req, res) => {
 });
 
 // Stop paper trading loop
-router.post('/stop', requireAdminAuth, (req, res) => {
+router.post('/stop', (req, res) => {
   try {
     paperTrader.stop();
     res.json({ success: true, message: 'Paper trading stopped', state: paperTrader.getState() });
@@ -57,7 +56,7 @@ router.post('/stop', requireAdminAuth, (req, res) => {
 });
 
 // Force manual cycle trigger
-router.post('/run-cycle', requireAdminAuth, async (req, res) => {
+router.post('/run-cycle', async (req, res) => {
   try {
     await paperTrader.runCycle();
     res.json({ success: true, message: 'Paper cycle executed successfully', state: paperTrader.getState() });

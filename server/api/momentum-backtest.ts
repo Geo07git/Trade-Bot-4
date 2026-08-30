@@ -3,11 +3,10 @@ import fs from 'fs';
 import path from 'path';
 import { runBacktest } from '../services/momentum/BacktestEngine';
 import { getBinanceUniverse } from '../services/momentum/Universe';
-import { requireAdminAuth } from '../utils/auth';
 
 const router = express.Router();
 
-router.get('/list', requireAdminAuth, (req, res) => {
+router.get('/list', (req, res) => {
   try {
     const backtestDir = path.join(process.cwd(), 'server', 'data', 'backtests');
     if (!fs.existsSync(backtestDir)) {
@@ -31,7 +30,7 @@ router.get('/list', requireAdminAuth, (req, res) => {
   }
 });
 
-router.get('/:filename', requireAdminAuth, (req, res) => {
+router.get('/:filename', (req, res) => {
   try {
     const { filename } = req.params;
     // basic sanitization to prevent directory traversal
@@ -51,7 +50,7 @@ router.get('/:filename', requireAdminAuth, (req, res) => {
   }
 });
 
-router.delete('/:filename', requireAdminAuth, (req, res) => {
+router.delete('/:filename', (req, res) => {
   try {
     const { filename } = req.params;
     const safeFilename = path.basename(filename);
@@ -67,7 +66,7 @@ router.delete('/:filename', requireAdminAuth, (req, res) => {
   }
 });
 
-router.post('/run-backtest', requireAdminAuth, async (req, res) => {
+router.post('/run-backtest', async (req, res) => {
   try {
     const { startTime, endTime, config, includePath, symbolLimit, singleSymbol } = req.body;
     const { tradingUniverse } = await getBinanceUniverse();
