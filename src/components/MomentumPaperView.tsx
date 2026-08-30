@@ -19,10 +19,13 @@ interface PaperPosition {
   status: 'OPEN' | 'CLOSED';
   exitTimestamp?: number;
   exitPrice?: number;
+  exitReason?: string;
   realizedPnL?: number;
   realizedPnLPct?: number;
   maxFavorableExcursion: number;
   maxAdverseExcursion: number;
+  trailingActive?: boolean;
+  trailingStopPrice?: number;
   scoreAtEntry?: number;
   currentPrice?: number;
   currentPnLPct?: number;
@@ -431,9 +434,19 @@ export function MomentumPaperView() {
                     <div>
                       <div className="flex items-center gap-2">
                         <span className="font-bold text-white">{t.symbol}</span>
-                        <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-semibold", isWin ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/20 text-rose-300")}>
+                        <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-semibold", isWin ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-rose-500/20 text-rose-300 border border-rose-500/30")}>
                           {isWin ? "WIN" : "LOSS"}
                         </span>
+                        {t.exitReason && (
+                          <span className={cn(
+                            "text-[10px] px-1.5 py-0.5 rounded font-bold font-mono border",
+                            t.exitReason === 'TRAILING' ? "bg-amber-500/20 text-amber-300 border-amber-500/40" :
+                            t.exitReason === 'SL' ? "bg-rose-500/20 text-rose-300 border-rose-500/40" :
+                            "bg-blue-500/20 text-blue-300 border-blue-500/40"
+                          )}>
+                            {t.exitReason === 'TRAILING' ? '🎯 TRAILING' : t.exitReason === 'SL' ? '🛑 SL 1%' : '⏳ 24H'}
+                          </span>
+                        )}
                         {t.scoreAtEntry !== undefined && (
                           <button
                             onClick={() => setSelectedPositionBreakdown(t)}

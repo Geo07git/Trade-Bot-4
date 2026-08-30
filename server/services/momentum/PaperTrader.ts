@@ -36,12 +36,15 @@ export interface PaperPosition {
   status: 'OPEN' | 'CLOSED';
   exitTimestamp?: number;
   exitPrice?: number;
-  exitReason?: string;
+  exitReason?: 'SL' | 'TRAILING' | '24H_EXPIRY' | string;
   realizedPnL?: number;
   realizedPnLPct?: number;
   grossPnL?: number;
   maxFavorableExcursion: number;
   maxAdverseExcursion: number;
+  highestPrice?: number;
+  trailingStopPrice?: number;
+  trailingActive?: boolean;
   durationMinutes?: number;
   scoreAtEntry?: number;
   scoreBreakdown?: {
@@ -250,8 +253,98 @@ export class PaperTrader {
     this.saveState();
   }
 
+  /**
+   * Evaluates exit conditions (Apex rules: SL 1%, Trailing Stop 5%/0.5%, 24H Timeout)
+   */
+  private evaluatePositionExit(pos: PaperPosition, currentPrice: number, now: number): { shouldExit: boolean; exitPrice: number; exitReason: 'SL' | 'TRAILING' | '24H_EXPIRY' } | null {
+    const elapsedMinutes = Math.floor((now - pos.entryTimestamp) / (60 * 1000));
+    const elapsedHours = elapsedMinutes / 60;
+
+    // Highest price tracking
+    if (!pos.highestPrice || currentPrice > pos.highestPrice) {
+      pos.highestPrice = Math.max(pos.highestPrice || pos.entryPrice, currentPrice);
+    }
+
+    // 1. APEX Trailing Stop evaluation
+    // Activation at +5.0% from entry price
+    const activationPrice = pos.entryPrice * 1.05;
+    if (!pos.trailingActive && (currentPrice >= activationPrice || pos.highestPrice >= activationPrice || pos.maxFavorableExcursion >= 5.0)) {
+      pos.trailingActive = true;
+      const initialTrailingStop = (pos.highestPrice || currentPrice) * (1 - 0.005); // 0.5% distance
+      pos.trailingStopPrice = initialTrailingStop;
+      this.log(`[TRAILING ACTIVE 🎯] ${pos.symbol} a atins pragul de activare Apex (+5.0%). Trailing Stop fixat la $${initialTrailingStop.toFixed(4)} (-0.5% față de vârf $${(pos.highestPrice || currentPrice).toFixed(4)}).`);
+    }
+
+    // Update trailing stop level if price moves higher while trailing is active
+    if (pos.trailingActive) {
+      const candidateTrailingStop = (pos.highestPrice || currentPrice) * (1 - 0.005); // 0.5% distance
+      if (!pos.trailingStopPrice || candidateTrailingStop > pos.trailingStopPrice) {
+        pos.trailingStopPrice = candidateTrailingStop;
+      }
+
+      // Check if price fell to or below trailing stop
+      if (currentPrice <= pos.trailingStopPrice) {
+        const rawExit = pos.trailingStopPrice;
+        const exitPrice = rawExit * (1 - this.config.exitSlippagePct / 100);
+        return {
+          shouldExit: true,
+          exitPrice,
+          exitReason: 'TRAILING'
+        };
+      }
+    }
+
+    // 2. APEX Hard Stop Loss evaluation (1.0% below entry)
+    const slPrice = pos.entryPrice * (1 - 0.01);
+    if (currentPrice <= slPrice) {
+      const exitPrice = currentPrice * (1 - this.config.exitSlippagePct / 100);
+      return {
+        shouldExit: true,
+        exitPrice,
+        exitReason: 'SL'
+      };
+    }
+
+    // 3. 24h Expiry Timeout
+    if (elapsedHours >= 24) {
+      const exitPrice = currentPrice * (1 - this.config.exitSlippagePct / 100);
+      return {
+        shouldExit: true,
+        exitPrice,
+        exitReason: '24H_EXPIRY'
+      };
+    }
+
+    return null;
+  }
+
+  private closePosition(pos: PaperPosition, exitPrice: number, exitReason: 'SL' | 'TRAILING' | '24H_EXPIRY' | string, now: number) {
+    const elapsedMinutes = Math.floor((now - pos.entryTimestamp) / (60 * 1000));
+    const grossPnlUsdt = ((exitPrice / pos.entryPrice) - 1) * pos.sizeUSDT;
+    const entryFee = pos.sizeUSDT * (this.config.entryFeePct / 100);
+    const exitFee = (pos.sizeUSDT + grossPnlUsdt) * (this.config.exitFeePct / 100);
+    const totalFees = entryFee + exitFee;
+    const netPnL = grossPnlUsdt - totalFees;
+
+    pos.status = 'CLOSED';
+    pos.exitTimestamp = now;
+    pos.exitPrice = exitPrice;
+    pos.exitReason = exitReason;
+    pos.realizedPnL = netPnL;
+    pos.realizedPnLPct = (netPnL / pos.sizeUSDT) * 100;
+    pos.grossPnL = grossPnlUsdt;
+    pos.feePaid += exitFee;
+    pos.durationMinutes = elapsedMinutes;
+
+    this.state.paperBalanceUSDT += pos.sizeUSDT + netPnL;
+
+    const reasonLabel = exitReason === 'TRAILING' ? 'TRAILING PROFIT 🎯' : exitReason === 'SL' ? 'STOP LOSS 🛑' : 'TIMEOUT 24H ⏳';
+    this.log(`[EXIT ${reasonLabel}] Închidere poziție ${pos.symbol} (${exitReason}). Preț intrare: $${pos.entryPrice.toFixed(4)} → Preț ieșire: $${exitPrice.toFixed(4)}, PnL Net: $${netPnL.toFixed(2)} (${pos.realizedPnLPct.toFixed(2)}%), Max MFE: +${pos.maxFavorableExcursion.toFixed(2)}%, Max MAE: ${pos.maxAdverseExcursion.toFixed(2)}%, Timp: ${(elapsedMinutes / 60).toFixed(1)}h`);
+  }
+
   private async updatePositionsFast() {
     if (!this.state.active || this.state.positions.length === 0) return;
+    const now = Date.now();
     try {
       const res = await fetch('https://api.binance.com/api/v3/ticker/price');
       const tickers = await res.json();
@@ -281,10 +374,26 @@ export class PaperTrader {
                this.log(`[MAE RECORD ⚠️] ${pos.symbol} nou MAE record: ${pos.maxAdverseExcursion.toFixed(2)}% (Preț: $${currentPrice})`);
              }
 
+             // Apex Exit Check
+             const exitDecision = this.evaluatePositionExit(pos, currentPrice, now);
+             if (exitDecision && exitDecision.shouldExit) {
+               this.closePosition(pos, exitDecision.exitPrice, exitDecision.exitReason, now);
+             }
+
              stateChanged = true;
            }
         }
       }
+
+      // Move newly closed positions to history
+      const openPositions = this.state.positions.filter(p => p.status === 'OPEN');
+      const newlyClosed = this.state.positions.filter(p => p.status === 'CLOSED');
+      if (newlyClosed.length > 0) {
+        this.state.history.unshift(...newlyClosed);
+        this.state.positions = openPositions;
+        stateChanged = true;
+      }
+
       if (stateChanged) this.saveState();
     } catch (err) {
       this.log('Eroare la actualizarea rapidă a prețurilor: ' + String(err));
@@ -354,6 +463,7 @@ export class PaperTrader {
           rvol,
           atrExpansion: atrExp,
           breakoutStrength: breakoutStr,
+          trailingStop: pos.trailingStopPrice,
           breakEvenActive: false,
           currentRegime: regime
         };
@@ -364,28 +474,10 @@ export class PaperTrader {
         pos.snapshots.push(snapshot);
         this.saveHourSnapshot(snapshot);
 
-        // Check 24h timeout (MAX_HOLD = 24h)
-        const elapsedHours = elapsedMinutes / 60;
-        if (elapsedHours >= 24) {
-          const exitPrice = currentPrice * (1 - this.config.exitSlippagePct / 100);
-          const grossPnlUsdt = ((exitPrice / pos.entryPrice) - 1) * pos.sizeUSDT;
-          const entryFee = pos.sizeUSDT * (this.config.entryFeePct / 100);
-          const exitFee = (pos.sizeUSDT + grossPnlUsdt) * (this.config.exitFeePct / 100);
-          const totalFees = entryFee + exitFee;
-          const netPnL = grossPnlUsdt - totalFees;
-
-          pos.status = 'CLOSED';
-          pos.exitTimestamp = now;
-          pos.exitPrice = exitPrice;
-          pos.exitReason = 'TIMEOUT_24H';
-          pos.realizedPnL = netPnL;
-          pos.realizedPnLPct = (netPnL / pos.sizeUSDT) * 100;
-          pos.grossPnL = grossPnlUsdt;
-          pos.feePaid += exitFee;
-          pos.durationMinutes = elapsedMinutes;
-
-          this.state.paperBalanceUSDT += pos.sizeUSDT + netPnL;
-          this.log(`[EXIT 🛑] Închidere poziție ${pos.symbol} după 24h (TIMEOUT_24H). Preț ieșire: $${exitPrice.toFixed(4)}, PnL Net: $${netPnL.toFixed(2)} (${pos.realizedPnLPct.toFixed(2)}%), Max MFE: +${pos.maxFavorableExcursion.toFixed(2)}%, Max MAE: ${pos.maxAdverseExcursion.toFixed(2)}%`);
+        // Check Apex exit rules during hour monitoring as well
+        const exitDecision = this.evaluatePositionExit(pos, currentPrice, now);
+        if (exitDecision && exitDecision.shouldExit) {
+          this.closePosition(pos, exitDecision.exitPrice, exitDecision.exitReason, now);
         }
       }
 
