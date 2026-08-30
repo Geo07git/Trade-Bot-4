@@ -11,3 +11,4 @@ data/trading_journal.json
 data/daily_snapshots.json
 bun.lock
 dist-electron/
+server/data/backtests/

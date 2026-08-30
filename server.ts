@@ -4,10 +4,12 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { botEngine } from './server/bot';
+import { tradingEngine, db } from './server/engine';
 import { getAccountInfo, getMyTrades, getOpenOrders } from './server/services/BinanceService';
 import { journalService } from './server/services/JournalService';
 import momentumBacktestRouter from './server/api/momentum-backtest';
 import momentumPaperRouter from './server/api/momentum-paper';
+import { requireAdminAuth } from './server/utils/auth';
 
 dotenv.config();
 
@@ -17,12 +19,105 @@ async function startServer() {
 
   app.use(express.json());
 
+  // Trading Engine & Audit Trail Endpoints
+  app.get('/api/engine/status', (req, res) => {
+    res.json({
+      success: true,
+      ...tradingEngine.getFullStatus(),
+      botAutoTrading: botEngine.state.autoTradingActive,
+      botBalance: botEngine.state.balance,
+      botPositionsCount: botEngine.state.positions?.length || 0
+    });
+  });
+
+  app.get('/api/engine/audit-events', (req, res) => {
+    const { eventType, symbol, strategy, search, limit, offset, from, to } = req.query;
+    const filter = {
+      eventType: eventType ? String(eventType) : undefined,
+      symbol: symbol ? String(symbol) : undefined,
+      strategy: strategy ? String(strategy) : undefined,
+      search: search ? String(search) : undefined,
+      limit: limit ? parseInt(String(limit), 10) : 100,
+      offset: offset ? parseInt(String(offset), 10) : 0,
+      fromTimestamp: from ? parseInt(String(from), 10) : undefined,
+      toTimestamp: to ? parseInt(String(to), 10) : undefined
+    };
+    const result = db.getAuditEvents(filter);
+    res.json({
+      success: true,
+      ...result,
+      stats: db.getAuditStats()
+    });
+  });
+
+  app.post('/api/engine/audit-events/clear', (req, res) => {
+    db.clearAuditEvents();
+    res.json({ success: true, message: 'Audit events cleared' });
+  });
+
+  app.post('/api/engine/reconcile', async (req, res) => {
+    try {
+      const syncResult = await botEngine.syncBinanceBalance();
+      const reconStatus = tradingEngine.getFullStatus().reconciliation;
+      res.json({
+        success: true,
+        reconciliation: reconStatus,
+        syncResult,
+        engineState: tradingEngine.getFullStatus().state
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || String(err) });
+    }
+  });
+
+  app.post('/api/engine/unlock-desync', (req, res) => {
+    const { reason } = req.body || {};
+    tradingEngine.unlockDesync(reason || 'Manual operator unlock via UI');
+    res.json({
+      success: true,
+      status: tradingEngine.getFullStatus()
+    });
+  });
+
+  app.post('/api/engine/kill-switch', async (req, res) => {
+    const { reason } = req.body || {};
+    botEngine.state.autoTradingActive = false;
+    await tradingEngine.emergencyStop(reason || 'Kill switch triggered from TradeBot terminal');
+    res.json({
+      success: true,
+      status: tradingEngine.getFullStatus()
+    });
+  });
+
+  app.post('/api/engine/resume', async (req, res) => {
+    const { reason } = req.body || {};
+    botEngine.state.autoTradingActive = true;
+    await tradingEngine.resumeTrading(reason || 'Trading resumed from TradeBot terminal');
+    res.json({
+      success: true,
+      status: tradingEngine.getFullStatus()
+    });
+  });
+
+  // Security helpers for Bot API
+  function getSanitizedBotState() {
+    const state = botEngine.state;
+    return {
+      ...state,
+      apiKey: state.apiKey ? '••••••••' : '',
+      apiSecret: state.apiSecret ? '••••••••' : '',
+      testnetApiKey: state.testnetApiKey ? '••••••••' : '',
+      testnetApiSecret: state.testnetApiSecret ? '••••••••' : '',
+      telegramBotToken: state.telegramBotToken ? '••••••••' : '',
+      discordWebhookUrl: state.discordWebhookUrl ? '••••••••' : '',
+      calculatedEquity: botEngine.calculateEquity()
+    };
+  }
+
+
   // Background 24/7 Bot API Endpoints
   app.get('/api/bot/state', (req, res) => {
-    res.json({
-      ...botEngine.state,
-      calculatedEquity: botEngine.calculateEquity()
-    });
+    res.json(getSanitizedBotState());
   });
 
   app.get('/api/bot/opportunities', (req, res) => {
@@ -48,47 +143,47 @@ async function startServer() {
     }
   });
 
-  app.post('/api/bot/config', (req, res) => {
+  app.post('/api/bot/config', requireAdminAuth, (req, res) => {
     botEngine.updateConfig(req.body);
-    res.json({ success: true, state: botEngine.state });
+    res.json({ success: true, state: getSanitizedBotState() });
   });
 
-  app.post('/api/bot/reset', (req, res) => {
+  app.post('/api/bot/reset', requireAdminAuth, (req, res) => {
     const { balance } = req.body;
     botEngine.resetPortfolio(balance || 10000);
-    res.json({ success: true, state: botEngine.state });
+    res.json({ success: true, state: getSanitizedBotState() });
   });
 
-  app.post('/api/bot/add-funds', (req, res) => {
+  app.post('/api/bot/add-funds', requireAdminAuth, (req, res) => {
     const { amount } = req.body;
     const added = parseFloat(amount);
     if (!isNaN(added) && added > 0) {
       botEngine.addFunds(added);
     }
-    res.json({ success: true, state: botEngine.state, calculatedEquity: botEngine.calculateEquity() });
+    res.json({ success: true, state: getSanitizedBotState(), calculatedEquity: botEngine.calculateEquity() });
   });
 
-  app.post('/api/bot/clear-logs', (req, res) => {
+  app.post('/api/bot/clear-logs', requireAdminAuth, (req, res) => {
     botEngine.clearLogs();
-    res.json({ success: true, state: botEngine.state });
+    res.json({ success: true, state: getSanitizedBotState() });
   });
 
-  app.post('/api/bot/clear-signal-journal', (req, res) => {
+  app.post('/api/bot/clear-signal-journal', requireAdminAuth, (req, res) => {
     botEngine.clearSignalJournal();
-    res.json({ success: true, state: botEngine.state });
+    res.json({ success: true, state: getSanitizedBotState() });
   });
 
-  app.post('/api/bot/reset-circuit-breaker', (req, res) => {
+  app.post('/api/bot/reset-circuit-breaker', requireAdminAuth, (req, res) => {
     botEngine.resetCircuitBreaker();
-    res.json({ success: true, state: botEngine.state });
+    res.json({ success: true, state: getSanitizedBotState() });
   });
 
   app.all('/api/bot/pulse', (req, res) => {
     const pulseData = botEngine.triggerPulseCheck();
-    res.json({ success: true, ...pulseData, state: botEngine.state });
+    res.json({ success: true, ...pulseData, state: getSanitizedBotState() });
   });
 
-  app.post('/api/bot/send-telegram-guide', async (req, res) => {
+  app.post('/api/bot/send-telegram-guide', requireAdminAuth, async (req, res) => {
     const { chatId, botToken } = req.body || {};
     if (botToken) {
       botEngine.updateConfig({ telegramBotToken: botToken, telegramChatId: chatId });
@@ -97,27 +192,27 @@ async function startServer() {
     res.json(result);
   });
 
-  app.post('/api/bot/sync-binance', async (req, res) => {
+  app.post('/api/bot/sync-binance', requireAdminAuth, async (req, res) => {
     const result = await botEngine.syncBinanceBalance();
-    res.json({ ...result, state: botEngine.state, calculatedEquity: botEngine.calculateEquity() });
+    res.json({ ...result, state: getSanitizedBotState(), calculatedEquity: botEngine.calculateEquity() });
   });
 
-  app.post('/api/bot/consolidate-accumulation', (req, res) => {
+  app.post('/api/bot/consolidate-accumulation', requireAdminAuth, (req, res) => {
     const result = botEngine.consolidateAccumulation();
-    res.json({ ...result, state: botEngine.state, calculatedEquity: botEngine.calculateEquity() });
+    res.json({ ...result, state: getSanitizedBotState(), calculatedEquity: botEngine.calculateEquity() });
   });
 
-  app.post('/api/bot/reset-accumulation', (req, res) => {
+  app.post('/api/bot/reset-accumulation', requireAdminAuth, (req, res) => {
     const result = botEngine.resetAccumulationVault();
-    res.json({ ...result, state: botEngine.state, calculatedEquity: botEngine.calculateEquity() });
+    res.json({ ...result, state: getSanitizedBotState(), calculatedEquity: botEngine.calculateEquity() });
   });
 
-  app.post('/api/bot/trade', async (req, res) => {
+  app.post('/api/bot/trade', requireAdminAuth, async (req, res) => {
     try {
       const { symbol, action, price, amount } = req.body;
       if (symbol && action && price !== undefined && amount !== undefined) {
         await botEngine.executeTrade(symbol, action, Number(price), Number(amount));
-        return res.json({ success: true, state: botEngine.state, calculatedEquity: botEngine.calculateEquity() });
+        return res.json({ success: true, state: getSanitizedBotState(), calculatedEquity: botEngine.calculateEquity() });
       }
       res.status(400).json({ success: false, error: 'Missing required parameters (symbol, action, price, amount)' });
     } catch (err: any) {
@@ -126,7 +221,30 @@ async function startServer() {
     }
   });
 
-  // Dedicated Binance Service Routes (Account Info & Trade History)
+  // Dedicated Binance Service Routes (Account Info & Trade History & 24hr Ticker)
+  app.get('/api/binance/ticker24hr', async (req, res) => {
+    const endpoints = [
+      'https://api.binance.com/api/v3/ticker/24hr',
+      'https://data-api.binance.vision/api/v3/ticker/24hr',
+      'https://api1.binance.com/api/v3/ticker/24hr',
+      'https://api3.binance.com/api/v3/ticker/24hr'
+    ];
+    for (const url of endpoints) {
+      try {
+        const response = await fetch(url);
+        if (response.ok) {
+          const data = await response.json();
+          if (Array.isArray(data) && data.length > 0) {
+            return res.json({ success: true, tickers: data });
+          }
+        }
+      } catch {
+        // try next endpoint
+      }
+    }
+    res.status(500).json({ success: false, error: 'Failed to fetch 24hr ticker data' });
+  });
+
   app.get('/api/binance/account', async (req, res) => {
     try {
       const mode = botEngine.state.binanceMode;
@@ -615,6 +733,9 @@ ${prompt}`,
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  // Transition trading engine to TRADING on server startup
+  await tradingEngine.resumeTrading('Server startup active');
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);

@@ -7,6 +7,7 @@ import { AICalibration } from './AICalibration';
 import { NotificationDiagnostic } from './NotificationDiagnostic';
 import { AICostMonitor } from './AICostMonitor';
 import { apiFetch, safeJson } from '../utils/apiHelper';
+import { getTranslation } from '../utils/i18n';
 import { 
   RefreshCw, 
   CheckCircle2, 
@@ -117,6 +118,8 @@ export function Settings() {
   };
 
   const { 
+    language,
+    setLanguage,
     dataInterval, 
     analysisInterval, 
     setDataInterval, 
@@ -183,6 +186,8 @@ export function Settings() {
     consolidateAccumulation
   } = useTradingStore();
 
+  const t = getTranslation(language);
+
   useEffect(() => {
     const updateTicker = () => {
       if (!lastCheckAt) {
@@ -230,23 +235,27 @@ export function Settings() {
   };
 
   const tabItems: Array<{ id: 'engine' | 'intervals' | 'account' | 'ai' | 'notifications' | 'system' | 'alerts' | 'analyst' | 'calibration'; label: string; icon: any; badge?: string }> = [
-    { id: 'engine', label: 'Execuție & Risc', icon: Activity, badge: executionEngine === 'both' ? 'Hibrid' : 'Scalping' },
-    { id: 'intervals', label: 'Intervale & Server 24/7', icon: Clock },
-    { id: 'account', label: 'Cont & Exchange', icon: CreditCard, badge: binanceMode.toUpperCase() },
-    { id: 'ai', label: 'Modele AI & Gemini', icon: Bot },
-    { id: 'notifications', label: 'Notificări', icon: Bell },
-    { id: 'system', label: 'Sistem & Desktop', icon: Sliders },
-    { id: 'alerts', label: 'Alerts', icon: AlertCircle },
+    { id: 'engine', label: language === 'ro' ? 'Execuție & Risc' : 'Execution & Risk', icon: Activity, badge: executionEngine === 'both' ? (language === 'ro' ? 'Hibrid' : 'Hybrid') : 'Scalping' },
+    { id: 'intervals', label: language === 'ro' ? 'Intervale & Server 24/7' : 'Intervals & 24/7 Server', icon: Clock },
+    { id: 'account', label: language === 'ro' ? 'Cont & Exchange' : 'Account & Exchange', icon: CreditCard, badge: binanceMode.toUpperCase() },
+    { id: 'ai', label: language === 'ro' ? 'Modele AI & Gemini' : 'AI Models & Gemini', icon: Bot },
+    { id: 'notifications', label: language === 'ro' ? 'Notificări' : 'Notifications', icon: Bell },
+    { id: 'system', label: language === 'ro' ? 'Sistem & Desktop' : 'System & Desktop', icon: Sliders },
+    { id: 'alerts', label: language === 'ro' ? 'Alerte' : 'Alerts', icon: AlertCircle },
     { id: 'analyst', label: 'AI Analyst', icon: BrainCircuit },
-    { id: 'calibration', label: 'AI Calibration', icon: Target },
+    { id: 'calibration', label: language === 'ro' ? 'Calibrare AI' : 'AI Calibration', icon: Target },
   ];
 
   return (
     <div className="p-3 sm:p-6 md:p-8 h-full overflow-y-auto max-w-4xl mx-auto pb-32">
       <div className="mb-4 sm:mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <h2 className="text-xl sm:text-2xl font-serif text-white tracking-tight">Setări Platformă G&amp;S-Trade-Bot</h2>
-          <p className="text-zinc-400 mt-0.5 text-xs sm:text-sm">Configurare parametri motor, risc, chei API și intervale de timp.</p>
+          <h2 className="text-xl sm:text-2xl font-serif text-white tracking-tight">
+            {language === 'ro' ? 'Setări Platformă G&S-Trade-Bot' : 'G&S-Trade-Bot Platform Settings'}
+          </h2>
+          <p className="text-zinc-400 mt-0.5 text-xs sm:text-sm">
+            {language === 'ro' ? 'Configurare parametri motor, risc, chei API și intervale de timp.' : 'Configure engine parameters, risk management, API keys, and timer intervals.'}
+          </p>
         </div>
         <button
           onClick={() => {
@@ -254,10 +263,10 @@ export function Settings() {
             window.location.reload();
           }}
           className="px-3.5 py-2 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 font-semibold rounded-xl text-xs flex items-center justify-center gap-2 transition-all cursor-pointer shrink-0 self-start sm:self-auto shadow-sm"
-          title="Curăță starea locală din browser (trading_store) și reîncarcă aplicația"
+          title={language === 'ro' ? "Curăță starea locală din browser (trading_store) și reîncarcă aplicația" : "Clear local browser storage and reload application"}
         >
           <RotateCcw className="w-4 h-4 text-amber-400" />
-          <span>Hard Refresh State (Reset Local)</span>
+          <span>{language === 'ro' ? 'Hard Reset Stare (Reset Local)' : 'Hard Reset State (Local Reset)'}</span>
         </button>
       </div>
 

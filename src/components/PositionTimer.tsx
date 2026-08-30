@@ -9,7 +9,7 @@ interface PositionTimerProps {
   enableMaxNegativeHold?: boolean;
 }
 
-export function PositionTimer({ pos, maxHoldMinutes = 15, maxNegativeHoldMinutes = 1.0, enableMaxNegativeHold = true }: PositionTimerProps) {
+export function PositionTimer({ pos, maxHoldMinutes = 15, maxNegativeHoldMinutes = 1.0, enableMaxNegativeHold = false }: PositionTimerProps) {
   const [now, setNow] = useState(Date.now());
   const fallbackRef = useRef<number>(Date.now());
 

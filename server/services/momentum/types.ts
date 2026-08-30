@@ -58,7 +58,9 @@ export interface BacktestResult {
   
   // Performance from Adjusted Entry
   MFE_Pct: number;
+  mfeTimestamp: number;
   MAE_Pct: number;
+  maeTimestamp: number;
   plus_2h_Pct: number;
   plus_4h_Pct: number;
   plus_8h_Pct: number;
@@ -67,6 +69,7 @@ export interface BacktestResult {
   plus_24h_Pct: number;
   maxDrawdownPct: number;
   netPnL_at_24h_Pct: number;
+  path?: { time: number; highPct: number; lowPct: number; closePct: number }[];
   
   factors: CandidateFactors;
 }

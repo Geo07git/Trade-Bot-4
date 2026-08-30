@@ -1,0 +1,252 @@
+{
+  "active": true,
+  "paperBalanceUSDT": 10000,
+  "startingBalanceUSDT": 10000,
+  "minMomentumScore": 50,
+  "intervalMinutes": 15,
+  "positions": [],
+  "history": [],
+  "lastRunTimestamp": 1788083576842,
+  "logs": [
+    {
+      "timestamp": 1788083577142,
+      "message": "Univers Binance evaluat: 31 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788083576842,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788082706885,
+      "message": "Paper trading cycle completed successfully."
+    },
+    {
+      "timestamp": 1788082706885,
+      "message": "Scan finalizat: 30 simboluri evaluate. Top 5 scoruri: [ NEARUSDT (16.9), NILUSDT (16.0), TRUMPUSDT (15.2), BTCUSDT (12.2), BNBUSDT (12.1) ]"
+    },
+    {
+      "timestamp": 1788082678491,
+      "message": "Univers Binance evaluat: 30 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788082676781,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788082676780,
+      "message": "Paper trading started with interval 15m (min score: 50)."
+    },
+    {
+      "timestamp": 1788082676780,
+      "message": "Reactivating paper trading from state..."
+    },
+    {
+      "timestamp": 1788082412257,
+      "message": "Univers Binance evaluat: 30 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788082410958,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788082410957,
+      "message": "Paper trading started with interval 15m (min score: 50)."
+    },
+    {
+      "timestamp": 1788082410957,
+      "message": "Reactivating paper trading from state..."
+    },
+    {
+      "timestamp": 1788082196517,
+      "message": "Univers Binance evaluat: 30 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788082195176,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788082195175,
+      "message": "Paper trading started with interval 15m (min score: 50)."
+    },
+    {
+      "timestamp": 1788082195175,
+      "message": "Reactivating paper trading from state..."
+    },
+    {
+      "timestamp": 1788081335097,
+      "message": "Univers Binance evaluat: 30 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788081332588,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788081332587,
+      "message": "Paper trading started with interval 15m (min score: 50)."
+    },
+    {
+      "timestamp": 1788081332587,
+      "message": "Reactivating paper trading from state..."
+    },
+    {
+      "timestamp": 1788080989317,
+      "message": "Univers Binance evaluat: 30 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788080988072,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788080988071,
+      "message": "Paper trading started with interval 15m (min score: 50)."
+    },
+    {
+      "timestamp": 1788080988071,
+      "message": "Reactivating paper trading from state..."
+    },
+    {
+      "timestamp": 1788080544167,
+      "message": "Univers Binance evaluat: 30 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788080542815,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788080542814,
+      "message": "Paper trading started with interval 15m (min score: 50)."
+    },
+    {
+      "timestamp": 1788080542814,
+      "message": "Reactivating paper trading from state..."
+    },
+    {
+      "timestamp": 1788080298198,
+      "message": "Univers Binance evaluat: 30 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788080296850,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788080296849,
+      "message": "Paper trading started with interval 15m (min score: 50)."
+    },
+    {
+      "timestamp": 1788080296849,
+      "message": "Reactivating paper trading from state..."
+    },
+    {
+      "timestamp": 1788080028339,
+      "message": "Univers Binance evaluat: 30 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788080027855,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788079158317,
+      "message": "Paper trading cycle completed successfully."
+    },
+    {
+      "timestamp": 1788079158317,
+      "message": "Scan finalizat: 31 simboluri evaluate. Top 5 scoruri: [ NILUSDT (17.3), TUTUSDT (12.6), ZKPUSDT (11.5), USDCUSDT (11.0), RLUSDUSDT (10.1) ]"
+    },
+    {
+      "timestamp": 1788079130201,
+      "message": "Univers Binance evaluat: 31 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788079127796,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788079127795,
+      "message": "Paper trading started with interval 15m (min score: 50)."
+    },
+    {
+      "timestamp": 1788079127795,
+      "message": "Reactivating paper trading from state..."
+    },
+    {
+      "timestamp": 1788078311591,
+      "message": "Univers Binance evaluat: 31 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788078311278,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788077411600,
+      "message": "Paper trading cycle completed successfully."
+    },
+    {
+      "timestamp": 1788077411600,
+      "message": "Scan finalizat: 30 simboluri evaluate. Top 5 scoruri: [ ENSOUSDT (16.6), USDCUSDT (12.8), ZECUSDT (10.8), ENAUSDT (9.0), ONGUSDT (8.3) ]"
+    },
+    {
+      "timestamp": 1788077411582,
+      "message": "Univers Binance evaluat: 30 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788077411277,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788076541982,
+      "message": "Paper trading cycle completed successfully."
+    },
+    {
+      "timestamp": 1788076541982,
+      "message": "Scan finalizat: 30 simboluri evaluate. Top 5 scoruri: [ UNIUSDT (15.7), FETUSDT (11.2), PROMUSDT (10.3), XRPUSDT (9.7), TRXUSDT (9.4) ]"
+    },
+    {
+      "timestamp": 1788076512493,
+      "message": "Univers Binance evaluat: 30 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788076511225,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788076511224,
+      "message": "Paper trading started with interval 15m (min score: 50)."
+    },
+    {
+      "timestamp": 1788076511224,
+      "message": "Reactivating paper trading from state..."
+    },
+    {
+      "timestamp": 1788075704893,
+      "message": "Paper trading cycle completed successfully."
+    },
+    {
+      "timestamp": 1788075704893,
+      "message": "Scan finalizat: 30 simboluri evaluate. Top 5 scoruri: [ UNIUSDT (14.0), DEXEUSDT (12.2), TRXUSDT (10.0), PROMUSDT (9.8), FETUSDT (7.4) ]"
+    },
+    {
+      "timestamp": 1788075679863,
+      "message": "Univers Binance evaluat: 30 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788075679507,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788075678317,
+      "message": "Univers Binance evaluat: 30 simboluri îndeplinesc pragul de lichiditate 24h (min $10.0M)."
+    },
+    {
+      "timestamp": 1788075677981,
+      "message": "Running paper trading cycle..."
+    },
+    {
+      "timestamp": 1788075677981,
+      "message": "Paper trading started with interval 15m (min score: 50)."
+    },
+    {
+      "timestamp": 1788075677981,
+      "message": "Configurație actualizată: Scor Minim = 50, Interval = 15m"
+    }
+  ]
+}

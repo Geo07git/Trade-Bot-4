@@ -1,4 +1,4 @@
-export type ViewState = 'superDashboard' | 'dashboard' | 'scalping' | 'momentumPaper' | 'journal' | 'analyst' | 'alerts' | 'logs' | 'settings' | 'calibration';
+export type ViewState = 'bloomberg' | 'superDashboard' | 'dashboard' | 'strategy' | 'scalping' | 'audit' | 'momentumPaper' | 'journal' | 'analyst' | 'alerts' | 'logs' | 'settings' | 'calibration' | 'backtest';
 
 export type ExecutionEngineMode = 'both' | 'scalping';
 
@@ -216,6 +216,33 @@ export interface BacktestResult {
   winRate: number;
   trades: number;
   chartData: { time: string; equity: number }[];
+}
+
+export interface MomentumBacktestResult {
+  symbol: string;
+  signalTimestamp: number;
+  entryTimestamp: number;
+  rawEntryPrice: number;
+  adjustedEntryPrice: number;
+  entryFeePct: number;
+  exitFeePct: number;
+  entrySlippagePct: number;
+  exitSlippagePct: number;
+  totalTradingCostPct: number;
+  MFE_Pct: number;
+  mfeTimestamp: number;
+  MAE_Pct: number;
+  maeTimestamp: number;
+  plus_2h_Pct: number;
+  plus_4h_Pct: number;
+  plus_8h_Pct: number;
+  plus_12h_Pct: number;
+  plus_20h_Pct: number;
+  plus_24h_Pct: number;
+  maxDrawdownPct: number;
+  netPnL_at_24h_Pct: number;
+  path?: { time: number; highPct: number; lowPct: number; closePct: number }[];
+  factors: any;
 }
 
 export interface SignalJournalEntry {

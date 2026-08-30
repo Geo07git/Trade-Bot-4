@@ -16,9 +16,13 @@ export async function runBacktest(
     console.log(`Processing chunk ${i / CHUNK_SIZE + 1}/${Math.ceil(symbols.length / CHUNK_SIZE)}`);
     
     for (const symbol of chunk) {
-      const k15m = await fetchHistoricalKlinesForMomentum(symbol, '15m');
-      const k1h = await fetchHistoricalKlinesForMomentum(symbol, '1h');
-      const k4h = await fetchHistoricalKlinesForMomentum(symbol, '4h');
+      const bufferMs = 30 * 24 * 60 * 60 * 1000; // 30 days buffer for indicators like EMA/RSI
+      const fetchStart = startTime - bufferMs;
+      const fetchEnd15m = endTime + 24 * 60 * 60 * 1000; // 24h extra for PnL calculation
+
+      const k15m = await fetchHistoricalKlinesForMomentum(symbol, '15m', fetchStart, fetchEnd15m);
+      const k1h = await fetchHistoricalKlinesForMomentum(symbol, '1h', fetchStart, endTime);
+      const k4h = await fetchHistoricalKlinesForMomentum(symbol, '4h', fetchStart, endTime);
 
       // State tracker for this symbol in backtest
       let isPositionOpen = false;
@@ -52,17 +56,47 @@ export async function runBacktest(
           positionEntryPrice = adjustedEntryPrice;
           positionEntryTime = entryKline.openTime;
 
-          // 3. Scan forward for MFE, MAE, PnL
+          // 3. Scan forward for MFE, MAE, path, checkpoints, and PnL
           let mfe = 0;
+          let mfeTimestamp = entryKline.openTime;
           let mae = 0;
+          let maeTimestamp = entryKline.openTime;
           let pnl24h = 0;
 
           const futureKlines = k15m.filter(k => k.openTime > entryKline.openTime && k.openTime <= entryKline.openTime + 24 * 60 * 60 * 1000);
+          const path: { time: number; highPct: number; lowPct: number; closePct: number }[] = [];
 
           for (const k of futureKlines) {
-            mfe = Math.max(mfe, ((k.high / adjustedEntryPrice) - 1) * 100);
-            mae = Math.min(mae, ((k.low / adjustedEntryPrice) - 1) * 100);
+            const highPct = ((k.high / adjustedEntryPrice) - 1) * 100;
+            const lowPct = ((k.low / adjustedEntryPrice) - 1) * 100;
+            const closePct = ((k.close / adjustedEntryPrice) - 1) * 100;
+
+            path.push({ time: k.openTime, highPct, lowPct, closePct });
+
+            if (highPct > mfe) {
+              mfe = highPct;
+              mfeTimestamp = k.openTime;
+            }
+            if (lowPct < mae) {
+              mae = lowPct;
+              maeTimestamp = k.openTime;
+            }
           }
+
+          const getReturnAtOffset = (hours: number) => {
+            if (futureKlines.length === 0) return 0;
+            const targetTime = entryKline.openTime + hours * 60 * 60 * 1000;
+            const closest = futureKlines.reduce((prev, curr) => {
+              return (Math.abs(curr.openTime - targetTime) < Math.abs(prev.openTime - targetTime) ? curr : prev);
+            }, futureKlines[0]);
+            return ((closest.close / adjustedEntryPrice) - 1) * 100;
+          };
+
+          const plus_2h_Pct = getReturnAtOffset(2);
+          const plus_4h_Pct = getReturnAtOffset(4);
+          const plus_8h_Pct = getReturnAtOffset(8);
+          const plus_12h_Pct = getReturnAtOffset(12);
+          const plus_20h_Pct = getReturnAtOffset(20);
 
           const lastKline = futureKlines[futureKlines.length - 1] || entryKline;
           const exitPrice = lastKline.close * (1 - config.exitSlippagePct / 100);
@@ -83,15 +117,18 @@ export async function runBacktest(
             exitSlippagePct: config.exitSlippagePct,
             totalTradingCostPct: config.entryFeePct + config.exitFeePct + config.entrySlippagePct + config.exitSlippagePct,
             MFE_Pct: mfe,
+            mfeTimestamp,
             MAE_Pct: mae,
-            plus_2h_Pct: 0, // Simplified for now
-            plus_4h_Pct: 0,
-            plus_8h_Pct: 0,
-            plus_12h_Pct: 0,
-            plus_20h_Pct: 0,
+            maeTimestamp,
+            plus_2h_Pct,
+            plus_4h_Pct,
+            plus_8h_Pct,
+            plus_12h_Pct,
+            plus_20h_Pct,
             plus_24h_Pct: pnl24h,
             maxDrawdownPct: mae,
             netPnL_at_24h_Pct: pnl24h,
+            path,
             factors: {
               symbol,
               timestamp_T: t,

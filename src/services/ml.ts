@@ -2609,8 +2609,8 @@ export async function runRealStrategyAnalysis(
   const range20pPct = low20 > 0 && high20 > low20 ? ((high20 - low20) / low20) * 100 : 0;
   const lastVolRatio = volumeEmaArr[klines.length - 1] ? klines[klines.length - 1].volume / volumeEmaArr[klines.length - 1] : 1;
 
-  const minAtrPctThreshold = modelParams.minAtrPctThreshold !== undefined ? modelParams.minAtrPctThreshold : 0.30;
-  const minRange20pThreshold = modelParams.minRange20pThreshold !== undefined ? modelParams.minRange20pThreshold : 0.55;
+  const minAtrPctThreshold = modelParams.minAtrPctThreshold !== undefined ? modelParams.minAtrPctThreshold : 0.05;
+  const minRange20pThreshold = modelParams.minRange20pThreshold !== undefined ? modelParams.minRange20pThreshold : 0.20;
 
   const marketRegime = detectMarketRegime(
     lastAdx,
@@ -2778,7 +2778,7 @@ export async function runRealStrategyAnalysis(
     const isStrongReversal = reversalSignal.isBullishReversal || reversalSignal.isBearishReversal;
     if (!isBreakoutVolume && !isStrongReversal) {
       strictVetoTriggered = true;
-      vetoReason = `🧊 VETO Regim Stagnare (NO-TRADE): ATR (${lastAtrPct.toFixed(2)}% < ${minAtrPctThreshold.toFixed(2)}%) sau Range 20p (${range20pPct.toFixed(2)}% < ${minRange20pThreshold.toFixed(2)}%) - Volatilitate prea scăzută pentru acoperirea comisioanelor (~0.15%-0.20%). Conservare capital.`;
+      vetoReason = `🧊 VETO Regim Stagnare (NO-TRADE): ${marketRegime.stagnationReason} - Volatilitate prea scăzută.`;
     }
   }
 

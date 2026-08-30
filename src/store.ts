@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware';
 import { registerSymbolCooldown } from './services/ml';
 import { scanClientSideMarketOpportunities } from './services/api';
 import { apiFetch, safeJson } from './utils/apiHelper';
+import { Language } from './utils/i18n';
 import { ViewState, MarketOpportunity, SymbolPerformanceStat, ScalpingConfig, ExecutionEngineMode, MlModelSelection, Position, ScalpingPreset } from './types';
 
 export interface WatchlistItem {
@@ -137,6 +138,8 @@ interface TradingStore {
   toggleAccumulationTarget: (enabled?: boolean) => void;
   consolidateAccumulation: () => Promise<any>;
   resetAccumulationVault: () => Promise<any>;
+  language: Language;
+  setLanguage: (lang: Language) => void;
   syncBinanceBalance: () => Promise<any>;
   checkEnginePulse: () => Promise<any>;
   triggerScanOpportunities: () => Promise<any>;
@@ -146,7 +149,9 @@ interface TradingStore {
 export const useTradingStore = create<TradingStore>()(
   persist(
     (set) => ({
-  currentView: 'dashboard',
+  language: 'en',
+  setLanguage: (lang) => set({ language: lang }),
+  currentView: 'bloomberg',
   balance: 10000,
   initialBalance: 10000,
   accumulationBalance: 0,
@@ -462,63 +467,8 @@ export const useTradingStore = create<TradingStore>()(
         }
       })
       .catch((err) => {
-        console.warn('[Trade Execution] Server sync deferred (optimistic state applied):', err?.message || err);
+        console.error('[Trade Execution API Error]:', err?.message || err);
       });
-
-    set((state) => {
-      // Simplified paper trading optimistic UI update
-      const cost = price * amount;
-      if (action === 'BUY' && state.balance >= cost) {
-        const existing = state.positions.find(p => p.symbol === symbol);
-        let newPositions = [...state.positions];
-        if (existing) {
-          newPositions = state.positions.map(p => p.symbol === symbol ? { ...p, amount: p.amount + amount, currentPrice: price } : p);
-        } else {
-          newPositions.push({ symbol, amount, entryPrice: price, currentPrice: price, openedAt: Date.now() });
-        }
-        
-        const newBalance = state.balance - cost;
-        const newEquity = newBalance + newPositions.reduce((acc, pos) => acc + (pos.amount * (pos.currentPrice || pos.entryPrice)), 0);
-        
-        const timeFormatter = new Intl.DateTimeFormat('en-US', {
-          timeZone: state.timezone || 'Europe/Bucharest',
-          hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true
-        });
-        const time = timeFormatter.format(new Date());
-
-        return { 
-          balance: newBalance, 
-          positions: newPositions,
-          logs: [{ time, message: `Cumpărat ${amount} ${symbol} @ $${price}`, type: 'success', equity: newEquity }, ...state.logs]
-        };
-      } else if (action === 'SELL') {
-        const existing = state.positions.find(p => p.symbol === symbol);
-        if (existing && existing.amount >= amount) {
-          const pnlPercent = ((price - existing.entryPrice) / existing.entryPrice) * 100;
-          registerSymbolCooldown(symbol, pnlPercent, pnlPercent >= 0 ? `Take Profit (+${pnlPercent.toFixed(2)}%)` : `Stop Loss (${pnlPercent.toFixed(2)}%)`);
-
-          const newPositions = state.positions.map(p => 
-            p.symbol === symbol ? { ...p, amount: p.amount - amount } : p
-          ).filter(p => p.amount > 0);
-          
-          const newBalance = state.balance + cost;
-          const newEquity = newBalance + newPositions.reduce((acc, pos) => acc + (pos.amount * (pos.currentPrice || pos.entryPrice)), 0);
-          
-          const timeFormatter = new Intl.DateTimeFormat('en-US', {
-            timeZone: state.timezone || 'Europe/Bucharest',
-            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true
-          });
-          const time = timeFormatter.format(new Date());
-
-          return { 
-            balance: newBalance,
-            positions: newPositions,
-            logs: [{ time, message: `Vândut ${amount} ${symbol} @ $${price}`, type: 'warning', equity: newEquity }, ...state.logs]
-          };
-        }
-      }
-      return state;
-    });
   },
 
   addLog: (message, type = 'info') => set((state) => {
@@ -936,195 +886,23 @@ export const useTradingStore = create<TradingStore>()(
     }
   },
   runClientEnginePulse: () => {
+    // Decoupled UI architecture: all execution and order management is handled exclusively by the server engine.
+    // Client pulse only updates UI opportunity timers and visual indicators without placing trades.
     const state = useTradingStore.getState();
-    if (state.circuitBreakerTriggered) return;
-
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-    let newBalance = state.balance;
-    let newPositions = [...state.positions];
-    let newLogs = [...state.logs];
-    let newJournal = [...(state.signalJournal || [])];
-    let newTradeHistory = [...(state.tradeHistory || [])];
-
-    // 1. Evaluate open positions for TP / SL
-    let positionsChanged = false;
-    newPositions = newPositions.map(pos => {
-      const opp = state.marketOpportunities.find(o => o.symbol === pos.symbol);
-      const watch = state.watchlist.find(w => w.symbol === pos.symbol);
-      const currentPrice = opp?.price || watch?.price || pos.currentPrice || pos.entryPrice;
-
-      const pnlUSD = (currentPrice - pos.entryPrice) * pos.amount;
-      const pnlPercent = pos.entryPrice > 0 ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100 : 0;
-
-      // Minute profit logging
-      const openedAtMs = pos.openedAt || Date.now();
-      const currentMinute = Math.floor((Date.now() - openedAtMs) / 60000);
-      let minuteProfitLogs = pos.minuteProfitLogs ? [...pos.minuteProfitLogs] : [];
-      let lastMinuteLogged = pos.lastMinuteLogged || 0;
-
-      if (currentMinute >= 1 && currentMinute > lastMinuteLogged) {
-        lastMinuteLogged = currentMinute;
-        minuteProfitLogs.push({
-          minute: currentMinute,
-          pnlPercent: parseFloat(pnlPercent.toFixed(2)),
-          pnl: parseFloat(pnlUSD.toFixed(2)),
-          price: currentPrice,
-          timestamp: new Date().toISOString()
-        });
-      }
-
-      let negEnteredAt = pos.negativeEnteredAt;
-      if (pnlPercent < 0) {
-        if (!negEnteredAt) negEnteredAt = Date.now();
-      } else {
-        negEnteredAt = undefined;
-      }
-
-      const tpTarget = state.scalpingConfig?.targetTakeProfit || 1.5;
-      const slTarget = state.stopLossPercent || 2.0;
-      const maxNegHold = state.scalpingConfig?.maxNegativeHoldMinutes ?? 1.0;
-      const enableMaxNegHold = state.scalpingConfig?.enableMaxNegativeHold ?? true;
-      const negDurationMinutes = negEnteredAt ? (Date.now() - negEnteredAt) / 60000 : 0;
-      const isNegHoldExpired = enableMaxNegHold && pnlPercent < 0 && negEnteredAt && maxNegHold > 0 && negDurationMinutes >= maxNegHold;
-
-      if (pnlPercent >= tpTarget || pnlPercent <= -slTarget || isNegHoldExpired) {
-        positionsChanged = true;
-        const isTP = pnlPercent > 0;
-        const closeReason = isNegHoldExpired 
-          ? `Timp Minus Expirat (${negDurationMinutes.toFixed(1)}m >= ${maxNegHold}m)`
-          : (isTP ? 'Target Take Profit Atins' : 'Stop Loss Declanșat');
-        
-        const closeLog = `[${isNegHoldExpired ? 'TIMP MINUS EXPIRAT ⏳' : (isTP ? 'TAKE PROFIT 🎯' : 'STOP LOSS 🛑')}] Vândut ${pos.amount.toFixed(4)} ${pos.symbol} @ $${currentPrice.toFixed(4)}. PnL: ${pnlUSD >= 0 ? '+' : ''}$${pnlUSD.toFixed(2)} (${pnlPercent.toFixed(2)}%)`;
-        
-        newBalance += pos.amount * currentPrice;
-        
-        newLogs.unshift({
-          time: timeStr,
-          message: closeLog,
-          type: isTP ? 'success' : 'warning',
-          equity: newBalance
-        });
-
-        newTradeHistory.unshift({
-          id: `trade_${Date.now()}_${pos.symbol}`,
-          timestamp: new Date().toISOString(),
-          time: timeStr,
-          symbol: pos.symbol,
-          type: 'SELL',
-          price: currentPrice,
-          amount: pos.amount,
-          total: pos.amount * currentPrice,
-          pnl: pnlUSD,
-          pnlPercent: pnlPercent,
-          reason: closeReason,
-          minuteProfitLogs: minuteProfitLogs
-        } as any);
-
-        return null;
-      }
-
-      return { ...pos, currentPrice, negativeEnteredAt: negEnteredAt, lastMinuteLogged, minuteProfitLogs };
-    }).filter(Boolean) as Position[];
-
-    // 2. Evaluate signals & Auto-Trading when enabled
-    if (state.autoTradingActive && state.marketOpportunities.length > 0) {
-      const openSymbols = new Set(newPositions.map(p => p.symbol));
-      const candidates = state.marketOpportunities.filter(o => !openSymbols.has(o.symbol)).slice(0, 4);
-
-      candidates.forEach(cand => {
-        const price = cand.price;
-        const rfProb = cand.rfProb || 65;
-        const metaProb = cand.metaProb || 55;
-        const reversalScore = cand.patternScore || 60;
-        const opportunityScore = cand.opportunityScore || 60;
-
-        let action: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
-        let vetoReason = '';
-        const explanation: string[] = [
-          `Analiză candidat: ${cand.symbol} la $${price}`,
-          `Pattern Detectat: ${cand.patternName || 'Impuls Momentum'} (Scor: ${reversalScore}/100)`,
-          `Probabilitate Model RF: ${rfProb}% | Meta-Predictor: ${metaProb}%`
-        ];
-
-        if (opportunityScore >= 55 && rfProb >= 60) {
-          action = 'BUY';
-          explanation.push(`✅ Semnal de Cumpărare APROBAT! Toate verificările ML au fost trecute cu succes.`);
-        } else if (rfProb < 60) {
-          vetoReason = `🚫 Veto ML: Probabilitatea RF (${rfProb}%) este sub pragul minim de 60%`;
-          explanation.push(vetoReason);
-        } else {
-          vetoReason = `🚫 Veto Oportunitate: Scor oportunitate (${opportunityScore}/100) insuficient`;
-          explanation.push(vetoReason);
+    if (state.marketOpportunities && state.marketOpportunities.length > 0) {
+      const updatedPositions = state.positions.map(pos => {
+        const opp = state.marketOpportunities.find(o => o.symbol === pos.symbol);
+        const watch = state.watchlist.find(w => w.symbol === pos.symbol);
+        const currentPrice = opp?.price || watch?.price || pos.currentPrice;
+        if (currentPrice && currentPrice !== pos.currentPrice) {
+          const pnlUSD = (currentPrice - pos.entryPrice) * pos.amount;
+          const pnlPercent = pos.entryPrice > 0 ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100 : 0;
+          return { ...pos, currentPrice, pnl: pnlUSD, pnlPercent };
         }
-
-        const journalId = `sig_${Date.now()}_${cand.symbol}`;
-        const existingIdx = newJournal.findIndex(j => j.symbol === cand.symbol && j.time === timeStr);
-        if (existingIdx === -1) {
-          newJournal.unshift({
-            id: journalId,
-            timestamp: new Date().toISOString(),
-            time: timeStr,
-            symbol: cand.symbol,
-            price,
-            rfProb,
-            metaProb,
-            reversalScore,
-            isReversal: cand.patternScore > 80,
-            reversalType: cand.priceChangePercent >= 0 ? 'bullish' : 'bearish',
-            newsSentiment: cand.priceChangePercent >= 2 ? 'bullish' : 'neutral',
-            finalAction: action,
-            vetoReason: vetoReason || 'Niciun veto. Ordin executat.',
-            explanation
-          });
-        }
-
-        if (action === 'BUY' && newBalance > 50 && newPositions.length < 5) {
-          const tradeAmountUSD = Math.min(newBalance * 0.15, 500);
-          const amount = tradeAmountUSD / price;
-
-          newBalance -= tradeAmountUSD;
-          newPositions.push({
-            symbol: cand.symbol,
-            amount,
-            entryPrice: price,
-            currentPrice: price
-          });
-
-          const buyLog = `[SIGNAL ML BUY] Cumpărat ${amount.toFixed(4)} ${cand.symbol} @ $${price.toFixed(4)} (Total: $${tradeAmountUSD.toFixed(2)} USDT). Probabilitate ML: ${rfProb}%.`;
-          newLogs.unshift({
-            time: timeStr,
-            message: buyLog,
-            type: 'success',
-            equity: newBalance + newPositions.reduce((a, p) => a + (p.amount * p.currentPrice), 0)
-          });
-
-          newTradeHistory.unshift({
-            id: `trade_${Date.now()}_${cand.symbol}`,
-            timestamp: new Date().toISOString(),
-            time: timeStr,
-            symbol: cand.symbol,
-            type: 'BUY',
-            price,
-            amount,
-            total: tradeAmountUSD,
-            pnl: 0,
-            pnlPercent: 0,
-            reason: `Execuție Semnal Autonom ML (${rfProb}%)`
-          });
-        }
+        return pos;
       });
+      set({ positions: updatedPositions });
     }
-
-    const limit = state.maxLogs || 1000;
-    set({
-      balance: newBalance,
-      positions: newPositions,
-      logs: newLogs.slice(0, limit),
-      signalJournal: newJournal.slice(0, limit),
-      tradeHistory: newTradeHistory.slice(0, limit)
-    });
   }
     }),
     {

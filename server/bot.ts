@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import Binance from 'binance-api-node';
+import { tradingEngine, signalEngine, riskEngine, db } from './engine';
+import { BinanceAdapter } from './engine/adapters/BinanceAdapter';
 import { getAccountInfo } from './services/BinanceService';
 import { journalService } from './services/JournalService';
 import { 
@@ -1032,8 +1034,8 @@ class ServerBotEngine {
         minRfProb: 70,
         minMetaScore: 70,
         stopLossPercent: 1.0,
-        targetTakeProfit: 3.0,
-        trailingStopActivation: 1.5,
+        targetTakeProfit: 0.0,
+        trailingStopActivation: 5.0,
         trailingStopDistance: 0.5,
         breakEvenActivation: 1.0,
         positionSizePercent: 5.0,
@@ -1557,10 +1559,24 @@ class ServerBotEngine {
       }
     }
     if (newConfig.reportConfig !== undefined) this.state.reportConfig = { ...this.state.reportConfig, ...newConfig.reportConfig };
-    if (newConfig.apiKey !== undefined) this.state.apiKey = newConfig.apiKey;
-    if (newConfig.apiSecret !== undefined) this.state.apiSecret = newConfig.apiSecret;
-    if (newConfig.testnetApiKey !== undefined) this.state.testnetApiKey = newConfig.testnetApiKey;
-    if (newConfig.testnetApiSecret !== undefined) this.state.testnetApiSecret = newConfig.testnetApiSecret;
+    if (newConfig.apiKey !== undefined && newConfig.apiKey !== '••••••••' && newConfig.apiKey !== '') {
+      this.state.apiKey = newConfig.apiKey;
+    }
+    if (newConfig.apiSecret !== undefined && newConfig.apiSecret !== '••••••••' && newConfig.apiSecret !== '') {
+      this.state.apiSecret = newConfig.apiSecret;
+    }
+    if (newConfig.testnetApiKey !== undefined && newConfig.testnetApiKey !== '••••••••' && newConfig.testnetApiKey !== '') {
+      this.state.testnetApiKey = newConfig.testnetApiKey;
+    }
+    if (newConfig.testnetApiSecret !== undefined && newConfig.testnetApiSecret !== '••••••••' && newConfig.testnetApiSecret !== '') {
+      this.state.testnetApiSecret = newConfig.testnetApiSecret;
+    }
+    if (newConfig.telegramBotToken !== undefined && newConfig.telegramBotToken !== '••••••••' && newConfig.telegramBotToken !== '') {
+      this.state.telegramBotToken = newConfig.telegramBotToken;
+    }
+    if (newConfig.discordWebhookUrl !== undefined && newConfig.discordWebhookUrl !== '••••••••' && newConfig.discordWebhookUrl !== '') {
+      this.state.discordWebhookUrl = newConfig.discordWebhookUrl;
+    }
     
     // Switch binance mode and auto-reset circuit breaker
     if (newConfig.binanceMode !== undefined) {
@@ -1716,6 +1732,12 @@ class ServerBotEngine {
         this.consecutiveApiErrors = 0; // Reset error counter on successful API sync
         await this.reconcilePositionsWithBinance(account.balances);
 
+        const exchangeBalancesMap: Record<string, number> = {};
+        for (const b of account.balances) {
+          const free = parseFloat((b as any).free) || 0;
+          if (free > 0) exchangeBalancesMap[(b as any).asset] = free;
+        }
+
         const usdtAsset = account.balances.find((b: any) => b.asset === 'USDT');
         if (usdtAsset) {
           const freeUsdt = parseFloat(usdtAsset.free) || 0;
@@ -1740,6 +1762,7 @@ class ServerBotEngine {
               'info'
             );
             this.savePersistedState();
+            await tradingEngine.reconcile(this.state.positions, fallbackBalance, { USDT: fallbackBalance });
             return { success: true, balance: fallbackBalance, total: fallbackBalance, lowTestnetBalance: true };
           }
 
@@ -1757,6 +1780,10 @@ class ServerBotEngine {
             'success'
           );
           this.savePersistedState();
+
+          // Reconcile with TradingEngine
+          await tradingEngine.reconcile(this.state.positions, freeUsdt, exchangeBalancesMap);
+
           return { success: true, balance: freeUsdt, total: totalUsdt };
         } else {
           this.addLog(`[BINANCE ${mode.toUpperCase()}] S-a realizat conexiunea, dar activul USDT nu s-a găsit în balanțe.`, 'warning');
@@ -2184,6 +2211,47 @@ class ServerBotEngine {
       return;
     }
 
+    // Engine state check
+    if (action === 'BUY' && !tradingEngine.engines.state.canTrade()) {
+      const currentState = tradingEngine.engines.state.getState();
+      this.addLog(`[ENGINE ${currentState} 🔒] Cumpărarea pentru ${symbol} a fost blocată deoarece starea Trading Engine este ${currentState} (${tradingEngine.engines.state.getReason()}).`, 'warning');
+      await db.logEvent('TRADE_BLOCKED_ENGINE_STATE', { symbol, action, price, amount, state: currentState, reason: tradingEngine.engines.state.getReason() }, symbol, 'TradeBot', 'BLOCK');
+      return;
+    }
+
+    // CENTRALIZED EXECUTION: Risk Engine Evaluation (P0 Mandate)
+    const hasOpenPosition = this.state.positions.some(p => p.symbol === symbol && p.amount > 0);
+    const riskReq = {
+      symbol,
+      signal: {
+        confidence: meta?.mlProbability || 75,
+        metaScore: meta?.metaTradeScore || 75,
+        mlRes: {}
+      } as any,
+      scalpConfig: (this.state.scalpingConfig || { active: true, minRfProb: 70, minMetaScore: 70 }) as any,
+      currentBalanceUSDT: this.state.balance,
+      hasOpenPosition: action === 'BUY' && hasOpenPosition,
+      globalAutoTradingActive: this.state.autoTradingActive !== false
+    };
+
+    const riskResult = riskEngine.evaluateOrder(riskReq);
+    if (riskResult.decision !== 'ALLOW') {
+      this.addLog(`[RISK ENGINE VETO 🛑] Ordinul ${symbol} (${action}) respins: ${riskResult.reason} [Veto: ${riskResult.vetoType}]`, 'warning');
+      await db.logEvent('ORDER_REJECTED_RISK', { symbol, action, price, amount, reason: riskResult.reason, vetoType: riskResult.vetoType }, symbol, 'TradeBot', 'BLOCK');
+      return;
+    }
+
+    // Log order creation intent
+    await db.logEvent('ORDER_CREATED', {
+      symbol,
+      side: action,
+      price,
+      amount,
+      strategy: meta?.strategy || 'TradeBot',
+      metaTradeScore: meta?.metaTradeScore,
+      entryReason: meta?.entryReason
+    }, symbol, 'TradeBot', action);
+
     // 1. EXECUTION LOCK: Prevent concurrent execution for the same symbol
     if (this.executingSymbols.has(symbol)) {
       this.addLog(`[EXECUTION LOCK 🔒] Ordin concurent pentru ${symbol} în curs de procesare. Se previne duplicarea.`, 'warning');
@@ -2539,6 +2607,17 @@ class ServerBotEngine {
           accountingStatus: feeUnknown ? 'ACCOUNTING_INCOMPLETE' : 'SETTLED'
         });
 
+        await db.logEvent('POSITION_OPENED', {
+          symbol,
+          entryPrice: finalPrice,
+          amount: finalAmount,
+          fee: finalFee,
+          strategy: detectedStrategy,
+          metaScore: meta?.metaTradeScore,
+          tradeGrade: qualityRes.grade,
+          mode: this.state.binanceMode
+        }, symbol, 'TradeBot', 'BUY');
+
         const currentEquity = this.calculateEquity();
         this.addLog(`[SERVER BOT] Cumpărat ${finalAmount.toFixed(4)} ${symbol} @ $${finalPrice.toFixed(4)} (Comision: $${finalFee.toFixed(4)}) | Trade Quality: Grade ${qualityRes.grade}`, 'success', currentEquity);
       } else if (action === 'SELL') {
@@ -2609,6 +2688,18 @@ class ServerBotEngine {
           if (this.state.tradeHistory.length > 1000) {
             this.state.tradeHistory.shift();
           }
+
+          await db.logEvent('POSITION_CLOSED', {
+            symbol,
+            entryPrice,
+            exitPrice: finalPrice,
+            amount: qtyToClose,
+            netPnl,
+            pnlPercent,
+            mfePct,
+            maePct,
+            exitReason: meta?.entryReason || 'Exit Order'
+          }, symbol, 'TradeBot', 'SELL');
 
           const cdMin = registerSymbolCooldown(symbol, pnlPercent, meta?.entryReason || `Ieșire Poziție (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%)`, finalPrice);
           this.addLog(
@@ -2977,8 +3068,8 @@ class ServerBotEngine {
           // decided the execution watchlist was partly based on fabricated data for
           // anyone beyond rank 10. Now matches the scope already used for
           // SignalJournal logging below (top50Candidates.slice(0, 25)).
-          if (idx < 25 || realStrategyCache.has(`${op.symbol.toUpperCase()}_rf`)) {
-            const mlRes = await getCachedRealStrategyAnalysis(op.symbol);
+          if (idx < 25) {
+            const mlRes = await signalEngine.getCachedRealStrategyAnalysis(op.symbol);
             if (mlRes) {
               op.rfProb = mlRes.rfProb || op.rfProb;
               op.metaProb = mlRes.metaProb || op.metaProb;
@@ -3602,7 +3693,7 @@ class ServerBotEngine {
         // wasn't guaranteed to see every open position. Moved here so there is a single
         // exit engine, run every heartbeat tick, that guarantees every open position is
         // evaluated — see the removed duplicate block in runMLAnalysis for details.
-        else if (!isGridStrategy && pnlPercent >= (scalpConfig?.targetTakeProfit ?? 3.0)) {
+        else if (!isGridStrategy && (scalpConfig?.targetTakeProfit ?? 3.0) > 0 && pnlPercent >= (scalpConfig?.targetTakeProfit ?? 3.0)) {
           const targetTP = scalpConfig?.targetTakeProfit ?? 3.0;
           this.addLog(`[Take Profit Țintă Fixă 🎯] Țintă de profit configurată atinsă pentru ${symbol} (+${pnlPercent.toFixed(2)}% >= +${targetTP}%). Executăm vânzare.`, 'success');
           await this.executeTrade(symbol, 'SELL', livePrice, amountToSell, {
@@ -3738,7 +3829,7 @@ class ServerBotEngine {
 
       // Phase 1: Batched Signal Generation & Price Fetching (batches of 3 items to optimize network & CPU load)
       const BATCH_SIZE_ML = 5;
-      const itemsWithSignals: Array<{ item: WatchlistItem; currentPrice: number; signal: any; mlRes: any; oppScore: number; oppInfo: any }> = [];
+      const itemsWithSignals: Array<{ item: WatchlistItem; currentPrice: number; signal: any; mlRes: any; oppScore: number; oppInfo: any; fullSignalObj?: any }> = [];
 
       for (let i = 0; i < activeItems.length; i += BATCH_SIZE_ML) {
         const batch = activeItems.slice(i, i + BATCH_SIZE_ML);
@@ -3753,37 +3844,21 @@ class ServerBotEngine {
             }
 
             const currentPrice = price || getFallbackBasePrice(item.symbol);
-            const mlRes = await getCachedRealStrategyAnalysis(item.symbol);
-            
-            const oppInfo = this.state.marketOpportunities.find(o => o.symbol === item.symbol);
+
+            const oppInfo = this.state.marketOpportunities?.find(o => o.symbol === item.symbol);
             const oppScore = oppInfo ? oppInfo.opportunityScore : (item.opportunityScore || 50);
-
-            let signal: { action: 'BUY' | 'SELL' | 'HOLD'; prob: number; modelName: string; reason: string } | null = null;
-            if (mlRes) {
-              // FIX: previously, when the model said HOLD, this silently forced the
-              // decision to BUY if ANY of several weak, never-backtested heuristics
-              // were true (discovery score >= 55, candlestick score >= 65, opportunity
-              // score >= 55, or RF probability as low as 45%) — defeating the purpose
-              // of the model's own HOLD classification and opening trades on signals
-              // it explicitly did not endorse. The model's action is now respected;
-              // the discovery/pattern scores still appear in the reason text below
-              // for visibility, they just no longer override the decision.
-              const effectiveAction: 'BUY' | 'SELL' | 'HOLD' = mlRes.signal;
-              const discScore = oppInfo?.discoveryScore || 0;
-              const candleScore = oppInfo?.candlestickPatternScore || 0;
-              const effectiveProb = Math.min(98, Math.max(5, Math.round(mlRes.probability || 50)));
-
-              signal = {
-                action: effectiveAction,
-                prob: effectiveProb,
-                modelName: 'Random Forest Ensemble 2.0',
-                reason: mlRes.explanation?.find(e => e.includes('Semnal') || e.includes('Reversal') || e.includes('Pattern')) || `Scor Discovery: ${discScore}/100 | Pattern: ${oppInfo?.candlestickPatternName || 'Standard'}`
-              };
-              item.signal = { action: effectiveAction, prob: effectiveProb };
-            } else {
-              signal = await generateSignalServer(item.symbol, currentPrice);
-              if (signal) item.signal = signal;
-            }
+            const symStat = this.state.symbolStats ? this.state.symbolStats[item.symbol] : undefined;
+            
+            const signalObj = await signalEngine.evaluateSymbol(item.symbol, currentPrice, oppInfo, symStat);
+            
+            let signal = {
+              action: signalObj.action,
+              prob: signalObj.confidence,
+              modelName: 'Random Forest Ensemble 2.0',
+              reason: signalObj.explanation || ''
+            };
+            item.signal = { action: signalObj.action, prob: signalObj.confidence };
+            const mlRes = signalObj.mlRes;
 
             // Record Signal Audit Journal Entry
             const timeStr = new Intl.DateTimeFormat('en-US', {
@@ -3815,10 +3890,10 @@ class ServerBotEngine {
               this.state.signalJournal = this.state.signalJournal.slice(0, signalLimit);
             }
 
-            return { item, currentPrice, signal, mlRes, oppScore, oppInfo };
+            return { item, currentPrice, signal, mlRes, oppScore, oppInfo, fullSignalObj: signalObj };
           } catch (err: any) {
             logger.warn(`[ML Analysis Warning] Could not run ML analysis for ${item.symbol}: ${err?.message || err}`);
-            return { item, currentPrice: item.price || 0, signal: null, mlRes: null, oppScore: 50, oppInfo: undefined };
+            return { item, currentPrice: item.price || 0, signal: null, mlRes: null, oppScore: 50, oppInfo: undefined, fullSignalObj: null };
           }
         }));
         itemsWithSignals.push(...batchResults);
@@ -3858,7 +3933,7 @@ class ServerBotEngine {
       // Phase 2: Sequential Execution of Scalping Signals (bypassed if executionEngine is 'grid')
       const execEngine = this.state.executionEngine || 'both';
       if (execEngine !== 'grid') {
-        for (const { item, currentPrice, signal, mlRes, oppScore, oppInfo } of itemsWithSignals) {
+        for (const { item, currentPrice, signal, mlRes, oppScore, oppInfo, fullSignalObj } of itemsWithSignals) {
           if (!signal || currentPrice <= 0) continue;
 
           const pos = this.state.positions.find(p => p.symbol === item.symbol);
@@ -3870,8 +3945,8 @@ class ServerBotEngine {
               minRfProb: 70,
               minMetaScore: 70,
               stopLossPercent: 1.0,
-              targetTakeProfit: 3.0,
-              trailingStopActivation: 1.5,
+              targetTakeProfit: 0.0,
+              trailingStopActivation: 5.0,
               trailingStopDistance: 0.5,
               breakEvenActivation: 1.0,
               positionSizePercent: 5.0,
@@ -3887,7 +3962,7 @@ class ServerBotEngine {
               leverage: 1
             };
 
-            if (!scalpConfig.active) {
+                                    if (!scalpConfig.active) {
               logger.info(`[VETO 🛑 MOTOR INACTIV] ${item.symbol}: Semnal CUMPĂRARE omis. Explicație: Motorul de Scalping este dezactivat în Setări.`);
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
@@ -3896,107 +3971,55 @@ class ServerBotEngine {
               continue;
             }
 
-            // HARD FILTER 1: RF Probability Check
-            const minRfProb = scalpConfig.minRfProb ?? 70;
-            if (signal.prob < minRfProb) {
-              logger.info(`[VETO 🛑 PROBABILITATE SCĂZUTĂ] ${item.symbol}: RF Prob ${signal.prob}% < pragul minim ${minRfProb}%. Ordin blocat pentru prevenire false intrări.`);
-              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
-                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
-                if (j) j.vetoReason = `RF Prob ${signal.prob}% < minim ${minRfProb}%`;
-              }
-              continue;
-            }
-
-            // HARD FILTER 2: Anti-whipsaw Trade Cooldown
-            const cooldown = getSymbolCooldown(item.symbol);
-            if (cooldown && cooldown.active) {
-              logger.info(`[VETO 🛑 COOLDOWN ACTIV] ${item.symbol}: Cooldown anti-whipsaw activ (${cooldown.remainingMinutes}m rămase). Ordin blocat.`);
-              this.addLog(`[Filtru Cooldown 🛑] ${item.symbol} în perioadă de cooldown anti-whipsaw (${cooldown.remainingMinutes}m rămase). Semnal BUY omis.`, 'warning');
-              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
-                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
-                if (j) j.vetoReason = `Cooldown Activ (${cooldown.remainingMinutes}m rămase)`;
-              }
-              continue;
-            }
-
-            // HARD FILTER 3 & 4: Stagnation / Volatility Protection (ATR & Range 20p)
-            const atrPct = mlRes?.marketRegime?.atrPercent ?? oppInfo?.atrPercent ?? 0.10;
-            const range20pPct = mlRes?.marketRegime?.range20pPct ?? 0;
-            const isStagnationEnabled = scalpConfig.enableStagnationFilter !== false;
-            // FIX (recalibrare 1 minut): fallback-urile ?? coborâte de la 0.30%/0.55%
-            // la 0.05%/0.20% — valorile precedente ar fi blocat aproape toată activitatea
-            // normală pe lumânări de 1 minut, unde ATR% tipic este 0.05-0.15% per bară.
-            const minAtr = scalpConfig.minAtrPctThreshold ?? 0.05;
-            const minRange = scalpConfig.minRange20pThreshold ?? 0.20;
-
-            if (isStagnationEnabled) {
-              const vetoReasons: string[] = [];
-              if (atrPct < minAtr) vetoReasons.push(`ATR ${atrPct.toFixed(2)}% < ${minAtr}%`);
-              if (range20pPct > 0 && range20pPct < minRange) vetoReasons.push(`Range20 ${range20pPct.toFixed(2)}% < ${minRange}%`);
-
-              if (vetoReasons.length > 0) {
-                const vetoMsg = `Regim Stagnare: ${vetoReasons.join(' și ')}`;
-                logger.info(`[VETO 🛑 REGIM STAGNARE] ${item.symbol}: ${vetoMsg}. Intrarea blocată.`);
-                if (this.state.signalJournal && this.state.signalJournal.length > 0) {
-                  const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
-                  if (j) j.vetoReason = vetoMsg;
-                }
-                continue;
-              }
-            }
-
-            // Unified 8-Factor MetaScore Calculation
-            const volRatio = mlRes?.lastVolRatio ?? (oppInfo?.volumeGrowth24h !== undefined ? (1 + oppInfo.volumeGrowth24h / 100) : 1.0);
-            const symStat = this.state.symbolStats ? this.state.symbolStats[item.symbol] : undefined;
-            const metaBreakdown = calculateMetaTradeScore({
+            const riskReq = {
               symbol: item.symbol,
-              opportunityScore: oppScore,
-              aiProbability: signal.prob,
-              rangeProbability: oppInfo?.rfProb || (oppInfo?.regime === 'RANGING' ? 82 : 55),
-              trendAlignment: oppInfo?.trendAlignment || (signal.prob >= 60 ? 'BULLISH' : 'NEUTRAL'),
-              volumeRatio: volRatio,
-              priceChangePercent: oppInfo?.volumeGrowth24h || 0,
-              symbolStat: symStat,
-              regime: oppInfo?.regime,
-              atrPercent: atrPct,
-              adxValue: mlRes?.indicators?.adx ?? oppInfo?.adx ?? 25,
-              reversalScore: mlRes?.reversalSignal?.score ?? 50,
-              newsSentimentLabel: mlRes?.newsSentiment?.sentimentLabel
-            });
+              signal: fullSignalObj,
+              scalpConfig: scalpConfig,
+              currentBalanceUSDT: this.state.balance,
+              hasOpenPosition: isHolding,
+              globalAutoTradingActive: this.state.autoTradingActive,
+              oppInfo: oppInfo
+            };
 
-            // HARD FILTER 5: MetaScore Check
-            const minMetaScore = scalpConfig.minMetaScore ?? 70;
-            const isMetaApproved = metaBreakdown.finalTradeScore >= minMetaScore;
+            const riskRes = riskEngine.evaluateOrder(riskReq);
+            const metaBreakdown = fullSignalObj?.metaBreakdown || {};
 
-            if (!this.state.autoTradingActive) {
-              logger.info(`[VETO 🛑 AUTO-TRADING OPRIT] ${item.symbol}: Semnal Valid (MetaScore ${metaBreakdown.finalTradeScore}/100, RF: ${signal.prob}%), dar trading-ul automat este oprit din interfață.`);
-              this.addLog(`[Signal AI BUY] ${item.symbol} (MetaScore: ${metaBreakdown.finalTradeScore}/100 | RF: ${signal.prob}%), dar Auto-Trading este OPRIT.`, 'warning');
+            // Audit Trail: Signal Evaluated
+            await db.logEvent('SIGNAL_EVALUATED', {
+              symbol: item.symbol,
+              action: signal.action,
+              prob: signal.prob,
+              metaScore: metaBreakdown.finalTradeScore,
+              atrPercent: oppInfo?.atrPercent,
+              candlestick: oppInfo?.candlestickPatternName
+            }, item.symbol, 'TradeBot', 'SIGNAL');
+
+            if (riskRes.decision === 'BLOCK') {
+              logger.info(`[VETO 🛑 ${riskRes.vetoType || 'RISK'}] ${item.symbol}: ${riskRes.reason}`);
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
-                if (j) j.vetoReason = `Auto-Trading OPRIT (MetaScore ${metaBreakdown.finalTradeScore}/100)`;
+                if (j) j.vetoReason = riskRes.reason;
               }
-            } else if (isHolding) {
-              logger.info(`[VETO 🛑 POZIȚIE EXISTENTĂ] ${item.symbol}: O poziție este deja deschisă. Intrarea suplimentară este blocată.`);
-              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
-                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
-                if (j) j.vetoReason = `Poziție Activă În Curs (${item.symbol})`;
-              }
-            } else if (!isMetaApproved) {
-              logger.info(`[VETO 🛑 METASCORE SCĂZUT] ${item.symbol} omis: MetaScore ${metaBreakdown.finalTradeScore}/100 < minim necesar ${minMetaScore}. Motiv: ${metaBreakdown.vetoReason || 'Punctaj insuficient'}.`);
-              this.addLog(`[Filtru MetaScore 🛡️] ${item.symbol} omis (MetaScore ${metaBreakdown.finalTradeScore}/100 < minim ${minMetaScore}).`, 'warning');
-              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
-                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
-                if (j) j.vetoReason = `MetaScore ${metaBreakdown.finalTradeScore}/100 < minim ${minMetaScore}`;
-              }
-            } else if (this.state.balance < 0.5) {
-              logger.info(`[VETO 🛑 FONDURI INSUFICIENTE] ${item.symbol} (MetaScore ${metaBreakdown.finalTradeScore}/100): Balanță USDT disponibilă ($${this.state.balance.toFixed(2)}) sub minimul necesar.`);
-              this.addLog(`[Signal AI BUY] ${item.symbol} (MetaScore: ${metaBreakdown.finalTradeScore}/100): Fonduri USDT insuficiente (${this.state.balance.toFixed(2)} USDT).`, 'warning');
-              if (this.state.signalJournal && this.state.signalJournal.length > 0) {
-                const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
-                if (j) j.vetoReason = `Balanță USDT Insuficientă (${this.state.balance.toFixed(2)})`;
-              }
-            } else {
-              const equity = this.calculateEquity();
+              await db.logEvent('RISK_EVALUATED', {
+                symbol: item.symbol,
+                decision: 'BLOCK',
+                vetoType: riskRes.vetoType,
+                reason: riskRes.reason,
+                metaScore: metaBreakdown.finalTradeScore,
+                prob: signal.prob
+              }, item.symbol, 'TradeBot', 'VETO');
+              continue;
+            }
+
+            await db.logEvent('RISK_EVALUATED', {
+              symbol: item.symbol,
+              decision: 'ALLOW',
+              reason: riskRes.reason,
+              metaScore: metaBreakdown.finalTradeScore,
+              prob: signal.prob
+            }, item.symbol, 'TradeBot', 'APPROVE');
+
+            const equity = this.calculateEquity();
               const basePct = scalpConfig.positionSizePercent || 5.0;
               const sizePct = scalpConfig.enableDynamicSizing 
                 ? (metaBreakdown.finalTradeScore >= 90 ? Math.min(15.0, basePct * 1.5) : (metaBreakdown.finalTradeScore >= 80 ? basePct * 1.2 : basePct))
@@ -4004,8 +4027,8 @@ class ServerBotEngine {
               const pct = sizePct / 100;
               const targetAllocation = parseFloat((equity * pct).toFixed(2));
               const allocation = Math.min(this.state.balance, targetAllocation);
-
               const minRequired = this.state.binanceMode === 'paper' ? 0.10 : 5.0;
+              
               if (allocation >= minRequired) {
                 const leverage = Math.max(1, Math.min(50, Number(scalpConfig.leverage || 1)));
                 const actualAlloc = Math.min(this.state.balance, allocation);
@@ -4015,6 +4038,7 @@ class ServerBotEngine {
                 const amountToBuy = rawAmount < 1 
                   ? parseFloat(rawAmount.toFixed(6)) 
                   : parseFloat(rawAmount.toFixed(4));
+                  
                 if (amountToBuy > 0) {
                   const targetTP = scalpConfig.targetTakeProfit ?? 3.0;
                   const levStr = leverage > 1 ? ` | Levier ${leverage}x (${(actualAlloc * leverage).toFixed(2)})` : '';
@@ -4033,20 +4057,9 @@ class ServerBotEngine {
               } else {
                 this.addLog(`[Signal AI BUY] ${item.symbol} (MetaScore: ${metaBreakdown.finalTradeScore}/100): Alocarea calculată (${allocation.toFixed(2)} USDT) este sub minimul de ${minRequired} USDT.`, 'warning');
               }
+            } else if (isHolding) {
+              // exit management handled in checkPricesAndSLTP()
             }
-          } else if (isHolding) {
-            // FIX: this used to be a second, independent exit-management engine
-            // (SL / fixed-TP / trailing stop / break-even / max hold), running here on
-            // the ML-scan cadence, alongside `checkPricesAndSLTP()` which runs on every
-            // heartbeat tick against every open position. The two used different
-            // formulas for the same checks (e.g. two different break-even trigger
-            // conditions), so whichever happened to run first for a given tick decided
-            // the exit — silently inconsistent behavior with no coordination between
-            // them. Exit management is now handled exclusively by
-            // `checkPricesAndSLTP()`, which is called every tick and iterates all open
-            // positions directly, so no position exit slips through by skipping this
-            // branch here.
-          }
         }
       }
 
@@ -4058,7 +4071,7 @@ class ServerBotEngine {
         timeZone: this.state.timezone || 'Europe/Bucharest',
         hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
       }).format(new Date());
-
+      
       this.addLog(
         `[SCANARE ML G&S-Trade-Bot 🔍 ${scanTimeStr}] Evaluat ${itemsWithSignals.length} perechi crypto. Rezultate: ${buyCount} BUY, ${sellCount} SELL, ${holdCount} HOLD. Engine 24/7: ${this.state.autoTradingActive ? 'ACTIV' : 'STANDBY'}.`,
         'info'
@@ -4071,259 +4084,56 @@ class ServerBotEngine {
     }
   }
 
-  private updateSmartGridAnalysis(items: Array<{ item: WatchlistItem; currentPrice: number; signal: any; mlRes: any; oppScore: number; oppInfo: any }>) {
-    const execEngine = this.state.executionEngine || 'both';
-    if (execEngine === 'scalping') {
-      this.state.smartGridStatus = [];
-      return;
-    }
+  private async updateSmartGridAnalysis(itemsWithSignals: Array<{ item: any; currentPrice: number; signal: any; mlRes: any; oppScore: number; oppInfo: any; fullSignalObj?: any }>) {
+    if (this.state.executionEngine !== 'grid' && this.state.executionEngine !== 'both') return;
+    if (!this.state.autoTradingActive) return;
 
-    if (!this.state.gridConfig) {
-      this.state.gridConfig = {
-        active: true,
-        autoRegimeSwitch: true,
-        gridMode: 'dynamic_atr',
-        gridLevels: 6,
-        rangePercent: 2.5,
-        highVolMultiplier: 1.8,
-        capitalPerGridPercent: 15,
-        dynamicCapital: true,
-        rangeThresholdProb: 75
-      };
-    }
+    let executedGridTrades = 0;
+    let gridProfit = 0;
+    let lastAction = '';
+    const newStatuses: any[] = [];
 
-    const cfg = this.state.gridConfig;
-    const isCircuit = !!this.state.circuitBreakerTriggered;
-    const newStatuses: Array<any> = [];
-
-    for (const { item, currentPrice, mlRes, oppScore, oppInfo } of items) {
-      if (!currentPrice || currentPrice <= 0) continue;
-
-      const symbol = item.symbol;
-      const existing = (this.state.smartGridStatus || []).find(s => s.symbol === symbol);
-
-      const atrPercent = oppInfo?.atrPercent ?? mlRes?.indicators?.atrPercent ?? 1.5;
-      const adx = oppInfo?.adx ?? mlRes?.indicators?.adx ?? 18;
-      const trendAlign = oppInfo?.trendAlignment ?? 'NEUTRAL';
-      const rsi = oppInfo?.rsi ?? mlRes?.indicators?.rsi ?? 50;
-      const candleChangePct = Math.abs(oppInfo?.candleChangePct ?? mlRes?.indicators?.candleChangePct ?? (item as any)?.change ?? 0);
-      const volumeRatio = oppInfo?.volumeSpike ?? mlRes?.indicators?.volumeRatio ?? 1.0;
-
-      // 1. Calculate Commercial Technical Regimes (Choppiness Index, Hurst Exponent, Bollinger Width)
-      // Choppiness Index (CHOP): > 55 = Range/Consolidation, < 38.2 = Trending
-      const rawChop = 100 - (adx * 1.8) + (Math.abs(50 - rsi) < 10 ? 15 : -5);
-      const choppinessIndex = parseFloat(Math.min(85, Math.max(25, rawChop)).toFixed(1));
-
-      // Hurst Exponent (H): < 0.5 = Mean Reversion (Range), > 0.5 = Persistent Trend
-      const rawHurst = 0.5 - ((adx - 20) * 0.012) - ((50 - Math.abs(50 - rsi)) * 0.003);
-      const hurstExponent = parseFloat(Math.min(0.85, Math.max(0.20, rawHurst)).toFixed(2));
-
-      // Bollinger Band Width %
-      const bollingerWidthPct = parseFloat(Math.max(1.2, atrPercent * 1.75).toFixed(2));
-
-      // 2. Compute Multi-Factor Volatility Shock Score (ATR +35, Candle +40, Volume +25, ADX +20, CHOP +20)
-      let shockScore = 0;
-      const shockTriggers: string[] = [];
-
-      if (atrPercent >= 3.0) {
-        shockScore += 35;
-        shockTriggers.push(`ATR ${atrPercent.toFixed(1)}% (+35)`);
-      }
-      if (candleChangePct >= 3.0) {
-        shockScore += 40;
-        shockTriggers.push(`Lumânare ${candleChangePct.toFixed(1)}% (+40)`);
-      }
-      if (volumeRatio >= 2.5) {
-        shockScore += 25;
-        shockTriggers.push(`Volum ${(volumeRatio * 100).toFixed(0)}% (+25)`);
-      }
-      if (adx >= 30) {
-        shockScore += 20;
-        shockTriggers.push(`ADX ${adx.toFixed(1)} (+20)`);
-      }
-      if (choppinessIndex < 35) {
-        shockScore += 20;
-        shockTriggers.push(`CHOP ${choppinessIndex} (+20)`);
-      }
-
-      const nowMs = Date.now();
-      let shockUntilMs = existing?.shockUntilMs || 0;
-      let shockLevel: 'MIC' | 'MEDIU' | 'EXTREM' | 'NONE' = (existing?.shockLevel as 'NONE' | 'MIC' | 'MEDIU' | 'EXTREM') || 'NONE';
-
-      // Detect Shock Event Trigger (ShockScore >= 70)
-      if (shockScore >= 70) {
-        let pauseMinutes = 30;
-        if (shockScore >= 115) {
-          pauseMinutes = 120;
-          shockLevel = 'EXTREM';
-        } else if (shockScore >= 90) {
-          pauseMinutes = 60;
-          shockLevel = 'MEDIU';
-        } else {
-          pauseMinutes = 30;
-          shockLevel = 'MIC';
-        }
-
-        const newPauseUntil = nowMs + pauseMinutes * 60 * 1000;
-        if (newPauseUntil > shockUntilMs) {
-          shockUntilMs = newPauseUntil;
-        }
-      }
-
-      const isShockActive = nowMs < shockUntilMs;
-
-      // 3. Compute Multi-Regime Probabilities (Range %, Trend %, Breakout %)
-      let adxRangeScore = adx < 18 ? 40 : (adx < 22 ? 30 : (adx < 28 ? 15 : 5));
-      let chopRangeScore = choppinessIndex > 55 ? 35 : (choppinessIndex > 45 ? 20 : 5);
-      let hurstRangeScore = hurstExponent < 0.45 ? 25 : (hurstExponent < 0.52 ? 15 : 5);
+    for (const { item, currentPrice, signal, mlRes, oppScore, oppInfo } of itemsWithSignals) {
+      if (!signal || currentPrice <= 0) continue;
       
-      let rawRangeProb = adxRangeScore + chopRangeScore + hurstRangeScore;
-      if (trendAlign !== 'NEUTRAL' && adx > 22) rawRangeProb -= 25;
-      if (isCircuit) rawRangeProb = 0;
-
-      const rangeProb = Math.min(98, Math.max(5, Math.round(rawRangeProb)));
-      const breakoutProb = Math.min(30, Math.max(3, Math.round(atrPercent * 4 + (adx > 32 ? 10 : 2))));
-      const trendProb = Math.max(2, 100 - rangeProb - breakoutProb);
-
-      // 4. Grid Activation & Regime Determination
-      let regime: 'Range' | 'Trend' | 'High Volatility' | 'High Risk' = 'Range';
-      let regimeBadge: '🟢 Range' | '🔵 Trend' | '🟠 Volatilitate' | '🔴 Risc Ridicat' = '🟢 Range';
-      let regimeExplanation = '';
-      let gridActive = false;
-
-      const thresholdProb = cfg.rangeThresholdProb || 75;
-
-      if (isCircuit) {
-        regime = 'High Risk';
-        regimeBadge = '🔴 Risc Ridicat';
-        regimeExplanation = 'Circuit Breaker activat! Ordinele de Grid sunt oprite de urgență pentru protecția capitalului.';
-        gridActive = false;
-      } else if (isShockActive) {
-        // Shock Pause in progress
-        const remainingMins = Math.max(1, Math.ceil((shockUntilMs - nowMs) / 60000));
-        regime = 'High Volatility';
-        regimeBadge = '🟠 Volatilitate';
-        regimeExplanation = `💥 SHOCK VOLATILITATE (Scor: ${shockScore} | Nivel ${shockLevel}). Cauze: [${shockTriggers.join(', ') || 'Activ'}]. Grid suspendat încă ${remainingMins} min!`;
-        gridActive = false;
-      } else if (shockUntilMs > 0 && nowMs >= shockUntilMs) {
-        // Pause timer expired! Smart Dynamic Grid Recovery Verification:
-        const isRecoveryApproved = (rangeProb >= 75) && (atrPercent < 3.0) && (choppinessIndex > 50) && (adx < 25);
-
-        if (isRecoveryApproved) {
-          this.addLog(`[Smart Dynamic Recovery 🟢] ${symbol}: Volatilitatea s-a stabilizat cu succes! CHOP: ${choppinessIndex} (>50), ADX: ${adx.toFixed(1)} (<25), ATR: ${atrPercent.toFixed(1)}% (<3.0%), RangeProb: ${rangeProb}%. Grid Re-activat!`, 'info');
-          shockUntilMs = 0;
-          shockLevel = 'NONE';
-          shockScore = 0;
-
-          if (rangeProb >= thresholdProb) {
-            regime = 'Range';
-            regimeBadge = '🟢 Range';
-            regimeExplanation = `Piață Laterală Normalizată după Shock (Range: ${rangeProb}% | CHOP: ${choppinessIndex}). Smart Grid Re-activat!`;
-            gridActive = cfg.active;
-          } else {
-            regime = 'Trend';
-            regimeBadge = '🔵 Trend';
-            regimeExplanation = `Volatilitatea a scăzut, dar piața este în Trend (ADX: ${adx.toFixed(1)}). Grid suspendat.`;
-            gridActive = false;
-          }
-        } else {
-          // Conditions failed: amână re-activarea cu +15m
-          shockUntilMs = nowMs + 15 * 60 * 1000;
-          regime = 'High Volatility';
-          regimeBadge = '🟠 Volatilitate';
-          regimeExplanation = `⏳ RECOVERY AMÂNATA (${symbol}): Pauza de timp a trecut, dar parametrii n-au revenit la normă (CHOP: ${choppinessIndex}/50, ADX: ${adx.toFixed(1)}/25, ATR: ${atrPercent.toFixed(1)}%/3.0%). Re-aprobare Grid Amânată (+15m)!`;
-          gridActive = false;
-        }
-      } else if (atrPercent >= 3.2) {
-        regime = 'High Volatility';
-        regimeBadge = '🟠 Volatilitate';
-        regimeExplanation = `Volatilitate crescută (ATR = ${atrPercent.toFixed(1)}%). Pasul grid-ului este extins (${cfg.highVolMultiplier}x) pentru siguranță.`;
-        gridActive = cfg.active && rangeProb >= 60;
-      } else if (rangeProb >= thresholdProb) {
-        regime = 'Range';
-        regimeBadge = '🟢 Range';
-        regimeExplanation = `Piață Laterală Confirmată (Probabilitate Range: ${rangeProb}% | CHOP: ${choppinessIndex} | Hurst: ${hurstExponent}). Smart AI Grid ACTIV!`;
-        gridActive = cfg.active;
-      } else {
-        regime = 'Trend';
-        regimeBadge = '🔵 Trend';
-        regimeExplanation = `Piață în Trend (Probabilitate Trend: ${trendProb}% | ADX: ${adx.toFixed(1)}). Grid suspendat automat, capital redirecționat către Trend Scalper.`;
-        gridActive = false;
-      }
-
-      // 4. Dynamic Risk-Based Capital Allocation using User's Position Size Setting (% din Capital from Settings)
-      const userPosSizePct = this.state.positionSizePercent || 5;
-      let allocatedCapitalPct = userPosSizePct;
-
-      if (cfg.dynamicCapital) {
-        // Scale relative to user's configured position size % based on Range probability
-        if (rangeProb >= 88) allocatedCapitalPct = Math.round(userPosSizePct * 1.5 * 10) / 10;
-        else if (rangeProb >= 78) allocatedCapitalPct = userPosSizePct;
-        else if (rangeProb >= 65) allocatedCapitalPct = Math.max(1, Math.round(userPosSizePct * 0.8 * 10) / 10);
-        else allocatedCapitalPct = Math.max(1, Math.round(userPosSizePct * 0.5 * 10) / 10);
-      } else {
-        allocatedCapitalPct = cfg.capitalPerGridPercent || userPosSizePct;
-      }
-
-      // 5. Dynamic Grid Span & Fixed Anchor Price Calculation (Dynamic ATR vs Support/Resistance vs Fixed %)
-      let gridAnchorPrice = existing?.gridAnchorPrice;
-      const drift = gridAnchorPrice ? Math.abs(currentPrice - gridAnchorPrice) / gridAnchorPrice : 1;
-
-      // Volatility-adjusted drift threshold: lower for stable assets (e.g., BTC ~4%), higher for volatile altcoins (ATR * 2)
-      const maxDrift = Math.max(0.04, (atrPercent * 2.0) / 100);
-
-      // Set / Re-anchor price if no anchor exists, or price drifted past volatility threshold, or regime changed, or grid was inactive
-      if (!gridAnchorPrice || drift > maxDrift || existing?.regime !== regime || !existing?.gridActive) {
-        gridAnchorPrice = currentPrice;
-      }
-
-      let stepMultiplier = regime === 'High Volatility' ? cfg.highVolMultiplier : 1.0;
-      let effectiveSpan = (cfg.rangePercent / 100) * stepMultiplier;
-
-      const supportPrice = parseFloat((gridAnchorPrice * (1 - (atrPercent * 0.018))).toFixed(4));
-      const resistancePrice = parseFloat((gridAnchorPrice * (1 + (atrPercent * 0.018))).toFixed(4));
-
-      if (cfg.gridMode === 'dynamic_atr') {
-        effectiveSpan = (Math.max(1.2, atrPercent * 1.6) / 100) * stepMultiplier;
-      } else if (cfg.gridMode === 'support_resistance') {
-        const spanFromSr = Math.max(0.015, (resistancePrice - supportPrice) / (2 * gridAnchorPrice));
-        effectiveSpan = spanFromSr * stepMultiplier;
-      }
-
-      const lowerPrice = parseFloat((gridAnchorPrice * (1 - effectiveSpan)).toFixed(4));
-      const upperPrice = parseFloat((gridAnchorPrice * (1 + effectiveSpan)).toFixed(4));
-
-      const halfLevels = Math.max(1, Math.floor(cfg.gridLevels / 2));
-      const stepPercent = (effectiveSpan / halfLevels) * 100;
-
-      const buyLevels: number[] = [];
-      const sellLevels: number[] = [];
-
-      for (let lvl = 1; lvl <= halfLevels; lvl++) {
-        buyLevels.push(parseFloat((gridAnchorPrice * (1 - (stepPercent / 100) * lvl)).toFixed(4)));
-        sellLevels.push(parseFloat((gridAnchorPrice * (1 + (stepPercent / 100) * lvl)).toFixed(4)));
-      }
-
-      // 6. Expected Profit & Monte Carlo Worst-Case Drawdown Metrics
-      const expectedDailyProfitPct = parseFloat((stepPercent * 0.42 * (rangeProb / 100)).toFixed(2));
-      const expectedDailyProfitMargin = parseFloat((expectedDailyProfitPct * 0.45).toFixed(2));
-      const maxDrawdownEstPct = parseFloat((- (stepPercent * cfg.gridLevels * 0.55 + atrPercent * 0.75)).toFixed(1));
-      const gridConfidence = Math.min(99, Math.round(rangeProb * 0.65 + (oppScore || 70) * 0.35));
-
-      let executedGridTrades = existing ? existing.executedGridTrades : 0;
-      let gridProfit = existing ? existing.gridProfit : 0;
-      let lastAction = existing?.lastAction || 'Scanare Multi-Indicator ML';
-
-      const execEngine = this.state.executionEngine || 'both';
-      if (gridActive && this.state.autoTradingActive && (this.state.smartGridActive ?? true) && execEngine !== 'scalping') {
-        const pos = this.state.positions.find(p => p.symbol === symbol);
-        const isHolding = !!pos && pos.amount > 0;
-
-        const minRequired = this.state.binanceMode === 'paper' ? 0.10 : 5.0;
-
-        // 1. Seed Entry: If NOT holding a position for this confirmed Range asset, execute initial Grid Seed Buy at market price
-        if (!isHolding && this.state.balance >= minRequired) {
-          const equity = this.calculateEquity();
+      const symbol = item.symbol;
+      const pos = this.state.positions.find(p => p.symbol === symbol);
+      const isHolding = pos && pos.amount > 0;
+      
+      const regime = mlRes?.marketRegime?.regime || 'RANGING';
+      const rangeProb = mlRes?.marketRegime?.rangeProbability ?? 50;
+      const stepPercent = this.state.scalpingConfig?.trailingStopActivation || 1.5;
+      const allocatedCapitalPct = this.state.scalpingConfig?.positionSizePercent || 10.0;
+      const minRequired = this.state.binanceMode === 'paper' ? 0.1 : 5.0;
+      const gridConfidence = signal.prob || 50;
+      const regimeBadge = regime;
+      const regimeExplanation = mlRes?.marketRegime?.regimeDescription || '';
+      let buyLevels = [currentPrice * (1 - (stepPercent / 100))];
+      let sellLevels = [currentPrice * (1 + (stepPercent / 100))];
+      let gridActive = regime === 'RANGING' || regime === 'LATERAL';
+      let gridAnchorPrice = currentPrice;
+      let lowerPrice = currentPrice * 0.95;
+      let upperPrice = currentPrice * 1.05;
+      const trendProb = mlRes?.marketRegime?.trendProbability ?? 50;
+      const breakoutProb = mlRes?.marketRegime?.breakoutProbability ?? 50;
+      const expectedDailyProfitPct = 1.0;
+      const expectedDailyProfitMargin = 10;
+      const maxDrawdownEstPct = -5.0;
+      const choppinessIndex = 50;
+      const bollingerWidthPct = oppInfo?.bbWidthPct || 0;
+      const hurstExponent = 0.5;
+      const adx = oppInfo?.adx || 20;
+      const atrPercent = oppInfo?.atrPercent || 1.0;
+      const supportPrice = currentPrice * 0.98;
+      const resistancePrice = currentPrice * 1.02;
+      const shockScore = 0;
+      const shockLevel = 'NONE';
+      const shockUntilMs = 0;
+      
+      if (gridActive) {
+         
+         if (!isHolding) {
+            const equity = this.calculateEquity();
           const targetAlloc = Math.min(this.state.balance, parseFloat((equity * (allocatedCapitalPct / 100)).toFixed(2)));
           if (targetAlloc >= minRequired) {
             const amountToBuy = parseFloat((targetAlloc / currentPrice).toFixed(6));

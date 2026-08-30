@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useTradingStore, SignalJournalEntry } from '../store';
-import { apiFetch } from '../utils/apiHelper';
+import { apiFetch, safeJson } from '../utils/apiHelper';
 import { Download, Trash2, Database, Search, HardDrive, RefreshCw, Activity, ShieldAlert, CheckCircle2, XCircle, Zap, Sliders, Info, Filter } from 'lucide-react';
 
 export function TradeLogs() {
@@ -81,7 +81,8 @@ export function TradeLogs() {
     try {
       const res = await apiFetch('/api/bot/state');
       if (!res.ok) throw new Error('Nu s-a putut obține starea de pe server');
-      const data = await res.json();
+      const data = await safeJson(res, null);
+      if (!data) throw new Error('Format date server invalid');
       
       const jsonString = JSON.stringify(data, null, 2);
       const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8;' });
