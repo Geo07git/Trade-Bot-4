@@ -12,3 +12,8 @@ data/daily_snapshots.json
 bun.lock
 dist-electron/
 server/data/backtests/
+
+# Runtime trading state / generated snapshots
+data/tradebot_events.json
+server/data/momentum_paper_state.json
+server/data/momentum_hour_snapshots.json
