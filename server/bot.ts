@@ -2223,8 +2223,8 @@ class ServerBotEngine {
     // Fix ATR calculation
     let atrPercent = 0.10; // Default
     try {
-      const klines = await fetchHistoricalKlines(symbol, '15m', 30);
-      logger.info(`[DEBUG] ATR Calculation for ${symbol}: received ${klines.length} klines`);
+      const klines = await fetchHistoricalKlines(symbol, 30, '15m');
+      // logger.info(`[DEBUG] ATR Calculation for ${symbol}: received ${klines.length} klines.`);
       const atrValues = calculateATR(klines as any, 14);
       const lastAtr = atrValues[atrValues.length - 1];
       if (lastAtr && price > 0) {

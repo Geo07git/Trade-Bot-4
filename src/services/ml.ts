@@ -787,7 +787,7 @@ export async function fetchHistoricalKlines(symbol: string, limit = 1000, timefr
 
     if (res.ok) {
       const data = await res.json();
-      if (Array.isArray(data) && data.length >= 50) {
+      if (Array.isArray(data) && data.length > 0) {
         const parsed: Kline[] = data.map((d: any) => ({
           timestamp: d[0],
           open: parseFloat(d[1]),
