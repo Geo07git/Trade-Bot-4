@@ -2228,6 +2228,9 @@ class ServerBotEngine {
       const lastAtr = atrValues[atrValues.length - 1];
       if (lastAtr && price > 0) {
         atrPercent = (lastAtr / price) * 100;
+        logger.info(`[DEBUG] ATR Calculation for ${symbol}: lastAtr=${lastAtr}, price=${price}, atrPercent=${atrPercent}%`);
+      } else {
+        logger.warn(`[DEBUG] ATR Calculation for ${symbol}: lastAtr or price invalid. lastAtr=${lastAtr}, price=${price}`);
       }
     } catch (e: any) {
       logger.warn(`Failed to calculate ATR for ${symbol}: ${e.message}`);
