@@ -539,7 +539,11 @@ export class PaperTrader {
         if (this.state.paperBalanceUSDT < 100) continue; // Not enough balance
 
         if (scores.momentumScore >= this.config.minMomentumScore) {
-          const entryPriceRaw = k15m[k15m.length - 1].close;
+          // Fetch fresh price to avoid stale kline data
+          const freshPriceRes = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+          const freshPriceData = await freshPriceRes.json();
+          const entryPriceRaw = parseFloat(freshPriceData.price);
+          
           const entryPrice = entryPriceRaw * (1 + this.config.entrySlippagePct / 100);
           const sizeUSDT = Math.min(this.state.paperBalanceUSDT * 0.1, 1000);
           const feePaid = sizeUSDT * (this.config.entryFeePct / 100);
