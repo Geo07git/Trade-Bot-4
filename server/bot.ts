@@ -20,7 +20,8 @@ import {
   calculateLiquiditySpreadScore,
   calculateBreakoutAtrExpansionScore,
   calculateTrendConfirmationScore,
-  fetchHistoricalKlines
+  fetchHistoricalKlines,
+  calculateATR
 } from '../src/services/ml';
 import { MarketOpportunity, SymbolPerformanceStat, MetaTradeScoreBreakdown, ScalpingConfig } from '../src/types';
 import { logger } from '../src/utils/logger';
@@ -2219,6 +2220,19 @@ class ServerBotEngine {
       return;
     }
 
+    // Fix ATR calculation
+    let atrPercent = 0.10; // Default
+    try {
+      const klines = await fetchHistoricalKlines(symbol, '1m', 30);
+      const atrValues = calculateATR(klines as any, 14);
+      const lastAtr = atrValues[atrValues.length - 1];
+      if (lastAtr && price > 0) {
+        atrPercent = (lastAtr / price) * 100;
+      }
+    } catch (e: any) {
+      logger.warn(`Failed to calculate ATR for ${symbol}: ${e.message}`);
+    }
+
     // CENTRALIZED EXECUTION: Risk Engine Evaluation (P0 Mandate)
     const hasOpenPosition = this.state.positions.some(p => p.symbol === symbol && p.amount > 0);
     const riskReq = {
@@ -2226,7 +2240,11 @@ class ServerBotEngine {
       signal: {
         confidence: meta?.mlProbability || 75,
         metaScore: meta?.metaTradeScore || 75,
-        mlRes: {}
+        mlRes: {
+          marketRegime: {
+            atrPercent
+          }
+        }
       } as any,
       scalpConfig: (this.state.scalpingConfig || { active: true, minRfProb: 70, minMetaScore: 70 }) as any,
       currentBalanceUSDT: this.state.balance,
