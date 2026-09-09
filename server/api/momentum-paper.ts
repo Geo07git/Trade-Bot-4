@@ -5,6 +5,19 @@ import { paperTrader } from '../services/momentum/PaperTrader';
 
 const router = Router();
 
+// Reset paper trading state
+router.post('/reset', (req, res) => {
+  const { balance } = req.body;
+  console.log('[API] Resetting momentum paper state...');
+  try {
+    paperTrader.resetState(balance || 1000);
+    res.json({ success: true, message: 'Simulator reset successfully', state: paperTrader.getState() });
+  } catch (err: any) {
+    console.error('[API] Reset error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Get paper trading state & stats
 router.get('/status', (req, res) => {
   try {
@@ -18,13 +31,31 @@ router.get('/status', (req, res) => {
   }
 });
 
-// Update paper trading config (minMomentumScore, intervalMinutes)
+// Update paper trading config (parameters engine)
 router.post('/config', (req, res) => {
   try {
-    const { minMomentumScore, intervalMinutes } = req.body;
-    if (minMomentumScore !== undefined) {
-      paperTrader.setConfig(Number(minMomentumScore), intervalMinutes !== undefined ? Number(intervalMinutes) : undefined);
-    }
+    const { 
+      minMomentumScore, 
+      intervalMinutes,
+      trailingActivationPct,
+      trailingDistancePct,
+      hardStopLossPct,
+      maxHoldMinutes,
+      takeProfitPct,
+      positionAllocationPct
+    } = req.body;
+
+    paperTrader.setConfig({
+      minMomentumScore: minMomentumScore !== undefined ? Number(minMomentumScore) : undefined,
+      intervalMinutes: intervalMinutes !== undefined ? Number(intervalMinutes) : undefined,
+      trailingActivationPct: trailingActivationPct !== undefined ? Number(trailingActivationPct) : undefined,
+      trailingDistancePct: trailingDistancePct !== undefined ? Number(trailingDistancePct) : undefined,
+      hardStopLossPct: hardStopLossPct !== undefined ? Number(hardStopLossPct) : undefined,
+      maxHoldMinutes: maxHoldMinutes !== undefined ? Number(maxHoldMinutes) : undefined,
+      takeProfitPct: takeProfitPct !== undefined ? (takeProfitPct === null ? null : Number(takeProfitPct)) : undefined,
+      positionAllocationPct: positionAllocationPct !== undefined ? Number(positionAllocationPct) : undefined
+    });
+
     res.json({ success: true, message: 'Configuration updated', state: paperTrader.getState() });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -34,10 +65,28 @@ router.post('/config', (req, res) => {
 // Start paper trading loop
 router.post('/start', (req, res) => {
   try {
-    const { intervalMinutes, minMomentumScore } = req.body;
-    if (minMomentumScore !== undefined) {
-      paperTrader.setConfig(Number(minMomentumScore), intervalMinutes !== undefined ? Number(intervalMinutes) : 15);
-    }
+    const { 
+      intervalMinutes, 
+      minMomentumScore,
+      trailingActivationPct,
+      trailingDistancePct,
+      hardStopLossPct,
+      maxHoldMinutes,
+      takeProfitPct,
+      positionAllocationPct
+    } = req.body;
+
+    paperTrader.setConfig({
+      minMomentumScore: minMomentumScore !== undefined ? Number(minMomentumScore) : undefined,
+      intervalMinutes: intervalMinutes !== undefined ? Number(intervalMinutes) : undefined,
+      trailingActivationPct: trailingActivationPct !== undefined ? Number(trailingActivationPct) : undefined,
+      trailingDistancePct: trailingDistancePct !== undefined ? Number(trailingDistancePct) : undefined,
+      hardStopLossPct: hardStopLossPct !== undefined ? Number(hardStopLossPct) : undefined,
+      maxHoldMinutes: maxHoldMinutes !== undefined ? Number(maxHoldMinutes) : undefined,
+      takeProfitPct: takeProfitPct !== undefined ? (takeProfitPct === null ? null : Number(takeProfitPct)) : undefined,
+      positionAllocationPct: positionAllocationPct !== undefined ? Number(positionAllocationPct) : undefined
+    });
+
     paperTrader.start(intervalMinutes ? Number(intervalMinutes) : (paperTrader.getState().intervalMinutes || 15));
     res.json({ success: true, message: 'Paper trading started', state: paperTrader.getState() });
   } catch (err: any) {
@@ -60,6 +109,29 @@ router.post('/run-cycle', async (req, res) => {
   try {
     await paperTrader.runCycle();
     res.json({ success: true, message: 'Paper cycle executed successfully', state: paperTrader.getState() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Close a position manually
+router.post('/close-position', async (req, res) => {
+  try {
+    const { symbol, id } = req.body || {};
+    const target = id || symbol;
+    if (!target) {
+      return res.status(400).json({ success: false, error: 'Symbol or ID is required' });
+    }
+    const closed = await paperTrader.closePositionManual(target);
+    if (!closed) {
+      return res.status(404).json({ success: false, error: `Open position not found for ${target}` });
+    }
+    res.json({
+      success: true,
+      message: `Position for ${target} closed manually`,
+      position: closed,
+      state: paperTrader.getState()
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }

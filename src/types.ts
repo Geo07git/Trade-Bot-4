@@ -1,3 +1,9 @@
+export interface EquityProtectionConfig {
+  enabled: boolean;
+  profitThresholdPct: number; // e.g. 0.6%
+  drawdownProtectionPct: number; // e.g. 0.2%
+}
+
 export type ViewState = 'bloomberg' | 'superDashboard' | 'dashboard' | 'strategy' | 'scalping' | 'audit' | 'momentumPaper' | 'journal' | 'analyst' | 'alerts' | 'logs' | 'settings' | 'calibration' | 'backtest';
 
 export type ExecutionEngineMode = 'both' | 'scalping';
@@ -6,40 +12,45 @@ export type MlModelSelection = 'rf';
 
 export interface ScalpingConfig {
   active: boolean;
-  minRfProb: number;            // e.g. 70%
-  minMetaScore: number;         // e.g. 70
-  stopLossPercent: number;      // e.g. 1.0%
-  targetTakeProfit: number;     // e.g. 3.0%
-  trailingStopActivation: number; // e.g. 1.5%
+  minRfProb: number;            // e.g. 90%
+  minMetaScore: number;         // e.g. 80
+  stopLossPercent: number;      // e.g. 5.0%
+  targetTakeProfit: number;     // e.g. 0% (OFF)
+  trailingStopActivation: number; // e.g. 3.0%
   trailingStopDistance: number;   // e.g. 0.5%
-  breakEvenActivation: number;    // e.g. 1.0%
+  breakEvenActivation: number;    // e.g. 2.0%
   positionSizePercent: number;    // e.g. 5.0%
-  maxHoldMinutes: number;         // e.g. 15
-  maxNegativeHoldMinutes?: number; // e.g. 1.0 minute on drawdown/loss
-  enableMaxNegativeHold?: boolean; // ON/OFF switch for max negative hold limit rule
+  maxHoldMinutes: number;         // e.g. 120
+  maxNegativeHoldMinutes?: number; // e.g. 0.0
+  enableMaxNegativeHold?: boolean; // ON/OFF switch for max negative hold limit rule (Dezactivat)
   minOpportunityScore: number;    // e.g. 50
-  cooldownMinutes: number;        // e.g. 2
-  enableDynamicSizing: boolean;   // e.g. true (3% - 8% based on MetaScore)
+  cooldownMinutes: number;        // e.g. 5
+  enableDynamicSizing: boolean;   // e.g. false (Dezactivat)
   enableDynamicTpSl?: boolean;    // Dynamic TP/SL based on ATR and ML Score
   minVolumeGrowth?: number;       // e.g. 0.8x
-  enableStagnationFilter?: boolean;  // Default: true (Filtru Stagnare & Volatilitate Scăzută NO-TRADE)
+  enableStagnationFilter?: boolean;  // Default: false (Dezactivat)
   timeframe: '1m' | '5m';
-  minAtrPctThreshold?: number;     // Default: 0.30% (ATR minim pentru acoperire comisioane)
-  minRange20pThreshold?: number;    // Default: 0.55% (Range 20 lumânări minim)
-  leverage?: number;               // e.g. 1, 2, 3, 5, 10, 20 (Levier ajustabil scalping)
-  activePreset?: 'Conservator' | 'Free Trade' | 'Configurabil' | 'Dinamic';
+  minAtrPctThreshold?: number;     // Default: 0.12%
+  minRange20pThreshold?: number;    // Default: 0.38%
+  leverage?: number;               // e.g. 1
+  activePreset?: 'Free' | 'Dinamic';
 }
 
 export interface ScalpingPreset {
-    minRfProb: number;
-    minMetaScore: number;
-    stopLossPercent: number;
-    targetTakeProfit: number;
-    trailingStopActivation: number;
-    trailingStopDistance: number;
-    breakEvenActivation: number;
-    maxHoldMinutes: number;
-    enableDynamicTpSl?: boolean;
+  minRfProb: number;
+  minMetaScore: number;
+  stopLossPercent: number;
+  targetTakeProfit: number;
+  trailingStopActivation: number;
+  trailingStopDistance: number;
+  breakEvenActivation: number;
+  maxHoldMinutes: number;
+  positionSizePercent?: number;
+  cooldownMinutes?: number;
+  enableMaxNegativeHold?: boolean;
+  enableStagnationFilter?: boolean;
+  enableDynamicSizing?: boolean;
+  enableDynamicTpSl?: boolean;
 }
 
 export interface MetaTradeScoreBreakdown {
@@ -169,6 +180,22 @@ export interface NewsArticle {
   relatedSymbols?: string[];
 }
 
+export type PositionStrategy = 'scalping' | 'momentum' | 'manual';
+
+export interface MomentumConfig {
+  active: boolean;
+  minMomentumScore: number;       // e.g. 50
+  intervalMinutes: number;        // e.g. 15
+  positionAllocationPct: number;  // e.g. 10%
+  trailingActivationPct: number;  // e.g. 3.0%
+  trailingDistancePct: number;    // e.g. 0.5%
+  hardStopLossPct: number;        // e.g. 5.0%
+  maxHoldMinutes: number;         // e.g. 1440 (24h)
+  takeProfitPct: number | null;   // e.g. null (Disabled by default)
+  circuitBreakerDownPct?: number; // e.g. 50%
+  circuitBreakerUpPct?: number;   // e.g. 100%
+}
+
 export interface Position {
   id?: string;
   symbol: string;
@@ -179,6 +206,13 @@ export interface Position {
   lowestPrice?: number;
   mfePct?: number;
   maePct?: number;
+  maxFavorableExcursion?: number;
+  maxAdverseExcursion?: number;
+  trailingActive?: boolean;
+  trailingStopPrice?: number;
+  stopLossPercent?: number;
+  takeProfitPercent?: number;
+  scoreAtEntry?: number;
   openedAt?: number;
   negativeEnteredAt?: number;
   lastMinuteLogged?: number;
@@ -188,12 +222,16 @@ export interface Position {
   shares?: number;
   pnl?: number;
   pnlPercent?: number;
-  strategy?: 'scalping' | 'manual';
+  strategy?: PositionStrategy;
   entryPatternName?: string;
   leverage?: number;
   margin?: number;
   entryFee?: number;
   isUntracked?: boolean;
+  tradeGrade?: 'A+' | 'A' | 'B' | 'C' | 'D' | 'F';
+  entryGrade?: 'A+' | 'A' | 'B' | 'C' | 'D' | 'F';
+  isDegraded?: boolean;
+  degradedStatus?: string;
 }
 
 export interface TradeLog {

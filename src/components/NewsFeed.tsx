@@ -254,12 +254,12 @@ export function NewsFeed() {
                 <div className="pt-3 border-t border-white/5 flex items-center justify-between">
                   <div className="flex items-center gap-1.5 flex-wrap">
                     {article.relatedSymbols?.map((sym) => (
-                      <span key={sym} className="px-2 py-0.5 bg-black border border-white/10 rounded font-mono text-[10px] text-zinc-300">
+                      <span key={`${article.id}-${sym}`} className="px-2 py-0.5 bg-black border border-white/10 rounded font-mono text-[10px] text-zinc-300">
                         {sym}
                       </span>
                     ))}
                     {article.categories.slice(0, 2).map((cat, idx) => (
-                      <span key={idx} className="px-1.5 py-0.5 text-[10px] text-zinc-500 font-mono">
+                      <span key={`${article.id}-${cat}-${idx}`} className="px-1.5 py-0.5 text-[10px] text-zinc-500 font-mono">
                         #{cat.trim()}
                       </span>
                     ))}

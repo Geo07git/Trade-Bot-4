@@ -1,4 +1,5 @@
 import { KlineSnapshot } from './types';
+import { fetchActiveKlines } from './MultiExchangeMarket';
 
 // Standalone cache for backtest fetching to avoid API bans
 const memCache = new Map<string, KlineSnapshot[]>();
@@ -21,37 +22,23 @@ export async function fetchHistoricalKlinesForMomentum(
   }
   
   try {
+    if (!startTime || !endTime) {
+      const parsed = await fetchActiveKlines(cleanSymbol, interval, 150);
+      if (parsed.length > 0) {
+        memCache.set(cacheKey, parsed);
+        return parsed;
+      }
+    }
+    
     let allKlines: KlineSnapshot[] = [];
     let currentStart = startTime;
     const limit = 1000;
-    
-    // Daca nu primim interval, functionam ca inainte, tragem ultimele 1000
-    if (!startTime || !endTime) {
-      const url = `https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=${interval}&limit=${limit}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`Binance API error: ${res.statusText}`);
-      
-      const data = await res.json();
-      const parsed: KlineSnapshot[] = data.map((d: any) => ({
-        openTime: parseInt(d[0]),
-        open: parseFloat(d[1]),
-        high: parseFloat(d[2]),
-        low: parseFloat(d[3]),
-        close: parseFloat(d[4]),
-        volume: parseFloat(d[5]),
-        closeTime: parseInt(d[6]),
-        quoteVolume: parseFloat(d[7]),
-      }));
-      parsed.sort((a, b) => a.closeTime - b.closeTime);
-      memCache.set(cacheKey, parsed);
-      return parsed;
-    }
-    
+
     // Paginated fetch pentru range-uri lungi (ex. backtest 12 luni)
     while (true) {
       let url = `https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=${interval}&limit=${limit}`;
       if (currentStart) url += `&startTime=${currentStart}`;
-      url += `&endTime=${endTime}`;
+      if (endTime) url += `&endTime=${endTime}`;
       
       const res = await fetch(url);
       if (!res.ok) throw new Error(`Binance API error: ${res.statusText}`);

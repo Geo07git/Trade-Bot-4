@@ -5,6 +5,12 @@ export interface MomentumConfig {
   entrySlippagePct: number;    // e.g., 0.1 for market order slippage
   exitSlippagePct: number;     // e.g., 0.1
   minMomentumScore: number;    // Minimum score to trigger a candidate
+  trailingActivationPct?: number; // 0-10% (step 0.5, default 3.0)
+  trailingDistancePct?: number;   // 0-5% (step 0.5, default 0.5)
+  hardStopLossPct?: number;       // 0-5% below entry (step 0.5, default 5.0)
+  maxHoldMinutes?: number;        // 0-1440 min (step 10 min, default 1440)
+  takeProfitPct?: number | null;  // null = Dezactivat
+  positionAllocationPct?: number; // 1-100% of balance per trade (default 10%)
 }
 
 export interface KlineSnapshot {

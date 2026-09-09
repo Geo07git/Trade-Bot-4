@@ -51,90 +51,51 @@ export function ScalpingBot() {
   const [isSaving, setIsSaving] = useState(false);
 
   // Form local state
-  const [minRfProb, setMinRfProb] = useState<number>(scalpingConfig?.minRfProb ?? 70);
-  const [minMetaScore, setMinMetaScore] = useState<number>(scalpingConfig?.minMetaScore ?? 70);
-  const [stopLossPercent, setStopLossPercent] = useState<number>(scalpingConfig?.stopLossPercent ?? 1.0);
-  const [targetTakeProfit, setTargetTakeProfit] = useState<number>(scalpingConfig?.targetTakeProfit ?? 3.0);
-  const [trailingStopActivation, setTrailingStopActivation] = useState<number>(scalpingConfig?.trailingStopActivation ?? 1.5);
+  const [minRfProb, setMinRfProb] = useState<number>(scalpingConfig?.minRfProb ?? 90);
+  const [minMetaScore, setMinMetaScore] = useState<number>(scalpingConfig?.minMetaScore ?? 80);
+  const [stopLossPercent, setStopLossPercent] = useState<number>(scalpingConfig?.stopLossPercent ?? 5.0);
+  const [targetTakeProfit, setTargetTakeProfit] = useState<number>(scalpingConfig?.targetTakeProfit ?? 0);
+  const [trailingStopActivation, setTrailingStopActivation] = useState<number>(scalpingConfig?.trailingStopActivation ?? 3.0);
   const [trailingStopDistance, setTrailingStopDistance] = useState<number>(scalpingConfig?.trailingStopDistance ?? 0.5);
-  const [breakEvenActivation, setBreakEvenActivation] = useState<number>(scalpingConfig?.breakEvenActivation ?? 1.0);
+  const [breakEvenActivation, setBreakEvenActivation] = useState<number>(scalpingConfig?.breakEvenActivation ?? 2.0);
   const [positionSizePercent, setPositionSizePercent] = useState<number>(scalpingConfig?.positionSizePercent ?? 5.0);
-  const [maxHoldMinutes, setMaxHoldMinutes] = useState<number>(scalpingConfig?.maxHoldMinutes ?? 15);
-  const [maxNegativeHoldMinutes, setMaxNegativeHoldMinutesState] = useState<number>(scalpingConfig?.maxNegativeHoldMinutes ?? 1.0);
-  const [enableMaxNegativeHold, setEnableMaxNegativeHold] = useState<boolean>(scalpingConfig?.enableMaxNegativeHold ?? true);
+  const [maxHoldMinutes, setMaxHoldMinutes] = useState<number>(scalpingConfig?.maxHoldMinutes ?? 120);
+  const [maxNegativeHoldMinutes, setMaxNegativeHoldMinutesState] = useState<number>(scalpingConfig?.maxNegativeHoldMinutes ?? 0.0);
+  const [enableMaxNegativeHold, setEnableMaxNegativeHold] = useState<boolean>(scalpingConfig?.enableMaxNegativeHold ?? false);
   const [minOpportunityScore, setMinOpportunityScore] = useState<number>(scalpingConfig?.minOpportunityScore ?? 50);
-  const [cooldownMinutes, setCooldownMinutes] = useState<number>(scalpingConfig?.cooldownMinutes ?? 2);
+  const [cooldownMinutes, setCooldownMinutes] = useState<number>(scalpingConfig?.cooldownMinutes ?? 5);
   const [minVolumeGrowth, setMinVolumeGrowth] = useState<number>(scalpingConfig?.minVolumeGrowth ?? 0.8);
-  const [enableDynamicSizing, setEnableDynamicSizing] = useState<boolean>(scalpingConfig?.enableDynamicSizing ?? true);
-  const [enableStagnationFilter, setEnableStagnationFilter] = useState<boolean>(scalpingConfig?.enableStagnationFilter ?? true);
-  const [minAtrPctThreshold, setMinAtrPctThreshold] = useState<number>(scalpingConfig?.minAtrPctThreshold ?? 0.30);
-  const [minRange20pThreshold, setMinRange20pThreshold] = useState<number>(scalpingConfig?.minRange20pThreshold ?? 0.55);
+  const [enableDynamicSizing, setEnableDynamicSizing] = useState<boolean>(scalpingConfig?.enableDynamicSizing ?? false);
+  const [enableStagnationFilter, setEnableStagnationFilter] = useState<boolean>(scalpingConfig?.enableStagnationFilter ?? false);
+  const [minAtrPctThreshold, setMinAtrPctThreshold] = useState<number>(scalpingConfig?.minAtrPctThreshold ?? 0.12);
+  const [minRange20pThreshold, setMinRange20pThreshold] = useState<number>(scalpingConfig?.minRange20pThreshold ?? 0.38);
   const [leverage, setLeverage] = useState<number>(scalpingConfig?.leverage ?? 1);
 
   const setTimeframe = (timeframe: '1m' | '5m') => {
-    const is5m = timeframe === '5m';
-    
-    // Configurații conform tabelului userului
-    const newConfig = {
-      timeframe,
-      minRfProb: is5m ? 60 : 65,
-      minMetaScore: is5m ? 55 : 58,
-      stopLossPercent: is5m ? 0.50 : 0.30,
-      targetTakeProfit: is5m ? 1.00 : 0.60,
-      trailingStopActivation: is5m ? 0.55 : 0.35,
-      trailingStopDistance: is5m ? 0.18 : 0.12,
-      breakEvenActivation: is5m ? 0.40 : 0.40,
-      maxHoldMinutes: is5m ? 25 : 5,
-      cooldownMinutes: is5m ? 5 : 1,
-      minAtrPctThreshold: is5m ? 0.12 : 0.05,
-      minRange20pThreshold: is5m ? 0.38 : 0.20,
-      positionSizePercent: 5.0,
-      leverage: 1,
-      enableMaxNegativeHold: false,
-      enableDynamicSizing: true
-    };
-
-    setScalpingConfig({ ...scalpingConfig, ...newConfig });
-    
-    // Resetează starea locală pentru form
-    setMinRfProb(newConfig.minRfProb);
-    setMinMetaScore(newConfig.minMetaScore);
-    setStopLossPercent(newConfig.stopLossPercent);
-    setTargetTakeProfit(newConfig.targetTakeProfit);
-    setTrailingStopActivation(newConfig.trailingStopActivation);
-    setTrailingStopDistance(newConfig.trailingStopDistance);
-    setBreakEvenActivation(newConfig.breakEvenActivation);
-    setMaxHoldMinutes(newConfig.maxHoldMinutes);
-    setCooldownMinutes(newConfig.cooldownMinutes);
-    setMinAtrPctThreshold(newConfig.minAtrPctThreshold);
-    setMinRange20pThreshold(newConfig.minRange20pThreshold);
-    setPositionSizePercent(newConfig.positionSizePercent);
-    setLeverage(newConfig.leverage);
-    setEnableMaxNegativeHold(newConfig.enableMaxNegativeHold);
-    setEnableDynamicSizing(newConfig.enableDynamicSizing);
+    setScalpingConfig({ ...scalpingConfig, timeframe });
   };
 
   // Sync state when scalpingConfig changes or modal opens
   useEffect(() => {
     if (scalpingConfig) {
-      setMinRfProb(scalpingConfig.minRfProb ?? 70);
-      setMinMetaScore(scalpingConfig.minMetaScore ?? 70);
-      setStopLossPercent(scalpingConfig.stopLossPercent ?? 1.0);
-      setTargetTakeProfit(scalpingConfig.targetTakeProfit ?? 3.0);
-      setTrailingStopActivation(scalpingConfig.trailingStopActivation ?? 1.5);
+      setMinRfProb(scalpingConfig.minRfProb ?? 90);
+      setMinMetaScore(scalpingConfig.minMetaScore ?? 80);
+      setStopLossPercent(scalpingConfig.stopLossPercent ?? 5.0);
+      setTargetTakeProfit(scalpingConfig.targetTakeProfit ?? 0);
+      setTrailingStopActivation(scalpingConfig.trailingStopActivation ?? 3.0);
       setTrailingStopDistance(scalpingConfig.trailingStopDistance ?? 0.5);
-      setBreakEvenActivation(scalpingConfig.breakEvenActivation ?? 1.0);
+      setBreakEvenActivation(scalpingConfig.breakEvenActivation ?? 2.0);
       setPositionSizePercent(scalpingConfig.positionSizePercent ?? 5.0);
-      setMaxHoldMinutes(scalpingConfig.maxHoldMinutes ?? 15);
-      setMaxNegativeHoldMinutesState(scalpingConfig.maxNegativeHoldMinutes ?? 1.0);
-      setEnableMaxNegativeHold(scalpingConfig.enableMaxNegativeHold ?? true);
+      setMaxHoldMinutes(scalpingConfig.maxHoldMinutes ?? 120);
+      setMaxNegativeHoldMinutesState(scalpingConfig.maxNegativeHoldMinutes ?? 0.0);
+      setEnableMaxNegativeHold(scalpingConfig.enableMaxNegativeHold ?? false);
       setMinOpportunityScore(scalpingConfig.minOpportunityScore ?? 50);
-      setCooldownMinutes(scalpingConfig.cooldownMinutes ?? 2);
+      setCooldownMinutes(scalpingConfig.cooldownMinutes ?? 5);
       setMinVolumeGrowth(scalpingConfig.minVolumeGrowth ?? 0.8);
-      setEnableDynamicSizing(scalpingConfig.enableDynamicSizing ?? true);
-      setEnableStagnationFilter(scalpingConfig.enableStagnationFilter ?? true);
-      setMinAtrPctThreshold(scalpingConfig.minAtrPctThreshold ?? 0.30);
-      setMinRange20pThreshold(scalpingConfig.minRange20pThreshold ?? 0.55);
+      setEnableDynamicSizing(scalpingConfig.enableDynamicSizing ?? false);
+      setEnableStagnationFilter(scalpingConfig.enableStagnationFilter ?? false);
+      setMinAtrPctThreshold(scalpingConfig.minAtrPctThreshold ?? 0.12);
+      setMinRange20pThreshold(scalpingConfig.minRange20pThreshold ?? 0.38);
       setLeverage(scalpingConfig.leverage ?? 1);
     }
   }, [scalpingConfig, isConfigOpen]);
@@ -170,62 +131,38 @@ export function ScalpingBot() {
     }, 400);
   };
 
-  const applyPreset = (type: 'Conservator' | 'Free Trade' | 'Configurabil' | 'Dinamic' | 'aggressive' | 'balanced' | 'conservative') => {
-    if (type === 'Conservator' || type === 'conservative') {
-      setMinRfProb(75);
-      setMinMetaScore(55);
-      setStopLossPercent(0.55);
-      setTargetTakeProfit(0.85);
-      setTrailingStopActivation(0.50);
-      setTrailingStopDistance(0.15);
-      setBreakEvenActivation(0.35);
-      setPositionSizePercent(5.0);
-      setMaxHoldMinutes(8);
-      setMinOpportunityScore(55);
-      setCooldownMinutes(2);
-      setMinVolumeGrowth(0.8);
-      setEnableDynamicSizing(false);
-    } else if (type === 'Free Trade' || type === 'aggressive') {
-      setMinRfProb(70);
-      setMinMetaScore(50);
-      setStopLossPercent(1.0);
-      setTargetTakeProfit(5.0);
-      setTrailingStopActivation(0.60);
-      setTrailingStopDistance(0.35);
-      setBreakEvenActivation(0.40);
-      setPositionSizePercent(5.0);
-      setMaxHoldMinutes(8);
-      setMinOpportunityScore(50);
-      setCooldownMinutes(2);
-      setMinVolumeGrowth(0.8);
-      setEnableDynamicSizing(true);
-    } else if (type === 'Configurabil' || type === 'balanced') {
-      setMinRfProb(70);
-      setMinMetaScore(70);
-      setStopLossPercent(1.0);
-      setTargetTakeProfit(3.0);
-      setTrailingStopActivation(1.5);
+  const applyPreset = (type: 'Free' | 'Dinamic') => {
+    if (type === 'Free') {
+      setMinRfProb(90);
+      setMinMetaScore(80);
+      setStopLossPercent(5.0);
+      setTargetTakeProfit(0);
+      setTrailingStopActivation(3.0);
       setTrailingStopDistance(0.5);
-      setBreakEvenActivation(1.0);
+      setBreakEvenActivation(2.0);
       setPositionSizePercent(5.0);
-      setMaxHoldMinutes(8);
-      setMinOpportunityScore(55);
-      setCooldownMinutes(2);
+      setMaxHoldMinutes(120);
+      setMinOpportunityScore(50);
+      setCooldownMinutes(5);
       setMinVolumeGrowth(0.8);
-      setEnableDynamicSizing(true);
+      setEnableMaxNegativeHold(false);
+      setEnableStagnationFilter(false);
+      setEnableDynamicSizing(false);
     } else if (type === 'Dinamic') {
-      setMinRfProb(75);
-      setMinMetaScore(55);
-      setStopLossPercent(1.0);
-      setTargetTakeProfit(1.0);
-      setTrailingStopActivation(0.50);
-      setTrailingStopDistance(0.15);
-      setBreakEvenActivation(0.35);
+      setMinRfProb(90);
+      setMinMetaScore(80);
+      setStopLossPercent(5.0);
+      setTargetTakeProfit(0);
+      setTrailingStopActivation(3.0);
+      setTrailingStopDistance(0.5);
+      setBreakEvenActivation(2.0);
       setPositionSizePercent(5.0);
-      setMaxHoldMinutes(8);
-      setMinOpportunityScore(55);
-      setCooldownMinutes(2);
+      setMaxHoldMinutes(120);
+      setMinOpportunityScore(50);
+      setCooldownMinutes(5);
       setMinVolumeGrowth(0.8);
+      setEnableMaxNegativeHold(false);
+      setEnableStagnationFilter(false);
       setEnableDynamicSizing(true);
     }
   };
@@ -336,7 +273,7 @@ export function ScalpingBot() {
             <Sparkles className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="text-2xl font-mono font-bold text-white">
-            {scalpingConfig?.minRfProb ?? 50}%
+            {scalpingConfig?.minRfProb ?? 90}%
           </div>
           <p className="text-[11px] text-zinc-500 mt-1">Random Forest Ensemble Gate</p>
         </div>
@@ -348,9 +285,9 @@ export function ScalpingBot() {
             <Gauge className="w-4 h-4 text-teal-400" />
           </div>
           <div className="text-2xl font-mono font-bold text-emerald-400">
-            {scalpingConfig?.minMetaScore ?? 50}<span className="text-xs text-zinc-500 font-normal"> / 100</span>
+            {scalpingConfig?.minMetaScore ?? 80}<span className="text-xs text-zinc-500 font-normal"> / 100</span>
           </div>
-          <p className="text-[11px] text-zinc-500 mt-1">Scor Unificat de Confirmetii</p>
+          <p className="text-[11px] text-zinc-500 mt-1">Scor Unificat de Confirmare</p>
         </div>
 
         {/* Card 3: SL & TP */}
@@ -360,12 +297,16 @@ export function ScalpingBot() {
             <ShieldCheck className="w-4 h-4 text-blue-400" />
           </div>
           <div className="text-2xl font-mono font-bold text-white flex items-center gap-2">
-            <span className="text-rose-400">-{scalpingConfig?.stopLossPercent ?? 2.0}%</span>
+            <span className="text-rose-400">-{scalpingConfig?.stopLossPercent ?? 5.0}%</span>
             <span className="text-zinc-600">/</span>
-            <span className="text-emerald-400">+{scalpingConfig?.targetTakeProfit ?? 1.2}%</span>
+            {(scalpingConfig?.targetTakeProfit ?? 0) > 0 ? (
+              <span className="text-emerald-400">+{scalpingConfig?.targetTakeProfit}%</span>
+            ) : (
+              <span className="text-zinc-400 font-mono text-xl font-bold">TP: OFF</span>
+            )}
           </div>
           <p className="text-[11px] text-zinc-500 mt-1">
-            Trail Drop: {scalpingConfig?.trailingStopDistance ?? 0.5}% | BE: +{scalpingConfig?.breakEvenActivation ?? 1.0}%
+            Trail: +{scalpingConfig?.trailingStopActivation ?? 3.0}% (Drop {scalpingConfig?.trailingStopDistance ?? 0.5}%) | BE: +{scalpingConfig?.breakEvenActivation ?? 2.0}%
           </p>
         </div>
 
@@ -376,14 +317,14 @@ export function ScalpingBot() {
             <Clock className="w-4 h-4 text-purple-400" />
           </div>
           <div className="text-2xl font-mono font-bold text-white flex items-center gap-1.5 flex-wrap">
-            {scalpingConfig?.maxHoldMinutes ?? 15} <span className="text-xs text-zinc-400 font-normal">min</span>
+            {scalpingConfig?.maxHoldMinutes ?? 120} <span className="text-xs text-zinc-400 font-normal">min</span>
             <span className="text-zinc-600 mx-1">|</span>
             <span className="text-emerald-400">{scalpingConfig?.positionSizePercent ?? 5}%</span>
             <span className="text-zinc-600 mx-1">|</span>
             <span className="text-amber-400 font-bold">{scalpingConfig?.leverage ?? 1}x</span>
           </div>
           <p className="text-[11px] text-zinc-500 mt-1">
-            Sizing Dinamic: {scalpingConfig?.enableDynamicSizing ? 'ACTIV ⚡' : 'INACTIV'} | Levier Scalping: {scalpingConfig?.leverage ?? 1}x
+            Sizing Dinamic: {scalpingConfig?.enableDynamicSizing ? 'ACTIV ⚡' : 'DEZACTIVAT'} | Cooldown: {scalpingConfig?.cooldownMinutes ?? 5} min
           </p>
         </div>
       </div>
@@ -395,108 +336,86 @@ export function ScalpingBot() {
             <Flame className="w-4 h-4 text-orange-400" />
             Preseturi Rapide de Configurare Motor Scalping
           </div>
-          <span className="text-xs text-zinc-400">Apasă un preset pentru a încărca configurația optimizată</span>
+          <span className="text-xs text-zinc-400">Selectează configurația dorită pentru motorul ML</span>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <button
             onClick={() => {
-              applyPreset('Conservator');
+              applyPreset('Free');
               setScalpingConfig({
-                minRfProb: 75,
-                minMetaScore: 55,
-                stopLossPercent: 0.55,
-                targetTakeProfit: 0.85,
-                trailingStopActivation: 0.50,
-                trailingStopDistance: 0.15,
-                breakEvenActivation: 0.35,
-                maxHoldMinutes: 8,
+                minRfProb: 90,
+                minMetaScore: 80,
+                stopLossPercent: 5.0,
+                targetTakeProfit: 0,
+                trailingStopActivation: 3.0,
+                trailingStopDistance: 0.5,
+                breakEvenActivation: 2.0,
+                maxHoldMinutes: 120,
+                positionSizePercent: 5.0,
+                cooldownMinutes: 5,
+                enableMaxNegativeHold: false,
+                enableStagnationFilter: false,
+                enableDynamicSizing: false,
+                activePreset: 'Free'
               });
             }}
-            className="p-4 rounded-xl border border-emerald-500/20 bg-emerald-500/5 hover:bg-emerald-500/10 text-left transition-all group"
-          >
-            <div className="flex items-center justify-between font-semibold text-emerald-400 text-sm mb-1">
-              <span>🛡️ Conservator</span>
-              <span className="text-[10px] font-mono bg-emerald-500/20 px-2 py-0.5 rounded text-emerald-300">Default</span>
-            </div>
-            <p className="text-xs text-zinc-400">
-              RF: 75% | MetaScore: 55 | SL: 0.55% | TP: 0.85% | Trail: 0.5% | Hold: 8m
-            </p>
-          </button>
-
-          <button
-            onClick={() => {
-              applyPreset('Free Trade');
-              setScalpingConfig({
-                minRfProb: 70,
-                minMetaScore: 50,
-                stopLossPercent: 1.0,
-                targetTakeProfit: 5.0,
-                trailingStopActivation: 0.60,
-                trailingStopDistance: 0.35,
-                breakEvenActivation: 0.40,
-                maxHoldMinutes: 8,
-              });
-            }}
-            className="p-4 rounded-xl border border-sky-500/20 bg-sky-500/5 hover:bg-sky-500/10 text-left transition-all group"
+            className={cn(
+              "p-4 rounded-xl border text-left transition-all group",
+              (scalpingConfig?.activePreset ?? 'Free') === 'Free'
+                ? "border-sky-500/50 bg-sky-500/10 shadow-lg shadow-sky-950/30"
+                : "border-sky-500/20 bg-sky-500/5 hover:bg-sky-500/10"
+            )}
           >
             <div className="flex items-center justify-between font-semibold text-sky-400 text-sm mb-1">
-              <span>🚀 Free Trade</span>
-              <span className="text-[10px] font-mono bg-sky-500/20 px-2 py-0.5 rounded text-sky-300">Agresiv</span>
+              <span className="flex items-center gap-1.5">🚀 Free (Default)</span>
+              <span className="text-[10px] font-mono bg-sky-500/20 px-2 py-0.5 rounded text-sky-300 border border-sky-500/30">Setare Standard</span>
             </div>
-            <p className="text-xs text-zinc-400">
-              RF: 70% | MetaScore: 50 | SL: 1.0% | TP: 5.0% | BE: 0.4% | Trail: 0.6%
+            <p className="text-xs text-zinc-300 font-mono mt-1">
+              RF: 90% | MetaScore: 80 | SL: -5% | TP: OFF | Trail: +3% (Drop 0.5%) | BE: +2% | Hold: 120m | Alocare: 5%
+            </p>
+            <p className="text-[11px] text-zinc-400 mt-1.5">
+              Cooldown 5m • Fără limită timp minus • Filtru stagnare dezactivat • Sizing fix 5%
             </p>
           </button>
 
-          <button
-            onClick={() => {
-              applyPreset('Configurabil');
-              setScalpingConfig({
-                minRfProb: 70,
-                minMetaScore: 70,
-                stopLossPercent: 1.0,
-                targetTakeProfit: 3.0,
-                trailingStopActivation: 1.5,
-                trailingStopDistance: 0.5,
-                breakEvenActivation: 1.0,
-                maxHoldMinutes: 8,
-              });
-            }}
-            className="p-4 rounded-xl border border-amber-500/20 bg-amber-500/5 hover:bg-amber-500/10 text-left transition-all group"
-          >
-            <div className="flex items-center justify-between font-semibold text-amber-400 text-sm mb-1">
-              <span>⚙️ Configurabil</span>
-              <span className="text-[10px] font-mono bg-amber-500/20 px-2 py-0.5 rounded text-amber-300">Custom</span>
-            </div>
-            <p className="text-xs text-zinc-400">
-              Setări manuale avansate. RF: 70% | MetaScore: 70 | TP: 3.0%
-            </p>
-          </button>
-          
           <button
             onClick={() => {
               applyPreset('Dinamic');
               setScalpingConfig({
-                minRfProb: 75,
-                minMetaScore: 55,
-                stopLossPercent: 1.0, // Va fi suprascris
-                targetTakeProfit: 1.0, // Va fi suprascris
-                trailingStopActivation: 0.50,
-                trailingStopDistance: 0.15,
-                breakEvenActivation: 0.35,
-                maxHoldMinutes: 8,
-                enableDynamicTpSl: true
+                minRfProb: 90,
+                minMetaScore: 80,
+                stopLossPercent: 5.0,
+                targetTakeProfit: 0,
+                trailingStopActivation: 3.0,
+                trailingStopDistance: 0.5,
+                breakEvenActivation: 2.0,
+                maxHoldMinutes: 120,
+                positionSizePercent: 5.0,
+                cooldownMinutes: 5,
+                enableMaxNegativeHold: false,
+                enableStagnationFilter: false,
+                enableDynamicSizing: true,
+                enableDynamicTpSl: true,
+                activePreset: 'Dinamic'
               });
             }}
-            className="p-4 rounded-xl border border-purple-500/20 bg-purple-500/5 hover:bg-purple-500/10 text-left transition-all group"
+            className={cn(
+              "p-4 rounded-xl border text-left transition-all group",
+              scalpingConfig?.activePreset === 'Dinamic'
+                ? "border-purple-500/50 bg-purple-500/10 shadow-lg shadow-purple-950/30"
+                : "border-purple-500/20 bg-purple-500/5 hover:bg-purple-500/10"
+            )}
           >
             <div className="flex items-center justify-between font-semibold text-purple-400 text-sm mb-1">
-              <span>⚡ Dinamic</span>
-              <span className="text-[10px] font-mono bg-purple-500/20 px-2 py-0.5 rounded text-purple-300">ATR-ML</span>
+              <span className="flex items-center gap-1.5">⚡ Dinamic</span>
+              <span className="text-[10px] font-mono bg-purple-500/20 px-2 py-0.5 rounded text-purple-300 border border-purple-500/30">ATR-ML Dinamic</span>
             </div>
-            <p className="text-xs text-zinc-400">
-              TP/SL: Dinamic (Calculat în timp real de bot).
+            <p className="text-xs text-zinc-300 font-mono mt-1">
+              RF: 90% | MetaScore: 80 | SL: -5% | TP: Dinamic | Trail: +3% (Drop 0.5%) | BE: +2% | Hold: 120m | Sizing Dinamic
+            </p>
+            <p className="text-[11px] text-zinc-400 mt-1.5">
+              Sizing adaptiv de capital activat în funcție de MetaScore-ul semnalului detectat
             </p>
           </button>
         </div>
@@ -527,7 +446,7 @@ export function ScalpingBot() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5 font-mono">
-                  {watchlist.filter(w => w.active).slice(0, 10).map((item) => {
+                  {watchlist.filter(w => w.active).slice(0, 10).map((item, i) => {
                     const opp = marketOpportunities.find(o => o.symbol === item.symbol);
                     const prob = item.signal?.prob || opp?.rfProb || 50;
                     const oppScore = opp?.opportunityScore || item.opportunityScore || 50;
@@ -535,7 +454,7 @@ export function ScalpingBot() {
                     const passOpp = oppScore >= (scalpingConfig?.minOpportunityScore ?? 55);
 
                     return (
-                      <tr key={item.symbol} className="hover:bg-white/5 transition-colors">
+                      <tr key={`${item.symbol}-${i}`} className="hover:bg-white/5 transition-colors">
                         <td className="py-3 font-semibold text-white">{item.symbol}</td>
                         <td className="py-3 text-zinc-300">
                           ${item.price ? item.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '---'}
@@ -593,12 +512,12 @@ export function ScalpingBot() {
               </div>
             ) : (
               <div className="space-y-3">
-                {activeScalpPositions.map((pos) => {
+                {activeScalpPositions.map((pos, i) => {
                   const pnl = (pos.currentPrice - pos.entryPrice) * pos.amount;
                   const pnlPct = ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
 
                   return (
-                    <div key={pos.symbol} className="p-4 rounded-xl bg-white/5 border border-white/10 flex items-center justify-between">
+                    <div key={`${pos.id || pos.symbol}-${i}`} className="p-4 rounded-xl bg-white/5 border border-white/10 flex items-center justify-between">
                       <div>
                         <div className="flex items-center gap-2">
                           <span className="font-bold text-white text-sm">{pos.symbol}</span>
@@ -699,7 +618,7 @@ export function ScalpingBot() {
                 <input 
                   type="range" 
                   min="30" 
-                  max="90" 
+                  max="99" 
                   value={minRfProb} 
                   onChange={(e) => setMinRfProb(Number(e.target.value))}
                   className="w-full accent-emerald-500" 
@@ -714,8 +633,8 @@ export function ScalpingBot() {
                 </div>
                 <input 
                   type="range" 
-                  min="30" 
-                  max="90" 
+                  min="10" 
+                  max="100" 
                   value={minMetaScore} 
                   onChange={(e) => setMinMetaScore(Number(e.target.value))}
                   className="w-full accent-emerald-500" 
@@ -731,8 +650,8 @@ export function ScalpingBot() {
                   </div>
                   <input 
                     type="range" 
-                    min="0.5" 
-                    max="5.0" 
+                    min="0.1" 
+                    max="10.0" 
                     step="0.1" 
                     value={stopLossPercent} 
                     onChange={(e) => setStopLossPercent(Number(e.target.value))}
@@ -743,12 +662,14 @@ export function ScalpingBot() {
                 <div className="space-y-2">
                   <div className="flex justify-between text-xs font-medium">
                     <label className="text-zinc-200">Target Take Profit (%)</label>
-                    <span className="text-emerald-400 font-mono font-bold">+{targetTakeProfit}%</span>
+                    <span className="text-emerald-400 font-mono font-bold">
+                      {targetTakeProfit > 0 ? `+${targetTakeProfit}%` : 'OFF (Dezactivat)'}
+                    </span>
                   </div>
                   <input 
                     type="range" 
-                    min="0.5" 
-                    max="5.0" 
+                    min="0" 
+                    max="15.0" 
                     step="0.1" 
                     value={targetTakeProfit} 
                     onChange={(e) => setTargetTakeProfit(Number(e.target.value))}
@@ -766,8 +687,8 @@ export function ScalpingBot() {
                   </div>
                   <input 
                     type="range" 
-                    min="0.5" 
-                    max="5.0" 
+                    min="0.1" 
+                    max="10.0" 
                     step="0.1" 
                     value={trailingStopActivation} 
                     onChange={(e) => setTrailingStopActivation(Number(e.target.value))}
@@ -782,8 +703,8 @@ export function ScalpingBot() {
                   </div>
                   <input 
                     type="range" 
-                    min="0.2" 
-                    max="2.0" 
+                    min="0.1" 
+                    max="3.0" 
                     step="0.1" 
                     value={trailingStopDistance} 
                     onChange={(e) => setTrailingStopDistance(Number(e.target.value))}
@@ -801,8 +722,8 @@ export function ScalpingBot() {
                   </div>
                   <input 
                     type="range" 
-                    min="0.3" 
-                    max="3.0" 
+                    min="0.1" 
+                    max="5.0" 
                     step="0.1" 
                     value={breakEvenActivation} 
                     onChange={(e) => setBreakEvenActivation(Number(e.target.value))}
@@ -818,7 +739,7 @@ export function ScalpingBot() {
                   <input 
                     type="range" 
                     min="1" 
-                    max="20" 
+                    max="50" 
                     step="1" 
                     value={positionSizePercent} 
                     onChange={(e) => setPositionSizePercent(Number(e.target.value))}
@@ -879,8 +800,8 @@ export function ScalpingBot() {
                   </div>
                   <input 
                     type="range" 
-                    min="3" 
-                    max="120" 
+                    min="1" 
+                    max="240" 
                     step="1" 
                     value={maxHoldMinutes} 
                     onChange={(e) => setMaxHoldMinutes(Number(e.target.value))}

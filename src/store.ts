@@ -4,7 +4,7 @@ import { registerSymbolCooldown } from './services/ml';
 import { scanClientSideMarketOpportunities } from './services/api';
 import { apiFetch, safeJson } from './utils/apiHelper';
 import { Language } from './utils/i18n';
-import { ViewState, MarketOpportunity, SymbolPerformanceStat, ScalpingConfig, ExecutionEngineMode, MlModelSelection, Position, ScalpingPreset } from './types';
+import { ViewState, MarketOpportunity, SymbolPerformanceStat, ScalpingConfig, ExecutionEngineMode, MlModelSelection, Position, ScalpingPreset, EquityProtectionConfig } from './types';
 
 export interface WatchlistItem {
   symbol: string;
@@ -62,6 +62,10 @@ interface TradingStore {
   autoTradingActive: boolean;
   circuitBreakerTriggered: boolean;
   circuitBreakerReason: string | null;
+  isEquityProtectionActivated?: boolean;
+  currentCyclePeakEquity?: number;
+  cycleStartEquity?: number;
+  protectedPiggyBank?: number;
   dataInterval: number;
   analysisInterval: number;
   positionSizePercent: number;
@@ -81,6 +85,17 @@ interface TradingStore {
   telegramChatId: string;
   timezone: string;
   binanceMode: 'testnet' | 'live' | 'paper';
+  exchangeProvider: 'binance' | 'bybit' | 'okx';
+  bybitApiKey: string;
+  bybitApiSecret: string;
+  bybitTestnetApiKey: string;
+  bybitTestnetApiSecret: string;
+  okxApiKey: string;
+  okxApiSecret: string;
+  okxPassphrase: string;
+  okxTestnetApiKey: string;
+  okxTestnetApiSecret: string;
+  okxTestnetPassphrase: string;
   lastCheckAt: string | null;
   reportConfig: {
     enabled?: boolean;
@@ -92,8 +107,10 @@ interface TradingStore {
   
   scalpingActive: boolean;
   scalpingConfig: ScalpingConfig;
-  presets: Record<'Conservator' | 'Free Trade' | 'Configurabil' | 'Dinamic', ScalpingPreset>;
+  equityProtectionConfig: EquityProtectionConfig;
+  presets: Record<'Free' | 'Dinamic', ScalpingPreset>;
   setScalpingConfig: (config: Partial<ScalpingConfig>) => void;
+  setEquityProtectionConfig: (config: Partial<EquityProtectionConfig>) => void;
   toggleScalpingEngine: (active?: boolean) => void;
   resetScalpingEngine: () => Promise<any>;
   
@@ -133,6 +150,17 @@ interface TradingStore {
   setTelegramChatId: (id: string) => void;
   setTimezone: (timezone: string) => void;
   setBinanceMode: (mode: 'testnet' | 'live' | 'paper') => void;
+  setExchangeProvider: (provider: 'binance' | 'bybit' | 'okx') => void;
+  setBybitApiKey: (key: string) => void;
+  setBybitApiSecret: (secret: string) => void;
+  setBybitTestnetApiKey: (key: string) => void;
+  setBybitTestnetApiSecret: (secret: string) => void;
+  setOkxApiKey: (key: string) => void;
+  setOkxApiSecret: (secret: string) => void;
+  setOkxPassphrase: (pass: string) => void;
+  setOkxTestnetApiKey: (key: string) => void;
+  setOkxTestnetApiSecret: (secret: string) => void;
+  setOkxTestnetPassphrase: (pass: string) => void;
   setReportConfig: (config: Partial<TradingStore['reportConfig']>) => void;
   setAccumulationTargetPercent: (pct: number) => void;
   toggleAccumulationTarget: (enabled?: boolean) => void;
@@ -153,7 +181,7 @@ export const useTradingStore = create<TradingStore>()(
   setLanguage: (lang) => set({ language: lang }),
   currentView: 'bloomberg',
   balance: 10000,
-  initialBalance: 10000,
+  initialBalance: 250,
   accumulationBalance: 0,
   accumulationTargetPercent: 3.0,
   sessionCycleCount: 1,
@@ -216,73 +244,79 @@ export const useTradingStore = create<TradingStore>()(
   telegramChatId: '',
   timezone: 'Europe/Bucharest',
   binanceMode: 'paper',
+  exchangeProvider: 'binance',
+  bybitApiKey: '',
+  bybitApiSecret: '',
+  bybitTestnetApiKey: '',
+  bybitTestnetApiSecret: '',
+  okxApiKey: '',
+  okxApiSecret: '',
+  okxPassphrase: '',
+  okxTestnetApiKey: '',
+  okxTestnetApiSecret: '',
+  okxTestnetPassphrase: '',
   lastCheckAt: null,
   scalpingActive: true,
   scalpingConfig: {
     active: true,
     timeframe: '1m',
-    minRfProb: 60,
-    minMetaScore: 55,
-    stopLossPercent: 0.50,
-    targetTakeProfit: 1.00,
-    trailingStopActivation: 0.55,
-    trailingStopDistance: 0.18,
-    breakEvenActivation: 0.40,
+    minRfProb: 90,
+    minMetaScore: 80,
+    stopLossPercent: 5.0,
+    targetTakeProfit: 0,
+    trailingStopActivation: 3.0,
+    trailingStopDistance: 0.5,
+    breakEvenActivation: 2.0,
     positionSizePercent: 5.0,
-    maxHoldMinutes: 25,
+    maxHoldMinutes: 120,
     maxNegativeHoldMinutes: 0.0,
     enableMaxNegativeHold: false,
     minOpportunityScore: 50,
     cooldownMinutes: 5,
-    enableDynamicSizing: true,
+    enableDynamicSizing: false,
     minVolumeGrowth: 0.8,
-    enableStagnationFilter: true,
+    enableStagnationFilter: false,
     minAtrPctThreshold: 0.12,
     minRange20pThreshold: 0.38,
     leverage: 1,
-    activePreset: 'Conservator'
+    activePreset: 'Free'
+  },
+  equityProtectionConfig: {
+    enabled: true,
+    profitThresholdPct: 0.8,
+    drawdownProtectionPct: 0.1
   },
   presets: {
-    Conservator: {
-        minRfProb: 75,
-        minMetaScore: 55,
-        stopLossPercent: 0.55,
-        targetTakeProfit: 0.85,
-        trailingStopActivation: 0.50,
-        trailingStopDistance: 0.15,
-        breakEvenActivation: 0.35,
-        maxHoldMinutes: 8,
-    },
-    'Free Trade': {
-        minRfProb: 70,
-        minMetaScore: 50,
-        stopLossPercent: 1.0,
-        targetTakeProfit: 5.0,
-        trailingStopActivation: 0.60,
-        trailingStopDistance: 0.35,
-        breakEvenActivation: 0.40,
-        maxHoldMinutes: 8,
-    },
-    Configurabil: {
-        minRfProb: 70,
-        minMetaScore: 70,
-        stopLossPercent: 1.0,
-        targetTakeProfit: 3.0,
-        trailingStopActivation: 1.5,
-        trailingStopDistance: 0.5,
-        breakEvenActivation: 1.0,
-        maxHoldMinutes: 8,
+    Free: {
+      minRfProb: 90,
+      minMetaScore: 80,
+      stopLossPercent: 5.0,
+      targetTakeProfit: 0,
+      trailingStopActivation: 3.0,
+      trailingStopDistance: 0.5,
+      breakEvenActivation: 2.0,
+      maxHoldMinutes: 120,
+      positionSizePercent: 5.0,
+      cooldownMinutes: 5,
+      enableMaxNegativeHold: false,
+      enableStagnationFilter: false,
+      enableDynamicSizing: false
     },
     Dinamic: {
-        minRfProb: 75,
-        minMetaScore: 55,
-        stopLossPercent: 1.0, // Va fi suprascris de dinamic
-        targetTakeProfit: 1.0, // Va fi suprascris de dinamic
-        trailingStopActivation: 0.50,
-        trailingStopDistance: 0.15,
-        breakEvenActivation: 0.35,
-        maxHoldMinutes: 8,
-        enableDynamicTpSl: true
+      minRfProb: 90,
+      minMetaScore: 80,
+      stopLossPercent: 5.0,
+      targetTakeProfit: 0,
+      trailingStopActivation: 3.0,
+      trailingStopDistance: 0.5,
+      breakEvenActivation: 2.0,
+      maxHoldMinutes: 120,
+      positionSizePercent: 5.0,
+      cooldownMinutes: 5,
+      enableMaxNegativeHold: false,
+      enableStagnationFilter: false,
+      enableDynamicSizing: true,
+      enableDynamicTpSl: true
     }
   },
   reportConfig: {
@@ -548,7 +582,7 @@ export const useTradingStore = create<TradingStore>()(
             circuitBreakerTriggered: !!data.state.circuitBreakerTriggered,
             circuitBreakerReason: data.state.circuitBreakerReason || null,
             autoTradingActive: !!data.state.autoTradingActive,
-            initialBalance: data.state.initialBalance ?? 10000,
+            initialBalance: data.state.initialBalance ?? 250,
             balance: data.state.balance ?? 10000
           });
         }
@@ -736,6 +770,17 @@ export const useTradingStore = create<TradingStore>()(
       })
       .catch(() => {});
   },
+  setExchangeProvider: (exchangeProvider) => set({ exchangeProvider }),
+  setBybitApiKey: (bybitApiKey) => set({ bybitApiKey }),
+  setBybitApiSecret: (bybitApiSecret) => set({ bybitApiSecret }),
+  setBybitTestnetApiKey: (bybitTestnetApiKey) => set({ bybitTestnetApiKey }),
+  setBybitTestnetApiSecret: (bybitTestnetApiSecret) => set({ bybitTestnetApiSecret }),
+  setOkxApiKey: (okxApiKey) => set({ okxApiKey }),
+  setOkxApiSecret: (okxApiSecret) => set({ okxApiSecret }),
+  setOkxPassphrase: (okxPassphrase) => set({ okxPassphrase }),
+  setOkxTestnetApiKey: (okxTestnetApiKey) => set({ okxTestnetApiKey }),
+  setOkxTestnetApiSecret: (okxTestnetApiSecret) => set({ okxTestnetApiSecret }),
+  setOkxTestnetPassphrase: (okxTestnetPassphrase) => set({ okxTestnetPassphrase }),
   syncBinanceBalance: async () => {
     try {
       // First ensure the server has the latest API keys and mode from store
@@ -791,6 +836,15 @@ export const useTradingStore = create<TradingStore>()(
       positionSizePercent: newConfig.positionSizePercent ?? state.positionSizePercent
     };
   }),
+  setEquityProtectionConfig: (config) => set((state) => {
+    const newConfig = { ...state.equityProtectionConfig, ...config };
+    apiFetch('/api/bot/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ equityProtectionConfig: newConfig })
+    }).catch(() => {});
+    return { equityProtectionConfig: newConfig };
+  }),
   toggleScalpingEngine: (active) => set((state) => {
     const nextActive = active !== undefined ? active : !state.scalpingActive;
     const newConfig = { ...state.scalpingConfig, active: nextActive };
@@ -834,19 +888,27 @@ export const useTradingStore = create<TradingStore>()(
           lastCheckAt: data.state.lastCheckAt || data.lastCheckAt,
           scalpingConfig: data.state.scalpingConfig || {
             active: true,
-            minRfProb: 70,
-            minMetaScore: 70,
-            stopLossPercent: 1.0,
-            targetTakeProfit: 3.0,
-            trailingStopActivation: 1.5,
+            timeframe: '1m',
+            minRfProb: 90,
+            minMetaScore: 80,
+            stopLossPercent: 5.0,
+            targetTakeProfit: 0,
+            trailingStopActivation: 3.0,
             trailingStopDistance: 0.5,
-            breakEvenActivation: 1.0,
+            breakEvenActivation: 2.0,
             positionSizePercent: 5.0,
-            maxHoldMinutes: 15,
+            maxHoldMinutes: 120,
+            maxNegativeHoldMinutes: 0.0,
+            enableMaxNegativeHold: false,
             minOpportunityScore: 50,
-            cooldownMinutes: 2,
-            enableDynamicSizing: true,
-            minVolumeGrowth: 0.8
+            cooldownMinutes: 5,
+            enableDynamicSizing: false,
+            minVolumeGrowth: 0.8,
+            enableStagnationFilter: false,
+            minAtrPctThreshold: 0.12,
+            minRange20pThreshold: 0.38,
+            leverage: 1,
+            activePreset: 'Free'
           },
           scalpingActive: data.state.scalpingConfig?.active ?? true
         });

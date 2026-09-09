@@ -9,6 +9,7 @@ import { getAccountInfo, getMyTrades, getOpenOrders } from './server/services/Bi
 import { journalService } from './server/services/JournalService';
 import momentumBacktestRouter from './server/api/momentum-backtest';
 import momentumPaperRouter from './server/api/momentum-paper';
+import { paperTrader } from './server/services/momentum/PaperTrader';
 import { requireAdminAuth } from './server/utils/auth';
 
 dotenv.config();
@@ -18,6 +19,65 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json());
+
+  // Strict Rule: Maximum 1 position / transaction per coin across all engines
+  botEngine.setExternalPositionChecker((symbol: string) => {
+    return paperTrader.getState().positions.some(p => p.symbol === symbol && p.status === 'OPEN');
+  });
+
+  paperTrader.setExternalPositionChecker((symbol: string) => {
+    return (botEngine.state.positions || []).some(p => p.symbol === symbol && p.amount > 0);
+  });
+
+  // Strict Capital Accounting: Momentum trades deduct from & refund to the shared bot capital
+  paperTrader.setExternalBalanceHandler({
+    getBalance: () => botEngine.state.balance,
+    deduct: (amount: number) => {
+      botEngine.state.balance = Math.max(0, parseFloat((botEngine.state.balance - amount).toFixed(4)));
+      botEngine.savePersistedState(true);
+    },
+    refund: (amount: number) => {
+      botEngine.state.balance = parseFloat((botEngine.state.balance + amount).toFixed(4));
+      botEngine.savePersistedState(true);
+    }
+  });
+
+  // Reconcile existing open momentum positions into botEngine.state.balance if legacy state hadn't deducted them
+  try {
+    const openPaperPositions = paperTrader.getState().positions?.filter(p => p.status === 'OPEN') || [];
+    const totalOpenMomentumCost = openPaperPositions.reduce((acc, p) => acc + (p.sizeUSDT || 0) + (p.feePaid || 0), 0);
+    const botPositionsMargin = (botEngine.state.positions || []).reduce((acc, p) => {
+      if (!p.amount) return acc;
+      const lev = p.leverage || 1;
+      return acc + (p.margin || ((p.entryPrice * p.amount) / lev));
+    }, 0);
+
+    // If bot balance plus bot margin is approximately the initial balance, it means momentum positions were never deducted
+    if (totalOpenMomentumCost > 0 && (botEngine.state.balance + botPositionsMargin) > (botEngine.state.initialBalance - 15)) {
+      console.log(`[Reconcile Capital] Deducting ${totalOpenMomentumCost.toFixed(2)} USDT of existing open momentum positions from bot capital.`);
+      botEngine.state.balance = Math.max(0, parseFloat((botEngine.state.balance - totalOpenMomentumCost).toFixed(4)));
+      botEngine.savePersistedState(true);
+    }
+  } catch (err) {
+    console.error('[Reconcile Capital Error]', err);
+  }
+
+  botEngine.setExternalPositionsValueProvider(() => {
+    const paperPositions = paperTrader.getState().positions || [];
+    return paperPositions
+      .filter(p => p.status === 'OPEN')
+      .reduce((acc, p) => {
+        const curPrice = p.currentPrice || p.entryPrice;
+        const pnl = p.entryPrice > 0 ? ((curPrice - p.entryPrice) / p.entryPrice) * p.sizeUSDT : 0;
+        return acc + (p.sizeUSDT + pnl);
+      }, 0);
+  });
+
+  // Momentum Routers (Backtest & Paper Trading)
+  app.use('/api/momentum-paper', momentumPaperRouter);
+  app.use('/api/momentum/paper', momentumPaperRouter);
+  app.use('/api/momentum-backtest', momentumBacktestRouter);
+  app.use('/api/momentum/backtest', momentumBacktestRouter);
 
   // Trading Engine & Audit Trail Endpoints
   app.get('/api/engine/status', (req, res) => {
@@ -102,15 +162,98 @@ async function startServer() {
   // Security helpers for Bot API
   function getSanitizedBotState() {
     const state = botEngine.state;
+
+    // Get open positions from Momentum PaperTrader
+    const paperPositions = paperTrader.getState().positions || [];
+    const openMomentumPositions = paperPositions
+      .filter(p => p.status === 'OPEN')
+      .map(p => {
+        const amt = (p.sizeUSDT && p.entryPrice) ? p.sizeUSDT / p.entryPrice : 0;
+        const curPrice = p.currentPrice || p.entryPrice;
+        const pnl = (curPrice - p.entryPrice) * amt;
+        const pnlPct = p.entryPrice > 0 ? ((curPrice - p.entryPrice) / p.entryPrice) * 100 : 0;
+        return {
+          id: p.id,
+          symbol: p.symbol,
+          amount: amt,
+          entryPrice: p.entryPrice,
+          currentPrice: curPrice,
+          highestPrice: p.highestPrice || curPrice,
+          lowestPrice: p.entryPrice * (1 + (p.maxAdverseExcursion || 0) / 100),
+          maxFavorableExcursion: p.maxFavorableExcursion || 0,
+          maxAdverseExcursion: p.maxAdverseExcursion || 0,
+          mfePct: p.maxFavorableExcursion || 0,
+          maePct: p.maxAdverseExcursion || 0,
+          trailingActive: p.trailingActive || false,
+          trailingStopPrice: p.trailingStopPrice,
+          stopLossPercent: 5.0,
+          takeProfitPercent: undefined,
+          scoreAtEntry: p.scoreAtEntry || 75,
+          openedAt: p.entryTimestamp,
+          shares: amt,
+          pnl: pnl,
+          pnlPercent: pnlPct,
+          strategy: 'momentum' as const,
+          entryPatternName: 'Momentum Breakout',
+          leverage: 1,
+          margin: p.sizeUSDT,
+          status: 'OPEN'
+        };
+      });
+
+    const botPositions = (state.positions || []).map(p => ({
+      ...p,
+      strategy: p.strategy || ((p as any)?.entryReason?.includes('Momentum') ? 'momentum' : ((p as any)?.entryReason?.includes('Manual') ? 'manual' : 'scalping'))
+    }));
+
+    // Invariantă P0: Maxim 1 tranzacție per monedă afișată și monitorizată
+    const seenSymbols = new Set<string>();
+    const uniqueBotPositions: any[] = [];
+    for (const p of botPositions) {
+      if (p.amount > 0 && !seenSymbols.has(p.symbol)) {
+        seenSymbols.add(p.symbol);
+        uniqueBotPositions.push(p);
+      }
+    }
+
+    const uniqueMomentumPositions: any[] = [];
+    for (const p of openMomentumPositions) {
+      if (!seenSymbols.has(p.symbol)) {
+        seenSymbols.add(p.symbol);
+        uniqueMomentumPositions.push(p);
+      }
+    }
+
+    const combinedPositions = [
+      ...uniqueBotPositions,
+      ...uniqueMomentumPositions
+    ];
+
+    // Correctly calculate total equity across all services
+    const getPositionsValue = (positions: any[]) => {
+      return positions.reduce((acc, pos) => {
+        const lev = pos.leverage || 1;
+        const margin = pos.margin || ((pos.entryPrice * (pos.amount || 0)) / lev);
+        const curPrice = pos.currentPrice || pos.entryPrice;
+        const pnl = (curPrice - pos.entryPrice) * (pos.amount || 0);
+        return acc + (margin + pnl);
+      }, 0);
+    };
+
+    // state.balance is the unified portfolio capital (debited when positions open, credited when closed)
+    const totalPositionsValue = getPositionsValue(combinedPositions);
+    const calculatedEquity = parseFloat(((state.balance || 0) + totalPositionsValue).toFixed(2));
+
     return {
       ...state,
+      positions: combinedPositions,
       apiKey: state.apiKey ? '••••••••' : '',
       apiSecret: state.apiSecret ? '••••••••' : '',
       testnetApiKey: state.testnetApiKey ? '••••••••' : '',
       testnetApiSecret: state.testnetApiSecret ? '••••••••' : '',
       telegramBotToken: state.telegramBotToken ? '••••••••' : '',
       discordWebhookUrl: state.discordWebhookUrl ? '••••••••' : '',
-      calculatedEquity: botEngine.calculateEquity()
+      calculatedEquity
     };
   }
 
@@ -150,7 +293,9 @@ async function startServer() {
 
   app.post('/api/bot/reset', requireAdminAuth, (req, res) => {
     const { balance } = req.body;
-    botEngine.resetPortfolio(balance || 10000);
+    const newBalance = balance || 10000;
+    botEngine.resetPortfolio(newBalance);
+    paperTrader.resetState(newBalance);
     res.json({ success: true, state: getSanitizedBotState() });
   });
 
@@ -218,6 +363,59 @@ async function startServer() {
     } catch (err: any) {
       console.error('[API /api/bot/trade Error]', err?.message || err);
       res.status(500).json({ success: false, error: err?.message || 'Trade execution failed' });
+    }
+  });
+
+  app.post('/api/bot/close-position', requireAdminAuth, async (req, res) => {
+    try {
+      const { symbol } = req.body || {};
+      if (!symbol) {
+        return res.status(400).json({ success: false, error: 'Symbol is required' });
+      }
+
+      let closedSomething = false;
+
+      // 1. Try closing in Momentum PaperTrader
+      try {
+        const paperResult = await paperTrader.closePositionManual(symbol);
+        if (paperResult) {
+          closedSomething = true;
+        }
+      } catch (e) {
+        console.warn(`[API /api/bot/close-position] Paper trader close warning for ${symbol}:`, e);
+      }
+
+      // 2. Try closing in BotEngine
+      const pos = botEngine.state.positions.find(p => p.symbol === symbol);
+      if (pos && pos.amount > 0) {
+        let livePrice = pos.currentPrice || pos.entryPrice;
+        try {
+          const pRes = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+          const pData = await pRes.json();
+          if (pData && pData.price) livePrice = parseFloat(pData.price);
+        } catch {}
+
+        await botEngine.executeTrade(symbol, 'SELL', livePrice, pos.amount, {
+          entryReason: 'Manual Operator Close [MANUAL CLOSE]',
+          notes: `Position closed manually by operator | Strategy was ${pos.strategy || 'scalping'}`,
+          strategy: 'manual'
+        });
+        closedSomething = true;
+      }
+
+      if (!closedSomething) {
+        return res.status(404).json({ success: false, error: `No open position found for ${symbol}` });
+      }
+
+      res.json({
+        success: true,
+        message: `Position for ${symbol} successfully closed manually.`,
+        state: getSanitizedBotState(),
+        calculatedEquity: botEngine.calculateEquity()
+      });
+    } catch (err: any) {
+      console.error('[API /api/bot/close-position Error]', err?.message || err);
+      res.status(500).json({ success: false, error: err?.message || 'Manual close failed' });
     }
   });
 
@@ -461,78 +659,61 @@ async function startServer() {
   // Scalping AI Engine API Routes
   app.post('/api/scalping-bot/config', (req, res) => {
     try {
-      const {
-        active,
-        minRfProb,
-        minMetaScore,
-        stopLossPercent,
-        targetTakeProfit,
-        trailingStopActivation,
-        trailingStopDistance,
-        breakEvenActivation,
-        positionSizePercent,
-        maxHoldMinutes,
-        maxNegativeHoldMinutes,
-        enableMaxNegativeHold,
-        minOpportunityScore,
-        cooldownMinutes,
-        enableDynamicSizing,
-        minVolumeGrowth,
-        leverage
-      } = req.body || {};
-
       if (!botEngine.state.scalpingConfig) {
         botEngine.state.scalpingConfig = {
           active: true,
-          minRfProb: 50,
-          minMetaScore: 50,
-          stopLossPercent: 2.0,
-          targetTakeProfit: 1.2,
-          trailingStopActivation: 1.2,
+          timeframe: '1m',
+          minRfProb: 90,
+          minMetaScore: 80,
+          stopLossPercent: 5.0,
+          targetTakeProfit: 0,
+          trailingStopActivation: 3.0,
           trailingStopDistance: 0.5,
-          breakEvenActivation: 1.0,
+          breakEvenActivation: 2.0,
           positionSizePercent: 5.0,
-          maxHoldMinutes: 15,
-          minOpportunityScore: 55,
-          cooldownMinutes: 8,
-          enableDynamicSizing: true,
-          minVolumeGrowth: 0.8, timeframe: "1m", minAtrPctThreshold: 0.05, minRange20pThreshold: 0.20, leverage: 1
+          maxHoldMinutes: 120,
+          maxNegativeHoldMinutes: 0.0,
+          enableMaxNegativeHold: false,
+          minOpportunityScore: 50,
+          cooldownMinutes: 5,
+          enableDynamicSizing: false,
+          minVolumeGrowth: 0.8,
+          enableStagnationFilter: false,
+          minAtrPctThreshold: 0.12,
+          minRange20pThreshold: 0.38,
+          leverage: 1,
+          activePreset: 'Free'
         };
       }
 
-      if (active !== undefined) botEngine.state.scalpingConfig.active = !!active;
-      if (minRfProb !== undefined) botEngine.state.scalpingConfig.minRfProb = Number(minRfProb);
-      if (minMetaScore !== undefined) botEngine.state.scalpingConfig.minMetaScore = Number(minMetaScore);
-      if (stopLossPercent !== undefined) {
-        botEngine.state.scalpingConfig.stopLossPercent = Number(stopLossPercent);
-        botEngine.state.stopLossPercent = Number(stopLossPercent);
+      const body = req.body || {};
+      
+      // Merge all provided parameters into scalpingConfig
+      for (const [key, val] of Object.entries(body)) {
+        if (val !== undefined) {
+          (botEngine.state.scalpingConfig as any)[key] = val;
+        }
       }
-      if (targetTakeProfit !== undefined) botEngine.state.scalpingConfig.targetTakeProfit = Number(targetTakeProfit);
-      if (trailingStopActivation !== undefined) botEngine.state.scalpingConfig.trailingStopActivation = Number(trailingStopActivation);
-      if (trailingStopDistance !== undefined) botEngine.state.scalpingConfig.trailingStopDistance = Number(trailingStopDistance);
-      if (breakEvenActivation !== undefined) botEngine.state.scalpingConfig.breakEvenActivation = Number(breakEvenActivation);
-      if (positionSizePercent !== undefined) {
-        botEngine.state.scalpingConfig.positionSizePercent = Number(positionSizePercent);
-        botEngine.state.positionSizePercent = Number(positionSizePercent);
+
+      // Sync top-level mirror fields if present
+      if (body.stopLossPercent !== undefined) {
+        botEngine.state.stopLossPercent = Number(body.stopLossPercent);
+        botEngine.state.scalpingConfig.stopLossPercent = Number(body.stopLossPercent);
       }
-      if (maxHoldMinutes !== undefined) {
-        botEngine.state.scalpingConfig.maxHoldMinutes = Number(maxHoldMinutes);
-        botEngine.state.maxHoldMinutes = Number(maxHoldMinutes);
+      if (body.maxHoldMinutes !== undefined) {
+        botEngine.state.maxHoldMinutes = Number(body.maxHoldMinutes);
+        botEngine.state.scalpingConfig.maxHoldMinutes = Number(body.maxHoldMinutes);
       }
-      if (maxNegativeHoldMinutes !== undefined) {
-        botEngine.state.scalpingConfig.maxNegativeHoldMinutes = Number(maxNegativeHoldMinutes);
+      if (body.positionSizePercent !== undefined) {
+        botEngine.state.positionSizePercent = Number(body.positionSizePercent);
+        botEngine.state.scalpingConfig.positionSizePercent = Number(body.positionSizePercent);
       }
-      if (enableMaxNegativeHold !== undefined) {
-        botEngine.state.scalpingConfig.enableMaxNegativeHold = !!enableMaxNegativeHold;
+      if (body.leverage !== undefined) {
+        botEngine.state.scalpingConfig.leverage = Math.max(1, Math.min(50, Number(body.leverage)));
       }
-      if (minOpportunityScore !== undefined) botEngine.state.scalpingConfig.minOpportunityScore = Number(minOpportunityScore);
-      if (cooldownMinutes !== undefined) botEngine.state.scalpingConfig.cooldownMinutes = Number(cooldownMinutes);
-      if (enableDynamicSizing !== undefined) botEngine.state.scalpingConfig.enableDynamicSizing = !!enableDynamicSizing;
-      if (minVolumeGrowth !== undefined) botEngine.state.scalpingConfig.minVolumeGrowth = Number(minVolumeGrowth);
-      if (leverage !== undefined) botEngine.state.scalpingConfig.leverage = Math.max(1, Math.min(50, Number(leverage)));
 
       botEngine.addLog(
-        `[Motor Scalping Configuration] Parametrii au fost actualizați: RF Min ${botEngine.state.scalpingConfig.minRfProb}%, MetaScore Min ${botEngine.state.scalpingConfig.minMetaScore}, SL ${botEngine.state.scalpingConfig.stopLossPercent}%, TP ${botEngine.state.scalpingConfig.targetTakeProfit}%, Trail Activation ${botEngine.state.scalpingConfig.trailingStopActivation}%, Trail Dist ${botEngine.state.scalpingConfig.trailingStopDistance}%, Hold Max ${botEngine.state.scalpingConfig.maxHoldMinutes}m, Size ${botEngine.state.scalpingConfig.positionSizePercent}%.`,
+        `[Motor Scalping Configuration] Parametrii actualizați: TF ${botEngine.state.scalpingConfig.timeframe}, RF Min ${botEngine.state.scalpingConfig.minRfProb}%, SL ${botEngine.state.scalpingConfig.stopLossPercent}%, TP ${botEngine.state.scalpingConfig.targetTakeProfit}%, Levier ${botEngine.state.scalpingConfig.leverage || 1}x.`,
         'info'
       );
       botEngine.savePersistedState(true);

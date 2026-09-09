@@ -2558,7 +2558,12 @@ export async function runRealStrategyAnalysis(
   const sortinoRatio = downsideStdDev > 0 ? parseFloat(((meanRet / downsideStdDev) * Math.sqrt(Math.max(12, totalTrades))).toFixed(2)) : 0;
 
   const totalReturnPercent = parseFloat((currentEquity - 100).toFixed(2));
-  const calmarRatio = maxDrawdownPct > 0 ? parseFloat((totalReturnPercent / maxDrawdownPct).toFixed(2)) : (totalReturnPercent > 0 ? 9.9 : 0);
+  
+  // Calmar Ratio: Annualized Return / Max Drawdown (distinct from Recovery Factor which is Total Return / Max Drawdown)
+  // Assuming test period approximates trade frequency or dataset span (e.g. totalTrades trades over roughly totalTrades * holdHours or 30 days default)
+  const estimatedYears = Math.max(0.08, totalTrades / 365); // rough estimate or proportional
+  const annualizedReturn = totalReturnPercent > -100 ? (Math.pow(1 + Math.max(-0.99, totalReturnPercent / 100), 1 / estimatedYears) - 1) * 100 : totalReturnPercent;
+  const calmarRatio = maxDrawdownPct > 0 ? parseFloat((annualizedReturn / maxDrawdownPct).toFixed(2)) : (totalReturnPercent > 0 ? 9.9 : 0);
   const recoveryFactor = maxDrawdownPct > 0 ? parseFloat((totalReturnPercent / maxDrawdownPct).toFixed(2)) : (totalReturnPercent > 0 ? 9.9 : 0);
 
   const advancedMetrics: AdvancedFinancialMetrics = {

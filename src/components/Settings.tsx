@@ -155,6 +155,28 @@ export function Settings() {
     setReportConfig,
     binanceMode,
     setBinanceMode,
+    exchangeProvider,
+    setExchangeProvider,
+    bybitApiKey,
+    bybitApiSecret,
+    bybitTestnetApiKey,
+    bybitTestnetApiSecret,
+    setBybitApiKey,
+    setBybitApiSecret,
+    setBybitTestnetApiKey,
+    setBybitTestnetApiSecret,
+    okxApiKey,
+    okxApiSecret,
+    okxPassphrase,
+    okxTestnetApiKey,
+    okxTestnetApiSecret,
+    okxTestnetPassphrase,
+    setOkxApiKey,
+    setOkxApiSecret,
+    setOkxPassphrase,
+    setOkxTestnetApiKey,
+    setOkxTestnetApiSecret,
+    setOkxTestnetPassphrase,
     positionSizePercent,
     setPositionSizePercent,
     stopLossPercent,
@@ -176,6 +198,8 @@ export function Settings() {
     lastCheckAt,
     checkEnginePulse,
     watchlist,
+    equityProtectionConfig,
+    setEquityProtectionConfig,
     accumulationBalance = 0,
     sessionCycleCount = 1,
     accumulationTargetPercent = 3.0,
@@ -490,6 +514,55 @@ export function Settings() {
                 <p className="text-zinc-400 text-[11px] leading-relaxed">
                   După orice vânzare, moneda intră în cooldown 30 min, blocând re-intrările impulsive.
                 </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Equity Cycle Protection */}
+          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/50 to-indigo-950/20 border border-indigo-500/20 rounded-2xl p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
+                <ShieldAlert className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-lg font-serif text-white">Equity Cycle Protection</h3>
+                <p className="text-xs text-indigo-400/90">
+                  Protejează profitul acumulat prin închiderea ciclului dacă equity-ul scade sub un prag după atingerea țintei.
+                </p>
+              </div>
+              <div className="ml-auto">
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input 
+                    type="checkbox" 
+                    checked={equityProtectionConfig.enabled} 
+                    onChange={(e) => setEquityProtectionConfig({ enabled: e.target.checked })}
+                    className="sr-only peer" 
+                  />
+                  <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                </label>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="text-xs font-semibold text-zinc-300">Prag Profit Activare (%)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={equityProtectionConfig.profitThresholdPct}
+                  onChange={(e) => setEquityProtectionConfig({ profitThresholdPct: parseFloat(e.target.value) })}
+                  className="w-full bg-zinc-950/60 border border-white/5 rounded-lg p-2 text-sm text-white focus:border-indigo-500/50"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-semibold text-zinc-300">Drawdown Protecție (%)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={equityProtectionConfig.drawdownProtectionPct}
+                  onChange={(e) => setEquityProtectionConfig({ drawdownProtectionPct: parseFloat(e.target.value) })}
+                  className="w-full bg-zinc-950/60 border border-white/5 rounded-lg p-2 text-sm text-white focus:border-indigo-500/50"
+                />
               </div>
             </div>
           </div>
@@ -1038,8 +1111,8 @@ export function Settings() {
 
           {/* Paper Trading Reset */}
           <div className="bg-zinc-900/50 border border-white/5 rounded-2xl p-6">
-            <h3 className="text-lg font-serif text-white mb-1">Resetare Totală Capital Paper Trading</h3>
-            <p className="text-xs text-zinc-400 mb-4">Setează un capital inițial curat (ex: $1,000, $5,000, $10,000). Această acțiune va reseta istoricul și pozițiile.</p>
+            <h3 className="text-lg font-serif text-white mb-1">Resetare Capital Global (Scalping & Momentum)</h3>
+            <p className="text-xs text-zinc-400 mb-4">Setează un capital inițial curat (ex: $1,000, $5,000, $10,000). Această acțiune va reseta istoricul, pozițiile și va sincroniza soldul pentru ambele motoare (Scalping și Momentum Simulator).</p>
             
             <div className="space-y-4">
               <div className="flex items-center gap-2 flex-wrap font-mono">
@@ -1146,17 +1219,35 @@ export function Settings() {
             )}
           </div>
 
-          {/* Binance API Credentials */}
-          <div className="bg-zinc-900/50 border border-white/5 rounded-2xl p-6">
-            <div className="mb-4">
-              <h3 className="text-lg font-serif text-white">Conectare Exchange Binance</h3>
-              <p className="text-xs text-zinc-400 mt-1">
-                Configurează cheile API pentru Binance Testnet și Live.
-              </p>
+          {/* Multi-Exchange Provider & Credentials Setup */}
+          <div className="bg-zinc-900/50 border border-white/5 rounded-2xl p-6 space-y-6">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-serif text-white">Furnizor Exchange & Execuție Multi-Bursă</h3>
+                <p className="text-xs text-zinc-400 mt-1">
+                  Pregătit pentru Binance, Bybit (recomandat UE) și OKX (rezervă), cu suport Paper, Testnet și Real (Live).
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 bg-zinc-800/60 p-1 rounded-xl border border-white/10 font-mono text-xs">
+                {(['binance', 'bybit', 'okx'] as const).map(prov => (
+                  <button
+                    key={prov}
+                    type="button"
+                    onClick={() => setExchangeProvider(prov)}
+                    className={`px-3 py-1.5 rounded-lg font-bold transition-all cursor-pointer uppercase ${
+                      exchangeProvider === prov
+                        ? 'bg-amber-500 text-zinc-950 shadow-md'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {prov}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            <div className="mb-6">
-              <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-2 font-mono">Mod Execuție Selectat</label>
+            <div className="mb-4">
+              <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-2 font-mono">Mod Execuție pentru {exchangeProvider.toUpperCase()}</label>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 font-mono">
                 {(['paper', 'testnet', 'live'] as const).map(mode => (
                   <button
@@ -1173,72 +1264,211 @@ export function Settings() {
                         : 'bg-zinc-800/40 text-zinc-400 border-white/5 hover:bg-white/5'
                     }`}
                   >
-                    {mode === 'paper' ? 'Paper (Demo)' : mode === 'testnet' ? 'Binance Testnet' : 'Binance LIVE'}
+                    {mode === 'paper' ? 'Paper (Demo)' : mode === 'testnet' ? `${exchangeProvider.toUpperCase()} Testnet` : `${exchangeProvider.toUpperCase()} LIVE`}
                   </button>
                 ))}
               </div>
               {binanceMode === 'live' && (
                 <p className="text-xs text-rose-300 mt-3 bg-rose-500/10 p-2.5 rounded-lg border border-rose-500/20 font-mono">
-                  ⚠️ ATENȚIE: Modul LIVE este activat! Ordinele vor fi trimise către API-ul Binance Real.
+                  ⚠️ ATENȚIE: Modul LIVE este activat pe {exchangeProvider.toUpperCase()}! Ordinele vor fi trimise direct pe bursa reală.
                 </p>
               )}
             </div>
 
-            {/* Testnet Credentials */}
-            <div className="p-4 rounded-xl bg-amber-500/5 border border-amber-500/15 mb-6 space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-amber-300 uppercase tracking-wider font-mono">Binance Testnet Credentials</span>
-                <a href="https://testnet.binance.vision" target="_blank" rel="noreferrer" className="text-[11px] text-amber-400 hover:underline">
-                  Obține Chei Testnet ↗
-                </a>
-              </div>
+            {exchangeProvider === 'binance' && (
+              <div className="space-y-4 pt-2">
+                <div className="p-4 rounded-xl bg-amber-500/5 border border-amber-500/15 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-amber-300 uppercase tracking-wider font-mono">Binance Testnet Credentials</span>
+                    <a href="https://testnet.binance.vision" target="_blank" rel="noreferrer" className="text-[11px] text-amber-400 hover:underline">
+                      Obține Chei Testnet ↗
+                    </a>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">Testnet API Key</label>
+                    <input 
+                      type="text" 
+                      value={testnetApiKey}
+                      onChange={(e) => setTestnetApiKey(e.target.value)}
+                      placeholder="Ex: 62a8f9b2c3d4..." 
+                      className="w-full bg-zinc-800/60 border border-amber-500/20 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-amber-500/50 font-mono text-sm" 
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">Testnet Secret Key</label>
+                    <input 
+                      type="password" 
+                      value={testnetApiSecret}
+                      onChange={(e) => setTestnetApiSecret(e.target.value)}
+                      placeholder="Ex: 98f7e6d5c4b3..." 
+                      className="w-full bg-zinc-800/60 border border-amber-500/20 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-amber-500/50 font-mono text-sm" 
+                    />
+                  </div>
+                </div>
 
-              <div>
-                <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">Testnet API Key</label>
-                <input 
-                  type="text" 
-                  value={testnetApiKey}
-                  onChange={(e) => setTestnetApiKey(e.target.value)}
-                  placeholder="Ex: 62a8f9b2c3d4..." 
-                  className="w-full bg-zinc-800/60 border border-amber-500/20 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-amber-500/50 font-mono text-sm" 
-                />
+                <div className="p-4 rounded-xl bg-zinc-800/30 border border-white/5 space-y-4">
+                  <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono block">Binance Live Credentials</span>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">Live API Key</label>
+                    <input 
+                      type="text" 
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      placeholder="Introdu Live API Key..." 
+                      className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-white/20 font-mono text-sm" 
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">Live Secret Key</label>
+                    <input 
+                      type="password" 
+                      value={apiSecret}
+                      onChange={(e) => setApiSecret(e.target.value)}
+                      placeholder="Introdu Live API Secret..." 
+                      className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-white/20 font-mono text-sm" 
+                    />
+                  </div>
+                </div>
               </div>
-              <div>
-                <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">Testnet Secret Key</label>
-                <input 
-                  type="password" 
-                  value={testnetApiSecret}
-                  onChange={(e) => setTestnetApiSecret(e.target.value)}
-                  placeholder="Ex: 98f7e6d5c4b3..." 
-                  className="w-full bg-zinc-800/60 border border-amber-500/20 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-amber-500/50 font-mono text-sm" 
-                />
-              </div>
-            </div>
+            )}
 
-            {/* Live Credentials */}
-            <div className="p-4 rounded-xl bg-zinc-800/30 border border-white/5 space-y-4">
-              <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono block">Binance Live Credentials</span>
-              <div>
-                <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">Live API Key</label>
-                <input 
-                  type="text" 
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="Introdu Live API Key..." 
-                  className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-white/20 font-mono text-sm" 
-                />
+            {exchangeProvider === 'bybit' && (
+              <div className="space-y-4 pt-2">
+                <div className="p-4 rounded-xl bg-blue-500/5 border border-blue-500/15 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-blue-300 uppercase tracking-wider font-mono">Bybit Testnet Credentials</span>
+                    <a href="https://testnet.bybit.com" target="_blank" rel="noreferrer" className="text-[11px] text-blue-400 hover:underline">
+                      Obține Chei Bybit Testnet ↗
+                    </a>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">Bybit Testnet API Key</label>
+                    <input 
+                      type="text" 
+                      value={bybitTestnetApiKey}
+                      onChange={(e) => setBybitTestnetApiKey(e.target.value)}
+                      placeholder="Bybit Testnet API Key..." 
+                      className="w-full bg-zinc-800/60 border border-blue-500/20 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-blue-500/50 font-mono text-sm" 
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">Bybit Testnet Secret Key</label>
+                    <input 
+                      type="password" 
+                      value={bybitTestnetApiSecret}
+                      onChange={(e) => setBybitTestnetApiSecret(e.target.value)}
+                      placeholder="Bybit Testnet API Secret..." 
+                      className="w-full bg-zinc-800/60 border border-blue-500/20 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-blue-500/50 font-mono text-sm" 
+                    />
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-xl bg-zinc-800/30 border border-white/5 space-y-4">
+                  <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono block">Bybit Live Credentials (Europa / Global)</span>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">Bybit Live API Key</label>
+                    <input 
+                      type="text" 
+                      value={bybitApiKey}
+                      onChange={(e) => setBybitApiKey(e.target.value)}
+                      placeholder="Bybit Live API Key..." 
+                      className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-white/20 font-mono text-sm" 
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">Bybit Live Secret Key</label>
+                    <input 
+                      type="password" 
+                      value={bybitApiSecret}
+                      onChange={(e) => setBybitApiSecret(e.target.value)}
+                      placeholder="Bybit Live API Secret..." 
+                      className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-white/20 font-mono text-sm" 
+                    />
+                  </div>
+                </div>
               </div>
-              <div>
-                <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">Live Secret Key</label>
-                <input 
-                  type="password" 
-                  value={apiSecret}
-                  onChange={(e) => setApiSecret(e.target.value)}
-                  placeholder="Introdu Live API Secret..." 
-                  className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-white/20 font-mono text-sm" 
-                />
+            )}
+
+            {exchangeProvider === 'okx' && (
+              <div className="space-y-4 pt-2">
+                <div className="p-4 rounded-xl bg-purple-500/5 border border-purple-500/15 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-purple-300 uppercase tracking-wider font-mono">OKX Testnet / Demo Credentials</span>
+                    <a href="https://www.okx.com" target="_blank" rel="noreferrer" className="text-[11px] text-purple-400 hover:underline">
+                      OKX Portal ↗
+                    </a>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">OKX Testnet API Key</label>
+                      <input 
+                        type="text" 
+                        value={okxTestnetApiKey}
+                        onChange={(e) => setOkxTestnetApiKey(e.target.value)}
+                        placeholder="OKX Testnet Key..." 
+                        className="w-full bg-zinc-800/60 border border-purple-500/20 rounded-lg px-4 py-2 text-zinc-100 font-mono text-sm" 
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">OKX Testnet Secret</label>
+                      <input 
+                        type="password" 
+                        value={okxTestnetApiSecret}
+                        onChange={(e) => setOkxTestnetApiSecret(e.target.value)}
+                        placeholder="OKX Testnet Secret..." 
+                        className="w-full bg-zinc-800/60 border border-purple-500/20 rounded-lg px-4 py-2 text-zinc-100 font-mono text-sm" 
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">OKX Testnet Passphrase</label>
+                    <input 
+                      type="password" 
+                      value={okxTestnetPassphrase}
+                      onChange={(e) => setOkxTestnetPassphrase(e.target.value)}
+                      placeholder="Passphrase..." 
+                      className="w-full bg-zinc-800/60 border border-purple-500/20 rounded-lg px-4 py-2 text-zinc-100 font-mono text-sm" 
+                    />
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-xl bg-zinc-800/30 border border-white/5 space-y-4">
+                  <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono block">OKX Live Credentials (Backup)</span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">OKX Live API Key</label>
+                      <input 
+                        type="text" 
+                        value={okxApiKey}
+                        onChange={(e) => setOkxApiKey(e.target.value)}
+                        placeholder="OKX Live API Key..." 
+                        className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 font-mono text-sm" 
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">OKX Live Secret</label>
+                      <input 
+                        type="password" 
+                        value={okxApiSecret}
+                        onChange={(e) => setOkxApiSecret(e.target.value)}
+                        placeholder="OKX Live Secret..." 
+                        className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 font-mono text-sm" 
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">OKX Live Passphrase</label>
+                    <input 
+                      type="password" 
+                      value={okxPassphrase}
+                      onChange={(e) => setOkxPassphrase(e.target.value)}
+                      placeholder="Passphrase..." 
+                      className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 font-mono text-sm" 
+                    />
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Test & Sync Balance Button */}
             <div className="mt-6 pt-4 border-t border-white/5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">

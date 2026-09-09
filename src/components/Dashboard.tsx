@@ -3,7 +3,7 @@ import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianG
 import { useTradingStore } from '../store';
 import { PositionTimer } from './PositionTimer';
 import { fetchLivePrice, fetchChartData } from '../services/api';
-import { ArrowUpRight, ArrowDownRight, Wallet, TrendingUp, AlertTriangle, Trash2, Newspaper, ExternalLink, RefreshCw, ShoppingCart, ArrowUpCircle, ArrowDownCircle, Zap, CheckCircle2, Heart, Radio } from 'lucide-react';
+import { ArrowUpRight, ArrowDownRight, Wallet, TrendingUp, AlertTriangle, Trash2, Newspaper, ExternalLink, RefreshCw, ShoppingCart, ArrowUpCircle, ArrowDownCircle, Zap, CheckCircle2, Heart, Radio, ShieldAlert } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { NewsArticle } from '../types';
@@ -35,7 +35,11 @@ export function Dashboard() {
     setAutoTradingActive, 
     binanceMode, 
     syncBinanceBalance,
-    executeTrade
+    executeTrade,
+    equityProtectionConfig,
+    isEquityProtectionActivated,
+    currentCyclePeakEquity,
+    cycleStartEquity
   } = useTradingStore();
 
   const [newSymbol, setNewSymbol] = useState('');
@@ -352,9 +356,9 @@ export function Dashboard() {
                 >
                   <span>📊 Portofoliu</span>
                 </button>
-                {watchlist.map(w => (
+                {watchlist.map((w, i) => (
                   <button
-                    key={w.symbol}
+                    key={`${w.symbol}-${i}`}
                     type="button"
                     onClick={() => setActiveChartId(w.symbol)}
                     className={cn(
@@ -520,7 +524,7 @@ export function Dashboard() {
                       const isTopDynamic = idx < 10;
 
                       return (
-                        <tr key={opp.symbol} className={cn("hover:bg-white/5 transition-colors", isTopDynamic && "bg-emerald-500/5")}>
+                        <tr key={`${opp.symbol}-${idx}`} className={cn("hover:bg-white/5 transition-colors", isTopDynamic && "bg-emerald-500/5")}>
                           <td className="py-2.5 px-3 font-bold">
                             <span className={cn(
                               "w-6 h-6 rounded-full inline-flex items-center justify-center text-[10px] font-bold border",
@@ -646,6 +650,43 @@ export function Dashboard() {
               )}
             </div>
 
+            {/* Equity Cycle Protection Card */}
+            {equityProtectionConfig?.enabled && (
+              <div className={cn(
+                "mt-4 p-4 rounded-xl border flex items-center justify-between",
+                isEquityProtectionActivated ? "bg-red-950/30 border-red-500/40" : "bg-zinc-900/50 border-white/10"
+              )}>
+                <div className="flex items-center gap-3">
+                  <ShieldAlert className={cn("w-5 h-5", isEquityProtectionActivated ? "text-red-400" : "text-zinc-500")} />
+                  <div>
+                    <h4 className="text-xs font-bold text-zinc-200">Equity Cycle Protection</h4>
+                    <p className="text-[10px] text-zinc-400">
+                      Status: {isEquityProtectionActivated ? <span className="text-red-400 font-bold">ACTIVAT</span> : "Monitorizare"}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-4 text-[10px] font-mono text-zinc-400">
+                  <div className="text-center">
+                    <span className="block text-zinc-500">Start</span>
+                    <span className="text-white">${cycleStartEquity?.toFixed(2) || '0.00'}</span>
+                  </div>
+                  <div className="text-center">
+                    <span className="block text-zinc-500">Peak</span>
+                    <span className="text-white">${currentCyclePeakEquity?.toFixed(2) || '0.00'}</span>
+                  </div>
+                  <div className="text-center">
+                    <span className="block text-zinc-500">Drawdown</span>
+                    <span className={cn(
+                      "font-bold",
+                      ((currentCyclePeakEquity || 0) > 0 && ((currentCyclePeakEquity || 0) - equity) / (currentCyclePeakEquity || 1) * 100 > 0.05) ? "text-red-400" : "text-emerald-400"
+                    )}>
+                      {((currentCyclePeakEquity || 0) > 0 ? ((currentCyclePeakEquity || 0) - equity) / (currentCyclePeakEquity || 1) * 100 : 0).toFixed(2)}%
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {positions.length === 0 ? (
               <div className="p-12 text-center border border-white/5 rounded-2xl bg-zinc-950/40 flex flex-col items-center justify-center gap-3">
                 <div className="p-4 rounded-full bg-zinc-900 text-zinc-500 border border-white/5">
@@ -673,12 +714,26 @@ export function Dashboard() {
                             <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                               BUY
                             </span>
-                            <span className={cn(
-                              "text-[9px] font-mono font-bold px-2 py-0.5 rounded border uppercase flex items-center gap-1",
-                              "bg-purple-500/10 text-purple-300 border-purple-500/30"
-                            )}>
-                              {`SCALPING ${(pos as any).leverage && (pos as any).leverage > 1 ? `${(pos as any).leverage}x` : ''}`}
-                            </span>
+                            {(() => {
+                              const st: 'momentum' | 'scalping' | 'manual' = 
+                                pos.strategy === 'momentum' || (pos as any)?.entryReason?.includes('Momentum') 
+                                  ? 'momentum' 
+                                  : pos.strategy === 'manual' || (pos as any)?.entryReason?.includes('Manual') 
+                                  ? 'manual' 
+                                  : 'scalping';
+                              return (
+                                <span className={cn(
+                                  "text-[9px] font-mono font-bold px-2 py-0.5 rounded border uppercase flex items-center gap-1",
+                                  st === 'momentum' 
+                                    ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40" 
+                                    : st === 'manual'
+                                    ? "bg-zinc-800 text-zinc-300 border-white/10"
+                                    : "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                                )}>
+                                  {st}
+                                </span>
+                              );
+                            })()}
                           </div>
 
                           <div className={cn(
@@ -691,13 +746,23 @@ export function Dashboard() {
                           </div>
                         </div>
 
+                        {/* MFE & MAE tracking badge */}
+                        <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono bg-zinc-900/40 px-2.5 py-1.5 rounded-xl border border-white/5">
+                          <span>MFE / MAE Peak:</span>
+                          <div className="flex items-center gap-1.5 font-bold">
+                            <span className="text-emerald-400">+{((pos as any).maxFavorableExcursion || (pos as any).mfePct || 0).toFixed(1)}%</span>
+                            <span className="text-zinc-600">/</span>
+                            <span className="text-rose-400">{((pos as any).maxAdverseExcursion || (pos as any).maePct || 0).toFixed(1)}%</span>
+                          </div>
+                        </div>
+
                         <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono bg-zinc-900/60 p-2 rounded-xl border border-white/5">
                           <span>Timp Poziție:</span>
                           <PositionTimer 
                             pos={pos} 
-                            maxHoldMinutes={maxHoldMinutes} 
+                            maxHoldMinutes={pos.strategy === 'momentum' ? 1440 : maxHoldMinutes} 
                             maxNegativeHoldMinutes={scalpingConfig?.maxNegativeHoldMinutes ?? 1.0} 
-                            enableMaxNegativeHold={scalpingConfig?.enableMaxNegativeHold ?? true}
+                            enableMaxNegativeHold={pos.strategy === 'momentum' ? false : (scalpingConfig?.enableMaxNegativeHold ?? true)}
                           />
                         </div>
 

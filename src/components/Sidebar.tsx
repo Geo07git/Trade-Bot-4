@@ -62,30 +62,53 @@ export function Sidebar({ currentView, onViewChange, isOpenMobile, onCloseMobile
         "fixed inset-y-0 left-0 md:static md:translate-x-0",
         isOpenMobile ? "translate-x-0 shadow-2xl" : "-translate-x-full md:translate-x-0"
       )}>
-        <div className="p-4 flex items-center justify-between border-b border-amber-500/20">
-          <div className="flex items-center gap-2.5">
-            <img 
-              src="/logo.png" 
-              alt="TradeBot Logo" 
-              referrerPolicy="no-referrer"
-              className="w-8 h-8 rounded object-contain border border-amber-500/40 shadow-md bg-zinc-950 p-0.5" 
-            />
-            <div>
-              <div className="flex items-center gap-1.5">
-                <h1 className="font-mono text-base font-bold tracking-tight text-white leading-tight">TradeBot</h1>
-                <span className="px-1 py-0.2 rounded text-[9px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">PRO v4</span>
+        <div className="p-4 border-b border-amber-500/20 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <img 
+                src="/logo.png" 
+                alt="TradeBot Logo" 
+                referrerPolicy="no-referrer"
+                className="w-8 h-8 rounded object-contain border border-amber-500/40 shadow-md bg-zinc-950 p-0.5" 
+              />
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <h1 className="font-mono text-base font-bold tracking-tight text-white leading-tight">TradeBot</h1>
+                  <span className="px-1 py-0.2 rounded text-[9px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">PRO v4</span>
+                </div>
+                <p className="text-[8px] uppercase tracking-[0.12em] text-amber-400 font-mono mt-0.5">{t.terminalSub}</p>
               </div>
-              <p className="text-[8px] uppercase tracking-[0.12em] text-amber-400 font-mono mt-0.5">{t.terminalSub}</p>
             </div>
+            {onCloseMobile && (
+              <button 
+                onClick={onCloseMobile}
+                className="p-1.5 text-zinc-400 hover:text-white md:hidden"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
           </div>
-          {onCloseMobile && (
-            <button 
-              onClick={onCloseMobile}
-              className="p-1.5 text-zinc-400 hover:text-white md:hidden"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          )}
+
+          {/* Active Exchange Provider Card */}
+          {(() => {
+            const { exchangeProvider, binanceMode } = useTradingStore.getState();
+            const provColor = exchangeProvider === 'bybit' ? 'border-blue-500/40 bg-blue-500/10 text-blue-300' : exchangeProvider === 'okx' ? 'border-purple-500/40 bg-purple-500/10 text-purple-300' : 'border-amber-500/40 bg-amber-500/10 text-amber-300';
+            const modeColor = binanceMode === 'live' ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' : binanceMode === 'testnet' ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40';
+            return (
+              <div className={cn("p-2.5 rounded-xl border flex items-center justify-between font-mono text-xs", provColor)}>
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full animate-ping bg-current"></span>
+                  <div>
+                    <div className="text-[10px] uppercase font-bold tracking-wider opacity-80">Exchange Activ</div>
+                    <div className="font-bold uppercase tracking-wide text-white">{exchangeProvider}</div>
+                  </div>
+                </div>
+                <span className={cn("px-2 py-0.5 rounded text-[10px] font-bold uppercase border", modeColor)}>
+                  {binanceMode}
+                </span>
+              </div>
+            );
+          })()}
         </div>
 
         <nav className="flex-1 px-3 space-y-1 py-3 overflow-y-auto font-mono text-xs">

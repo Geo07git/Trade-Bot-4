@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useTradingStore } from '../store';
 import { PositionTimer } from './PositionTimer';
+import { MarketTickerMarquee } from './MarketTickerMarquee';
 import { getTranslation } from '../utils/i18n';
 import { apiFetch, safeJson } from '../utils/apiHelper';
 import { 
@@ -99,6 +100,8 @@ export function BloombergTerminal() {
     resetCircuitBreaker,
     binanceMode,
     initialBalance,
+    protectedPiggyBank,
+    equityProtectionConfig,
     logs,
     signalJournal,
     setCurrentView,
@@ -522,34 +525,12 @@ export function BloombergTerminal() {
         </div>
       </div>
 
-      {/* 2. REAL-TIME TICKER TAPE */}
-      <div className="bg-[#090b0f] border-b border-white/5 py-1 px-3 flex items-center gap-6 overflow-x-auto text-[11px] font-mono shrink-0 whitespace-nowrap scrollbar-none">
-        <span className="text-amber-500 font-bold tracking-wider flex items-center gap-1 text-[10px]">
-          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"></span>
-          REAL-TIME TAPE:
-        </span>
-        {securities.slice(0, 10).map((sec) => (
-          <button
-            key={sec.symbol}
-            onClick={() => setSelectedSymbol(sec.symbol)}
-            className={cn(
-              "flex items-center gap-1.5 px-2 py-0.5 rounded cursor-pointer transition-all border",
-              selectedSymbol === sec.symbol 
-                ? "bg-amber-500/20 border-amber-500/60 text-amber-300" 
-                : "border-transparent text-zinc-300 hover:text-white hover:bg-white/5"
-            )}
-          >
-            <span className="font-bold">{sec.symbol}</span>
-            <span className="text-zinc-100">${sec.price > 100 ? sec.price.toFixed(2) : sec.price.toFixed(4)}</span>
-            <span className={cn(
-              "text-[10px] font-bold flex items-center",
-              sec.change24h >= 0 ? "text-emerald-400" : "text-rose-400"
-            )}>
-              {sec.change24h >= 0 ? '+' : ''}{sec.change24h.toFixed(2)}%
-            </span>
-          </button>
-        ))}
-      </div>
+      {/* 2. REAL-TIME TICKER TAPE (INFINITE SCROLL) */}
+      <MarketTickerMarquee 
+        selectedSymbol={selectedSymbol} 
+        onSelectSymbol={setSelectedSymbol} 
+        ticker24hMap={ticker24hMap} 
+      />
 
       {/* 3. BLOOMBERG MULTI-PANEL DESK */}
       <div className="flex-1 grid grid-cols-1 xl:grid-cols-12 gap-1.5 p-1.5 overflow-y-auto xl:overflow-hidden min-h-0">
@@ -612,6 +593,45 @@ export function BloombergTerminal() {
                 <ShieldCheck className="w-3 h-3 text-emerald-400" />
                 0.00 USDT (0 bps)
               </span>
+            </div>
+          </div>
+
+          {/* EQUITY MONITOR / PUSCULITA CARD */}
+          <div className="bg-gradient-to-r from-[#0d1017] via-[#111827] to-[#0d1017] border border-emerald-500/30 p-3 rounded flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0 shadow-lg">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-lg shadow-inner">
+                🐖
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Equity Monitor & Pușculiță ECP</h3>
+                  <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                    {equityProtectionConfig?.enabled ? 'ACTIV (0.8% Target)' : 'INACTIV'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-zinc-400 mt-0.5">
+                  Profiturile peste capitalul de bază sunt blocate automat în pușculiță și protejate de ciclul următor.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 text-xs font-mono">
+              <div className="bg-black/40 px-3 py-1.5 rounded border border-white/5 text-center">
+                <span className="block text-[9px] text-zinc-500 uppercase">Capital Inițial</span>
+                <span className="text-white font-bold">${initialBalance.toFixed(2)}</span>
+              </div>
+              <div className="bg-black/40 px-3 py-1.5 rounded border border-white/5 text-center">
+                <span className="block text-[9px] text-zinc-500 uppercase">Capital Curent</span>
+                <span className="text-amber-400 font-bold">${equity.toFixed(2)}</span>
+              </div>
+              <div className="bg-emerald-950/40 px-3 py-1.5 rounded border border-emerald-500/40 text-center">
+                <span className="block text-[9px] text-emerald-400 uppercase font-bold">Pușculiță 🐖</span>
+                <span className="text-emerald-300 font-bold text-sm">+${(protectedPiggyBank || 0).toFixed(2)}</span>
+              </div>
+              <div className="bg-black/40 px-3 py-1.5 rounded border border-white/5 text-center">
+                <span className="block text-[9px] text-zinc-500 uppercase">Net Worth Total</span>
+                <span className="text-cyan-400 font-bold">${(equity + (protectedPiggyBank || 0)).toFixed(2)}</span>
+              </div>
             </div>
           </div>
 
@@ -780,10 +800,12 @@ export function BloombergTerminal() {
                       <thead className="bg-[#0b0e14] text-zinc-400 border-b border-amber-500/20 text-[10px] uppercase">
                         <tr>
                           <th className="py-2 px-2 font-semibold text-amber-400">{t.symbol}</th>
+                          <th className="py-2 px-2 font-semibold text-amber-300">STRATEGY</th>
                           <th className="py-2 px-2 font-semibold">{t.amount}</th>
                           <th className="py-2 px-2 font-semibold">{t.entryPrice}</th>
                           <th className="py-2 px-2 font-semibold">{t.markPrice}</th>
                           <th className="py-2 px-2 font-semibold">{t.unrealizedPnl}</th>
+                          <th className="py-2 px-2 font-semibold hidden md:table-cell">MFE / MAE</th>
                           <th className="py-2 px-2 font-semibold hidden md:table-cell">{t.takeProfit}</th>
                           <th className="py-2 px-2 font-semibold hidden md:table-cell">{t.stopLoss}</th>
                           <th className="py-2 px-2 font-semibold hidden sm:table-cell">{t.duration}</th>
@@ -791,18 +813,39 @@ export function BloombergTerminal() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-white/5">
-                        {positions.map((pos) => {
+                        {positions.map((pos, i) => {
                           const opp = marketOpportunities.find(o => o.symbol === pos.symbol);
                           const watch = watchlist.find(w => w.symbol === pos.symbol);
                           const mark = opp?.price || watch?.price || pos.currentPrice || pos.entryPrice;
                           const pnl = (mark - pos.entryPrice) * pos.amount;
                           const pnlPct = pos.entryPrice > 0 ? ((mark - pos.entryPrice) / pos.entryPrice) * 100 : 0;
+                          const posStrategy: 'momentum' | 'scalping' | 'manual' = 
+                            pos.strategy === 'momentum' || (pos as any)?.entryReason?.includes('Momentum') 
+                              ? 'momentum' 
+                              : pos.strategy === 'manual' || (pos as any)?.entryReason?.includes('Manual') 
+                              ? 'manual' 
+                              : 'scalping';
 
                           return (
-                            <tr key={pos.symbol} className="hover:bg-amber-500/10 transition-colors">
+                            <tr key={pos.id ? `${pos.id}-${i}` : `${pos.symbol}-${i}`} className="hover:bg-amber-500/10 transition-colors">
                               <td className="py-2 px-2 font-bold text-white flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                                <span className={cn(
+                                  "w-1.5 h-1.5 rounded-full",
+                                  posStrategy === 'momentum' ? "bg-cyan-400 animate-pulse" : posStrategy === 'manual' ? "bg-zinc-400" : "bg-emerald-400"
+                                )}></span>
                                 {pos.symbol}
+                              </td>
+                              <td className="py-2 px-2">
+                                <span className={cn(
+                                  "px-1.5 py-0.5 rounded text-[9px] font-bold font-mono uppercase tracking-wider border",
+                                  posStrategy === 'momentum'
+                                    ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40"
+                                    : posStrategy === 'manual'
+                                    ? "bg-zinc-800 text-zinc-300 border-white/10"
+                                    : "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                                )}>
+                                  {posStrategy}
+                                </span>
                               </td>
                               <td className="py-2 px-2 text-zinc-200">{pos.amount.toFixed(4)}</td>
                               <td className="py-2 px-2 text-zinc-300">${pos.entryPrice.toFixed(4)}</td>
@@ -812,20 +855,35 @@ export function BloombergTerminal() {
                                   {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} ({pnlPct.toFixed(2)}%)
                                 </span>
                               </td>
-                              <td className="py-2 px-2 text-emerald-400 hidden md:table-cell">+{((pos as any).takeProfitPercent ?? scalpingConfig?.targetTakeProfit ?? 3.0).toFixed(2)}%</td>
-                              <td className="py-2 px-2 text-rose-400 hidden md:table-cell">-{((pos as any).stopLossPercent ?? scalpingConfig?.stopLossPercent ?? 1.0).toFixed(2)}%</td>
+                              <td className="py-2 px-2 hidden md:table-cell text-[10px]">
+                                <span className="text-emerald-400">+{((pos as any).maxFavorableExcursion || (pos as any).mfePct || 0).toFixed(1)}%</span>
+                                <span className="text-zinc-500 mx-1">/</span>
+                                <span className="text-rose-400">{((pos as any).maxAdverseExcursion || (pos as any).maePct || 0).toFixed(1)}%</span>
+                              </td>
+                              <td className="py-2 px-2 text-emerald-400 hidden md:table-cell">
+                                {posStrategy === 'momentum' 
+                                  ? ((pos as any).takeProfitPercent ? `+${(pos as any).takeProfitPercent.toFixed(1)}%` : 'Trailing') 
+                                  : (scalpingConfig?.targetTakeProfit && scalpingConfig.targetTakeProfit > 0 
+                                      ? `+${scalpingConfig.targetTakeProfit.toFixed(2)}%` 
+                                      : 'OFF')}
+                              </td>
+                              <td className="py-2 px-2 text-rose-400 hidden md:table-cell">
+                                {posStrategy === 'momentum' 
+                                  ? `-${((pos as any).stopLossPercent ?? 5.0).toFixed(1)}%` 
+                                  : `-${(scalpingConfig?.stopLossPercent ?? 1.0).toFixed(2)}%`}
+                              </td>
                               <td className="py-2 px-2 text-zinc-400 hidden sm:table-cell text-[10px]">
                                 <PositionTimer 
                                   pos={pos} 
-                                  maxHoldMinutes={scalpingConfig?.maxHoldMinutes ?? 15}
+                                  maxHoldMinutes={posStrategy === 'momentum' ? 1440 : (scalpingConfig?.maxHoldMinutes ?? 15)}
                                   maxNegativeHoldMinutes={scalpingConfig?.maxNegativeHoldMinutes ?? 1.0}
-                                  enableMaxNegativeHold={scalpingConfig?.enableMaxNegativeHold ?? false}
+                                  enableMaxNegativeHold={posStrategy === 'momentum' ? false : (scalpingConfig?.enableMaxNegativeHold ?? false)}
                                 />
                               </td>
                               <td className="py-2 px-2 text-right">
                                 <button
                                   onClick={() => handleClosePosition(pos.symbol)}
-                                  className="px-2 py-0.5 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-[10px] font-bold"
+                                  className="px-2 py-0.5 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-[10px] font-bold cursor-pointer transition-all hover:border-rose-500"
                                 >
                                   {t.closePosition}
                                 </button>

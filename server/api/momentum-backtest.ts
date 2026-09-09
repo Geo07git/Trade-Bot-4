@@ -85,7 +85,13 @@ router.post('/run-backtest', async (req, res) => {
         fs.mkdirSync(backtestDir, { recursive: true });
       }
       
-      const filename = `backtest_${Date.now()}.json`;
+      // Filename: start_date-end_date-num_coins-min_score.json
+      const startDate = new Date(startTime).toISOString().split('T')[0];
+      const endDate = new Date(endTime).toISOString().split('T')[0];
+      const numCoins = subset.length;
+      const minScore = config.minMomentumScore || 0;
+      const filename = `${startDate}-${endDate}-${numCoins}coins-minScore${minScore}.json`;
+      
       fs.writeFileSync(
         path.join(backtestDir, filename),
         JSON.stringify(results)
@@ -101,5 +107,6 @@ router.post('/run-backtest', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 
 export default router;

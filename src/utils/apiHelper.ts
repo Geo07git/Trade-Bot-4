@@ -42,6 +42,7 @@ export async function apiFetch(endpoint: string, options?: RequestInit): Promise
 
   const defaultOptions: RequestInit = {
     cache: 'no-store', // Prevent aggressive caching in preview/production environments
+    credentials: 'include', // Ensure cookies (and therefore session/CSRF tokens) are sent
     ...options
   };
 

@@ -25,10 +25,10 @@ export function BacktestMomentum() {
   const [loadingResults, setLoadingResults] = useState(false);
   
   // Simulator State
-  const [slPct, setSlPct] = useState(2.0);
-  const [tpPct, setTpPct] = useState(4.0);
-  const [trailingAct, setTrailingAct] = useState(3.0);
-  const [trailingDist, setTrailingDist] = useState(1.0);
+  const [slPct, setSlPct] = useState(1.0);
+  const [tpPct, setTpPct] = useState(0.0);
+  const [trailingAct, setTrailingAct] = useState(5.0);
+  const [trailingDist, setTrailingDist] = useState(0.5);
 
   useEffect(() => {
     if (activeTab === 'history') {
@@ -395,28 +395,28 @@ export function BacktestMomentum() {
                        <span className="text-slate-400">Stop Loss (%)</span>
                        <span className="text-white font-mono">{slPct}%</span>
                      </div>
-                     <input type="range" min="0" max="15" step="0.5" value={slPct} onChange={e => setSlPct(Number(e.target.value))} className="w-full accent-red-500" />
+                     <input type="range" min="0" max="15" step="0.1" value={slPct} onChange={e => setSlPct(Number(e.target.value))} className="w-full accent-red-500" />
                   </div>
                   <div>
                      <div className="flex justify-between text-sm mb-2">
-                       <span className="text-slate-400">Take Profit (%)</span>
+                       <span className="text-slate-400">Take Profit (%) (0 = Off)</span>
                        <span className="text-white font-mono">{tpPct}%</span>
                      </div>
-                     <input type="range" min="0" max="25" step="0.5" value={tpPct} onChange={e => setTpPct(Number(e.target.value))} className="w-full accent-green-500" />
+                     <input type="range" min="0" max="25" step="0.1" value={tpPct} onChange={e => setTpPct(Number(e.target.value))} className="w-full accent-green-500" />
                   </div>
                   <div className="pt-4 border-t border-slate-800">
                      <div className="flex justify-between text-sm mb-2">
                        <span className="text-slate-400">Trailing Activation (%)</span>
                        <span className="text-white font-mono">{trailingAct}%</span>
                      </div>
-                     <input type="range" min="0" max="15" step="0.5" value={trailingAct} onChange={e => setTrailingAct(Number(e.target.value))} className="w-full accent-blue-500" />
+                     <input type="range" min="0" max="25" step="0.1" value={trailingAct} onChange={e => setTrailingAct(Number(e.target.value))} className="w-full accent-blue-500" />
                   </div>
                   <div>
                      <div className="flex justify-between text-sm mb-2">
                        <span className="text-slate-400">Trailing Distance (%)</span>
                        <span className="text-white font-mono">{trailingDist}%</span>
                      </div>
-                     <input type="range" min="0" max="10" step="0.5" value={trailingDist} onChange={e => setTrailingDist(Number(e.target.value))} className="w-full accent-blue-500" />
+                     <input type="range" min="0" max="5" step="0.1" value={trailingDist} onChange={e => setTrailingDist(Number(e.target.value))} className="w-full accent-blue-500" />
                   </div>
                 </div>
               </div>

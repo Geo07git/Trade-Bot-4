@@ -87,6 +87,10 @@ export default function App() {
         if (res.ok) {
           const data = await safeJson(res, null);
           if (!data) return;
+          
+          // Update local store with latest server state
+          useTradingStore.setState(data);
+          
           const currentStore = useTradingStore.getState();
 
           // If server is missing keys that exist locally in client, push them to server

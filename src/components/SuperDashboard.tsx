@@ -27,16 +27,16 @@ interface SuperDashboardProps {
   onSwitchToFullDashboard?: () => void;
 }
 
-function MiniCandlePatternChart({ patternName, strategy }: { patternName?: string; strategy?: 'grid' | 'scalping' | 'manual' }) {
+function MiniCandlePatternChart({ patternName, strategy }: { patternName?: string; strategy?: 'scalping' | 'momentum' | 'manual' }) {
   const nameLower = (patternName || '').toLowerCase();
-  const isGrid = strategy === 'grid' || nameLower.includes('grid');
+  const isMomentum = strategy === 'momentum' || nameLower.includes('momentum');
 
   let cleanName = 'Bullish Engulfing';
-  let patternType: 'engulfing' | 'hammer' | 'soldiers' | 'inside' | 'marubozu' | 'piercing' | 'grid' = 'engulfing';
+  let patternType: 'engulfing' | 'hammer' | 'soldiers' | 'inside' | 'marubozu' | 'piercing' = 'engulfing';
 
-  if (isGrid) {
-    cleanName = 'Grid Rebound';
-    patternType = 'grid';
+  if (isMomentum) {
+    cleanName = 'Momentum Break';
+    patternType = 'marubozu';
   } else if (nameLower.includes('hammer') || nameLower.includes('pinbar')) {
     cleanName = 'Hammer Pinbar';
     patternType = 'hammer';
@@ -113,16 +113,6 @@ function MiniCandlePatternChart({ patternName, strategy }: { patternName?: strin
             <rect x="10.5" y="6" width="5" height="12" rx="0.5" fill="#f43f5e" />
             <line x1="33" y1="2" x2="33" y2="22" stroke="#10b981" strokeWidth="1" />
             <rect x="30.5" y="5" width="5" height="14" rx="0.5" fill="#10b981" />
-          </>
-        )}
-
-        {patternType === 'grid' && (
-          <>
-            <line x1="2" y1="21" x2="48" y2="21" stroke="#10b981" strokeWidth="1" strokeDasharray="2 2" opacity="0.5" />
-            <line x1="13" y1="8" x2="13" y2="21" stroke="#f43f5e" strokeWidth="1" />
-            <rect x="10.5" y="10" width="5" height="10" rx="0.5" fill="#f43f5e" />
-            <line x1="33" y1="5" x2="33" y2="21" stroke="#10b981" strokeWidth="1" />
-            <rect x="30.5" y="6" width="5" height="14" rx="0.5" fill="#10b981" />
           </>
         )}
       </svg>
@@ -438,7 +428,7 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {positions.map((pos) => {
+            {positions.map((pos, idx) => {
               const currentPrice = pos.currentPrice || pos.entryPrice;
               const posValue = pos.amount * currentPrice;
               const posPnL = (currentPrice - pos.entryPrice) * pos.amount;
@@ -450,7 +440,7 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
 
               return (
                 <div 
-                  key={pos.symbol}
+                  key={pos.id ? `${pos.id}-${idx}` : `${pos.symbol}-${idx}`}
                   className="bg-black/60 border border-white/10 hover:border-white/20 rounded-xl p-3.5 space-y-2.5 transition-all"
                 >
                   <div className="flex items-center justify-between gap-2">
@@ -459,9 +449,26 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
                       <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                         BUY
                       </span>
-                      <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase bg-purple-500/10 text-purple-300 border-purple-500/30">
-                        {`SCALPING ${pos.leverage && pos.leverage > 1 ? `${pos.leverage}x` : ''}`}
-                      </span>
+                      {(() => {
+                        const st: 'momentum' | 'scalping' | 'manual' = 
+                          pos.strategy === 'momentum' || (pos as any)?.entryReason?.includes('Momentum') 
+                            ? 'momentum' 
+                            : pos.strategy === 'manual' || (pos as any)?.entryReason?.includes('Manual') 
+                            ? 'manual' 
+                            : 'scalping';
+                        return (
+                          <span className={cn(
+                            "text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase",
+                            st === 'momentum' 
+                              ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40" 
+                              : st === 'manual'
+                              ? "bg-zinc-800 text-zinc-300 border-white/10"
+                              : "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                          )}>
+                            {st}
+                          </span>
+                        );
+                      })()}
                     </div>
 
                     <PositionTimer 
@@ -542,7 +549,7 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
 
               return (
                 <div 
-                  key={idx}
+                  key={`log-${idx}-${log.time.replace(/:/g, '')}`}
                   className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 p-2.5 rounded-xl bg-black/50 border border-white/5 text-xs"
                 >
                   <div className="flex items-center gap-2.5 overflow-hidden">
