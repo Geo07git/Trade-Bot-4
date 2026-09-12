@@ -4013,7 +4013,7 @@ class ServerBotEngine {
               symbol: item.symbol,
               price: currentPrice,
               rfProb: mlRes?.rfProb || signal?.prob || 50,
-              metaProb: mlRes?.metaProb || 50,
+              metaProb: signalObj?.metaScore || mlRes?.metaProb || 50,
               reversalScore: mlRes?.reversalSignal?.score || 0,
               isReversal: !!(mlRes?.reversalSignal?.isBullishReversal || mlRes?.reversalSignal?.isBearishReversal),
               reversalType: mlRes?.reversalSignal?.isBullishReversal ? 'bullish' : (mlRes?.reversalSignal?.isBearishReversal ? 'bearish' : undefined),
@@ -4088,12 +4088,13 @@ class ServerBotEngine {
               oppScore: oppScoreVal
             });
 
-            // Rule 7: Un semnal care este deja B înainte de intrare este complet blocat: NO-TRADE
-            if (!isHolding && qualityRes.grade !== 'A+' && qualityRes.grade !== 'A') {
-              logger.info(`[VETO 🛑 NO-TRADE GRADE B] ${item.symbol}: Semnalul este Grad ${qualityRes.grade} (< Grad A). Blocat complet.`);
+            // Rule 7: Permite Grade A+, A, B sau probabilitate >= minRfProb
+            const minProb = this.state.scalpingConfig?.minRfProb || 70;
+            if (!isHolding && qualityRes.grade !== 'A+' && qualityRes.grade !== 'A' && qualityRes.grade !== 'B' && signal.prob < minProb) {
+              logger.info(`[VETO 🛑 NO-TRADE GRADE C] ${item.symbol}: Semnalul este Grad ${qualityRes.grade} (< Grad B și sub pragul de ${minProb}%). Blocat.`);
               if (this.state.signalJournal && this.state.signalJournal.length > 0) {
                 const j = this.state.signalJournal.find(entry => entry.symbol === item.symbol);
-                if (j) j.vetoReason = `Blocat: Semnal Grad ${qualityRes.grade} (< Grad A)`;
+                if (j) j.vetoReason = `Blocat: Semnal Grad ${qualityRes.grade} (< Grad B)`;
               }
               continue;
             }
