@@ -888,6 +888,122 @@ export function Settings() {
       {/* Tab 3: Account & Exchange */}
       {activeTab === 'account' && (
         <div className="space-y-6">
+          {/* Exchange & API Keys Configuration */}
+          <div className="bg-zinc-900/60 border border-white/10 rounded-2xl p-6 space-y-6">
+            <div>
+              <h3 className="text-lg font-serif text-white mb-1 flex items-center gap-2">
+                <Globe className="w-5 h-5 text-cyan-400" />
+                <span>Exchange & Mod de Execuție</span>
+              </h3>
+              <p className="text-xs text-zinc-400">
+                Selectează bursa cripto dorită (Binance, Bybit, OKX) și modul de operare (Paper Trading, Testnet Sandbox sau Live).
+              </p>
+            </div>
+
+            {/* Exchange Selector */}
+            <div className="space-y-2">
+              <label className="block text-[10px] uppercase tracking-widest text-zinc-400 font-mono">Bursă / Exchange</label>
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { id: 'binance', label: 'Binance', desc: 'Spot & Futures' },
+                  { id: 'bybit', label: 'Bybit', desc: 'Derivatives & Spot' },
+                  { id: 'okx', label: 'OKX (OHC)', desc: 'Web3 & Exchange' }
+                ].map(ex => (
+                  <button
+                    key={ex.id}
+                    onClick={() => setExchangeProvider(ex.id as any)}
+                    className={cn(
+                      "p-3 rounded-xl border text-left transition-all cursor-pointer",
+                      exchangeProvider === ex.id
+                        ? "bg-cyan-500/15 border-cyan-500/50 text-white shadow-lg shadow-cyan-950/40 ring-1 ring-cyan-500/30"
+                        : "bg-zinc-950/60 border-white/5 text-zinc-400 hover:bg-white/5 hover:border-white/10"
+                    )}
+                  >
+                    <div className="font-bold text-xs text-zinc-200">{ex.label}</div>
+                    <div className="text-[10px] text-zinc-500">{ex.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Mode Selector */}
+            <div className="space-y-2">
+              <label className="block text-[10px] uppercase tracking-widest text-zinc-400 font-mono">Mod de Operare (Execution Mode)</label>
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { id: 'paper', label: 'Paper Trading', desc: 'Simulare sigură în timp real' },
+                  { id: 'testnet', label: 'Testnet Sandbox', desc: 'Bursă test cu fonduri virtuale' },
+                  { id: 'live', label: 'Live Real', desc: 'Tranzacționare cu bani reali' }
+                ].map(m => (
+                  <button
+                    key={m.id}
+                    onClick={() => setBinanceMode(m.id as any)}
+                    className={cn(
+                      "p-3 rounded-xl border text-left transition-all cursor-pointer",
+                      binanceMode === m.id
+                        ? (m.id === 'live' ? "bg-rose-500/15 border-rose-500/50 text-white shadow-lg ring-1 ring-rose-500/30" : m.id === 'testnet' ? "bg-amber-500/15 border-amber-500/50 text-white shadow-lg ring-1 ring-amber-500/30" : "bg-emerald-500/15 border-emerald-500/50 text-white shadow-lg ring-1 ring-emerald-500/30")
+                        : "bg-zinc-950/60 border-white/5 text-zinc-400 hover:bg-white/5 hover:border-white/10"
+                    )}
+                  >
+                    <div className="font-bold text-xs text-zinc-200">{m.label}</div>
+                    <div className="text-[10px] text-zinc-500">{m.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* API Keys Inputs */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-white/5">
+              <div className="space-y-3">
+                <h4 className="text-xs font-mono font-bold text-zinc-300 uppercase tracking-wider">Chei API Live (Mainnet)</h4>
+                <div>
+                  <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">API Key</label>
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="Introdu API Key..."
+                    className="w-full bg-zinc-950/80 border border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-cyan-500/50 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">API Secret</label>
+                  <input
+                    type="password"
+                    value={apiSecret}
+                    onChange={(e) => setApiSecret(e.target.value)}
+                    placeholder="Introdu API Secret..."
+                    className="w-full bg-zinc-950/80 border border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-cyan-500/50 font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <h4 className="text-xs font-mono font-bold text-amber-400 uppercase tracking-wider">Chei Testnet / Sandbox</h4>
+                <div>
+                  <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">Testnet API Key</label>
+                  <input
+                    type="password"
+                    value={testnetApiKey}
+                    onChange={(e) => setTestnetApiKey(e.target.value)}
+                    placeholder="Introdu Testnet Key..."
+                    className="w-full bg-zinc-950/80 border border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-amber-500/50 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">Testnet API Secret</label>
+                  <input
+                    type="password"
+                    value={testnetApiSecret}
+                    onChange={(e) => setTestnetApiSecret(e.target.value)}
+                    placeholder="Introdu Testnet Secret..."
+                    className="w-full bg-zinc-950/80 border border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-amber-500/50 font-mono"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Top-Up / Adăugare Fonduri Suplimentare */}
           <div className="bg-zinc-900/60 border border-emerald-500/20 rounded-2xl p-6 space-y-4">
             <div className="flex items-center justify-between flex-wrap gap-2">

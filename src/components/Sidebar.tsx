@@ -13,11 +13,11 @@ function cn(...inputs: (string | undefined | null | false)[]) {
 interface SidebarProps {
   currentView: ViewState;
   onViewChange: (view: ViewState) => void;
-  isOpenMobile?: boolean;
-  onCloseMobile?: () => void;
+  isOpen?: boolean;
+  onClose?: () => void;
 }
 
-export function Sidebar({ currentView, onViewChange, isOpenMobile, onCloseMobile }: SidebarProps) {
+export function Sidebar({ currentView, onViewChange, isOpen, onClose }: SidebarProps) {
   const { 
     language,
     setLanguage,
@@ -47,18 +47,18 @@ export function Sidebar({ currentView, onViewChange, isOpenMobile, onCloseMobile
 
   return (
     <>
-      {/* Mobile backdrop overlay */}
-      {isOpenMobile && (
+      {/* Backdrop overlay */}
+      {isOpen && (
         <div 
-          onClick={onCloseMobile}
-          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-40 md:hidden"
+          onClick={onClose}
+          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-40"
         />
       )}
 
       <aside className={cn(
         "w-64 border-r border-amber-500/20 bg-[#08090c] backdrop-blur-3xl flex flex-col h-full z-50 transition-transform duration-300 ease-in-out shrink-0",
-        "fixed inset-y-0 left-0 md:static md:translate-x-0",
-        isOpenMobile ? "translate-x-0 shadow-2xl" : "-translate-x-full md:translate-x-0"
+        "fixed inset-y-0 left-0 shadow-2xl",
+        isOpen ? "translate-x-0" : "-translate-x-full"
       )}>
         <div className="p-4 border-b border-amber-500/20 space-y-3">
           <div className="flex items-center justify-between">
@@ -77,10 +77,10 @@ export function Sidebar({ currentView, onViewChange, isOpenMobile, onCloseMobile
                 <p className="text-[8px] uppercase tracking-[0.12em] text-amber-400 font-mono mt-0.5">{t.terminalSub}</p>
               </div>
             </div>
-            {onCloseMobile && (
+            {onClose && (
               <button 
-                onClick={onCloseMobile}
-                className="p-1.5 text-zinc-400 hover:text-white md:hidden"
+                onClick={onClose}
+                className="p-1.5 text-zinc-400 hover:text-white rounded-lg bg-white/5 border border-white/10 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -115,7 +115,7 @@ export function Sidebar({ currentView, onViewChange, isOpenMobile, onCloseMobile
               key={item.id}
               onClick={() => {
                 onViewChange(item.id);
-                if (onCloseMobile) onCloseMobile();
+                if (onClose) onClose();
               }}
               className={cn(
                 "w-full flex items-center gap-2.5 px-3 py-2.5 rounded text-xs transition-all text-left font-mono tracking-tight",

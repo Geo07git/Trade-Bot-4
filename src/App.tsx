@@ -27,7 +27,7 @@ import { getTranslation } from './utils/i18n';
 import { Menu, ShieldAlert, RotateCcw } from 'lucide-react';
 
 export default function App() {
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const { 
     language,
     setLanguage,
@@ -249,16 +249,18 @@ export default function App() {
   }, [activeView, currentView]);
 
   return (
-    <div className="flex flex-col md:flex-row h-screen w-full bg-black text-zinc-100 overflow-hidden font-sans">
-      {/* Mobile Ultra-Compact Top Header */}
-      <header className="md:hidden h-11 bg-zinc-950 border-b border-white/10 flex items-center justify-between px-2.5 shrink-0 z-30">
-        <div className="flex items-center gap-1.5">
+    <div className="flex flex-col h-screen w-full bg-black text-zinc-100 overflow-hidden font-sans">
+      {/* Top Header with Sidebar Toggle */}
+      <header className="h-11 bg-zinc-950 border-b border-white/10 flex items-center justify-between px-3 shrink-0 z-30">
+        <div className="flex items-center gap-2">
           <button 
-            onClick={() => setIsMobileMenuOpen(true)}
-            className="p-1 text-zinc-300 hover:text-white rounded-md bg-zinc-900 border border-white/10 cursor-pointer"
+            onClick={() => setIsSidebarOpen(true)}
+            className="p-1.5 text-zinc-300 hover:text-white rounded-md bg-zinc-900 border border-white/10 cursor-pointer flex items-center gap-1.5"
             aria-label="Open Navigation Menu"
+            title="Meniu Navigare"
           >
-            <Menu className="w-4 h-4" />
+            <Menu className="w-4 h-4 text-amber-400" />
+            <span className="text-[11px] font-mono font-bold uppercase tracking-wider hidden sm:inline">Meniu</span>
           </button>
           <div className="flex items-center gap-1.5">
             <img 
@@ -316,8 +318,8 @@ export default function App() {
       <Sidebar 
         currentView={activeView} 
         onViewChange={setCurrentView} 
-        isOpenMobile={isMobileMenuOpen}
-        onCloseMobile={() => setIsMobileMenuOpen(false)}
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
       />
       
       <main className="flex-1 h-full overflow-hidden relative flex flex-col">

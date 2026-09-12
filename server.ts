@@ -55,6 +55,14 @@ async function startServer() {
   // Link execution engine mode (both / scalping / momentum) to paperTrader
   paperTrader.setExecutionEngineChecker(() => botEngine.state.executionEngine || 'both');
 
+  // Connect virtual balance so PaperTrader reads and writes directly to botEngine.state.balance
+  // This unifies the capital pool and prevents profit from vanishing when PaperTrader stops
+  paperTrader.setExternalBalanceInterfaces(
+    () => botEngine.state.balance,
+    (newBal: number) => { botEngine.state.balance = newBal; },
+    () => botEngine.state.initialBalance || 250
+  );
+
   // Centralized reconciliation function ensuring Local vs Exchange / Paper states remain synchronized
   const triggerReconciliation = async (forceAuditLog: boolean = false) => {
     try {
@@ -261,16 +269,6 @@ async function startServer() {
       ...uniqueMomentumPositions
     ];
 
-    // Synchronize available cash balance:
-    // If momentum simulator has active positions or is active, use paperBalanceUSDT
-    const effectiveBalance = (paperState.active || openMomentumPositions.length > 0)
-      ? paperState.paperBalanceUSDT
-      : state.balance;
-
-    if (botEngine.state.balance !== effectiveBalance) {
-      botEngine.state.balance = effectiveBalance;
-    }
-
     const calculatedEquity = botEngine.calculateEquity();
     botEngine.checkCircuitBreaker();
 
@@ -280,8 +278,8 @@ async function startServer() {
       circuitBreakerTriggered: botEngine.state.circuitBreakerTriggered,
       circuitBreakerReason: botEngine.state.circuitBreakerReason,
       equityProtectionConfig: botEngine.state.equityProtectionConfig,
-      balance: effectiveBalance,
-      initialBalance: paperState.startingBalanceUSDT || state.initialBalance || 1000,
+      balance: state.balance,
+      initialBalance: state.initialBalance || 250,
       positions: combinedPositions,
       apiKey: state.apiKey ? '••••••••' : '',
       apiSecret: state.apiSecret ? '••••••••' : '',

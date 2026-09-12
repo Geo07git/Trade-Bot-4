@@ -39,44 +39,52 @@ function createBinanceClient(options: { apiKey?: string; apiSecret?: string; htt
 }
 
 const exchangeInfoCache = new Map<string, { stepSize: number; minQty: number; minNotional: number }>();
+let exchangeInfoFetched = false;
+let exchangeInfoFailedUntil = 0;
 
 async function getSymbolFilters(client: any, symbol: string) {
-  if (exchangeInfoCache.has(symbol)) {
-    return exchangeInfoCache.get(symbol)!;
+  const cleanSymbol = symbol.toUpperCase().trim();
+  if (exchangeInfoCache.has(cleanSymbol)) {
+    return exchangeInfoCache.get(cleanSymbol)!;
   }
 
-  try {
-    const info = await client.exchangeInfo();
-    if (info && Array.isArray(info.symbols)) {
-      for (const s of info.symbols) {
-        if (!s || !s.symbol || !s.filters) continue;
-        const lotSize = s.filters.find((f: any) => f.filterType === 'LOT_SIZE');
-        const minNotional = s.filters.find((f: any) => f.filterType === 'MIN_NOTIONAL' || f.filterType === 'NOTIONAL');
+  if (!exchangeInfoFetched && Date.now() > exchangeInfoFailedUntil) {
+    try {
+      exchangeInfoFetched = true;
+      const info = await client.exchangeInfo();
+      if (info && Array.isArray(info.symbols)) {
+        for (const s of info.symbols) {
+          if (!s || !s.symbol || !s.filters) continue;
+          const lotSize = s.filters.find((f: any) => f.filterType === 'LOT_SIZE');
+          const minNotional = s.filters.find((f: any) => f.filterType === 'MIN_NOTIONAL' || f.filterType === 'NOTIONAL');
 
-        const stepSize = lotSize?.stepSize ? parseFloat(lotSize.stepSize) : 0.0001;
-        const minQty = lotSize?.minQty ? parseFloat(lotSize.minQty) : 0.0001;
-        const notional = minNotional?.minNotional || minNotional?.notional ? parseFloat(minNotional.minNotional || minNotional.notional) : 5.0;
+          const stepSize = lotSize?.stepSize ? parseFloat(lotSize.stepSize) : 0.0001;
+          const minQty = lotSize?.minQty ? parseFloat(lotSize.minQty) : 0.0001;
+          const notional = minNotional?.minNotional || minNotional?.notional ? parseFloat(minNotional.minNotional || minNotional.notional) : 5.0;
 
-        exchangeInfoCache.set(s.symbol, { stepSize, minQty, minNotional: notional });
+          exchangeInfoCache.set(s.symbol.toUpperCase(), { stepSize, minQty, minNotional: notional });
+        }
       }
+    } catch (err: any) {
+      exchangeInfoFailedUntil = Date.now() + 300000; // 5 min cooldown on IP ban / weight limit
+      logger.warn(`[Binance Rate Limit / IP Ban Protection] exchangeInfo skipped: ${err?.message || err}. Using heuristics.`);
     }
-    if (exchangeInfoCache.has(symbol)) {
-      return exchangeInfoCache.get(symbol)!;
-    }
-  } catch (err: any) {
-    logger.warn(`Could not fetch exchangeInfo for ${symbol} from Binance (using default heuristics): ${err?.message || err}`);
+  }
+
+  if (exchangeInfoCache.has(cleanSymbol)) {
+    return exchangeInfoCache.get(cleanSymbol)!;
   }
 
   let defaultStepSize = 0.0001;
-  const symUpper = symbol.toUpperCase();
+  const symUpper = cleanSymbol;
   if (symUpper.startsWith('BTC')) defaultStepSize = 0.00001;
   else if (symUpper.startsWith('ETH')) defaultStepSize = 0.0001;
-  else if (symUpper.startsWith('DOGE') || symUpper.startsWith('PEPE') || symUpper.startsWith('TRX') || symUpper.startsWith('SEI') || symUpper.startsWith('FET')) defaultStepSize = 1.0;
+  else if (symUpper.startsWith('DOGE') || symUpper.startsWith('PEPE') || symUpper.startsWith('TRX') || symUpper.startsWith('SEI') || symUpper.startsWith('FET') || symUpper.startsWith('BTTC') || symUpper.startsWith('SHIB') || symUpper.startsWith('LUNC') || symUpper.startsWith('SPELL')) defaultStepSize = 1.0;
   else if (symUpper.startsWith('SOL') || symUpper.startsWith('BNB') || symUpper.startsWith('LINK') || symUpper.startsWith('AVAX') || symUpper.startsWith('DOT') || symUpper.startsWith('APT') || symUpper.startsWith('DEXE')) defaultStepSize = 0.01;
   else if (symUpper.startsWith('XRP') || symUpper.startsWith('ADA') || symUpper.startsWith('SUI') || symUpper.startsWith('TON') || symUpper.startsWith('ARB') || symUpper.startsWith('OP') || symUpper.startsWith('FIL') || symUpper.startsWith('RENDER') || symUpper.startsWith('NEAR')) defaultStepSize = 0.1;
 
   const fallback = { stepSize: defaultStepSize, minQty: defaultStepSize, minNotional: 5.0 };
-  exchangeInfoCache.set(symbol, fallback);
+  exchangeInfoCache.set(cleanSymbol, fallback);
   return fallback;
 }
 
@@ -1677,7 +1685,11 @@ class ServerBotEngine {
 
     for (const [symbol, qty] of activeAssetsOnExchange.entries()) {
       const item = this.state.watchlist.find(w => w.symbol === symbol);
-      const currentMarketPrice = item?.price || 1;
+      if (!item) {
+        this.addLog(`[SPOT DUST 🟡] Găsit în portofoliul Binance ${symbol} (${qty} unități) - Neaflat în Watchlist. Ignorat.`, 'info');
+        continue;
+      }
+      const currentMarketPrice = item.price || 1;
       
       // Calculate estimated USDT value: if value >= minNotional ($5), add
       if (currentMarketPrice * qty >= 5.0) {
@@ -1715,9 +1727,9 @@ class ServerBotEngine {
           }
         }
 
-        if (!realEntryPrice || !realOpenedAt) {
-          isUntracked = true;
-          this.addLog(`[RECONCILIERE ⚠️] Poziție descoperită pe Binance pentru ${symbol} (${qty} unități). Istoricul de achiziție nu a putut fi determinat — marcată ca UNTRACKED.`, 'warning');
+        if (!realEntryPrice || !realOpenedAt || (Date.now() - realOpenedAt > 86400000 * 7)) {
+          this.addLog(`[SPOT DUST 🟡] Găsit în portofoliul Binance ${symbol} (${qty} unități) - Sold vechi/Testnet neasociat botului. Ignorat de la scalping automat.`, 'info');
+          continue;
         } else {
           this.addLog(`[RECONCILIERE 🔄] Poziție descoperită pe Binance pentru ${symbol} (${qty} unități @ $${realEntryPrice.toFixed(4)} din ${formatInTimezone(new Date(realOpenedAt).toISOString())}).`, 'info');
         }
@@ -1725,15 +1737,15 @@ class ServerBotEngine {
         updatedPositions.push({
           symbol,
           amount: qty,
-          entryPrice: realEntryPrice || currentMarketPrice,
+          entryPrice: realEntryPrice,
           currentPrice: currentMarketPrice,
-          highestPrice: Math.max(currentMarketPrice, realEntryPrice || currentMarketPrice),
-          openedAt: realOpenedAt || Date.now(),
-          entryFee: parseFloat(((realEntryPrice || currentMarketPrice) * qty * 0.00075).toFixed(4)),
+          highestPrice: Math.max(currentMarketPrice, realEntryPrice),
+          openedAt: realOpenedAt,
+          entryFee: parseFloat((realEntryPrice * qty * 0.00075).toFixed(4)),
           strategy: 'scalping',
           leverage: 1,
-          margin: (realEntryPrice || currentMarketPrice) * qty,
-          isUntracked
+          margin: realEntryPrice * qty,
+          isUntracked: false
         } as Position);
       }
     }
@@ -1827,8 +1839,13 @@ class ServerBotEngine {
       }
     } catch (err: any) {
       const errMsg = err?.message || String(err);
-      logger.warn(`[BINANCE ${mode.toUpperCase()}] Could not sync balance: ${errMsg}`);
-      this.addLog(`[BINANCE ${mode.toUpperCase()}] Eroare la sincronizarea balanței: ${errMsg}`, 'warning');
+      const isIpBan = errMsg.includes('IP banned') || errMsg.includes('request weight');
+      const now = Date.now();
+      if (!isIpBan || (now - (this as any)._lastIpBanLogTime > 300000)) {
+        if (isIpBan) (this as any)._lastIpBanLogTime = now;
+        logger.warn(`[BINANCE ${mode.toUpperCase()}] Could not sync balance: ${errMsg}`);
+        this.addLog(`[BINANCE ${mode.toUpperCase()}] Eroare la sincronizarea balanței: ${errMsg}`, 'warning');
+      }
 
       if (mode === 'live') {
         this.consecutiveApiErrors += 1;
@@ -2727,7 +2744,10 @@ class ServerBotEngine {
             this.state.positions.splice(existingIndex, 1);
           }
 
-          const returnedCapital = closingMargin + netPnl;
+          // Exact Cash Accounting: entry fee was already deducted from balance at BUY.
+          // returnedCapital should only subtract the exitFee from the gross return.
+          // Since netPnl = grossPnl - portionEntryFee - exitFee, adding portionEntryFee back avoids double-deduction.
+          const returnedCapital = closingMargin + netPnl + portionEntryFee;
           this.state.balance += returnedCapital;
           this.state.totalTradesExecuted += 1;
 
@@ -2977,13 +2997,6 @@ class ServerBotEngine {
       filtered.sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume));
       const topCandidates = filtered.slice(0, 250);
 
-      const btcFiltered = filtered.find((i: any) => i.symbol === 'BTCUSDT');
-      const btcTop = topCandidates.find((i: any) => i.symbol === 'BTCUSDT');
-      const diagMsg = `[DIAGNOSTIC] BTCUSDT in filtered: ${!!btcFiltered}, in topCandidates: ${!!btcTop}` + 
-        (btcFiltered ? ` | Vol24h: $${parseFloat(btcFiltered.quoteVolume).toLocaleString('en-US')} | Var24h: ${btcFiltered.priceChangePercent}%` : '');
-      logger.info(diagMsg);
-      this.addLog(diagMsg, 'info');
-
       const batchPriceMap = await fetchBatchPricesServer();
 
       // Step 1: Scan all 500 pairs to compute Candlestick Pattern Strength & Discovery Score
@@ -3098,31 +3111,11 @@ class ServerBotEngine {
         scannedCandidates.push(...batchResults);
       }
 
-      // DIAGNOSTIC: Log BTCUSDT scores after calculation and before sort
-      const btcBeforeSort = scannedCandidates.find(c => c.symbol === 'BTCUSDT');
-      if (btcBeforeSort) {
-        // discoveryScore calculation logged silently
-
-      } else {
-        logger.info('[DIAGNOSTIC] BTCUSDT not found in scannedCandidates after discoveryScore calculation');
-      }
-
       // STAGE 1: Sort all 500 candidates by Momentum/Pattern Discovery Score
       scannedCandidates.sort((a, b) => (b.discoveryScore || 0) - (a.discoveryScore || 0));
 
       // STAGE 2: Select TOP 50 Candidates for ML + MetaScore Analysis
       const top50Candidates = scannedCandidates.slice(0, 50);
-
-      // DIAGNOSTIC: Log BTCUSDT rank, TOP 50 inclusion, and candidate counts
-      const btcIndex = scannedCandidates.findIndex(c => c.symbol === 'BTCUSDT');
-      if (btcIndex !== -1) {
-        const btcRank = btcIndex + 1;
-        const isIncludedInTop50 = btcRank <= 50;
-        // Rank logged silently
-
-      } else {
-        logger.info(`[DIAGNOSTIC] BTCUSDT not found in scannedCandidates after sort. scannedCandidates count: ${scannedCandidates.length}, top50Candidates count: ${top50Candidates.length}`);
-      }
       await Promise.all(top50Candidates.map(async (op, idx) => {
         try {
           // Fetch full ML strategy analysis for top 25 candidates or if already cached.
@@ -3200,6 +3193,15 @@ class ServerBotEngine {
           op.inDynamicWatchlist = false;
         }
       });
+
+      const btcOp = reorderedCandidates.find(c => c.symbol === 'BTCUSDT');
+      if (btcOp) {
+        const momentumRank = scannedCandidates.findIndex(c => c.symbol === 'BTCUSDT') + 1;
+        const scalpingRank = top50Candidates.findIndex(c => c.symbol === 'BTCUSDT') + 1;
+        const btcDiagMessage = `[BTC_DIAGNOSTIC 🌟] BTCUSDT | Opp Score: ${btcOp.opportunityScore}/100 | Momentum Score: ${btcOp.momentumScore}pt | Discovery Score: ${btcOp.discoveryScore}/100 | Ranks -> Momentum: #${momentumRank || 'N/A'}, Scalping Top50: #${scalpingRank || 'N/A'}, Global: #${btcOp.rank || 'N/A'} | Vol24h: $${(btcOp.volume24h / 1000000).toFixed(1)}M | Var24h: ${btcOp.volumeGrowth24h}% | RF Prob: ${btcOp.rfProb}% | MetaScore: ${(btcOp as any).metaTradeScore || 'N/A'}`;
+        logger.info(btcDiagMessage);
+        this.addLog(btcDiagMessage, 'success');
+      }
 
       this.lastScanTimestamp = Date.now();
       this.state.marketOpportunities = reorderedCandidates;

@@ -290,9 +290,18 @@ export class PaperTrader {
 
   private onBalanceChange?: (newBalance: number) => void;
   private onPositionChange?: () => void;
+  private externalBalanceProvider?: () => number;
+  private externalBalanceUpdater?: (newBal: number) => void;
+  private externalStartingBalanceProvider?: () => number;
 
   public setOnBalanceChange(cb: (newBalance: number) => void) {
     this.onBalanceChange = cb;
+  }
+
+  public setExternalBalanceInterfaces(provider: () => number, updater: (newBal: number) => void, startingBalProvider?: () => number) {
+    this.externalBalanceProvider = provider;
+    this.externalBalanceUpdater = updater;
+    this.externalStartingBalanceProvider = startingBalProvider;
   }
 
   public setOnPositionChange(cb: () => void) {
@@ -320,14 +329,22 @@ export class PaperTrader {
   }
 
   public getEffectiveBalance(): number {
+    if (this.externalBalanceProvider) return this.externalBalanceProvider();
     return this.state.paperBalanceUSDT;
   }
 
   public deductCapital(amount: number) {
-    this.state.paperBalanceUSDT = Math.max(0, parseFloat((this.state.paperBalanceUSDT - amount).toFixed(4)));
+    const cur = this.getEffectiveBalance();
+    const next = Math.max(0, parseFloat((cur - amount).toFixed(4)));
+    if (this.externalBalanceUpdater) {
+      this.externalBalanceUpdater(next);
+    } else {
+      this.state.paperBalanceUSDT = next;
+    }
+    
     if (this.onBalanceChange) {
       try {
-        this.onBalanceChange(this.state.paperBalanceUSDT);
+        this.onBalanceChange(next);
       } catch (e) {
         console.error('[PaperTrader onBalanceChange Error]', e);
       }
@@ -335,10 +352,17 @@ export class PaperTrader {
   }
 
   public refundCapital(amount: number) {
-    this.state.paperBalanceUSDT = parseFloat((this.state.paperBalanceUSDT + amount).toFixed(4));
+    const cur = this.getEffectiveBalance();
+    const next = parseFloat((cur + amount).toFixed(4));
+    if (this.externalBalanceUpdater) {
+      this.externalBalanceUpdater(next);
+    } else {
+      this.state.paperBalanceUSDT = next;
+    }
+    
     if (this.onBalanceChange) {
       try {
-        this.onBalanceChange(this.state.paperBalanceUSDT);
+        this.onBalanceChange(next);
       } catch (e) {
         console.error('[PaperTrader onBalanceChange Error]', e);
       }
@@ -525,7 +549,7 @@ export class PaperTrader {
       return sum + curVal;
     }, 0);
     const totalEquity = this.getEffectiveBalance() + openPositionsValue;
-    const startBal = this.state.startingBalanceUSDT || 10000;
+    const startBal = this.externalStartingBalanceProvider ? this.externalStartingBalanceProvider() : (this.state.startingBalanceUSDT || 10000);
 
     // 1. Hard Stop at -50% from initial balance
     if (totalEquity <= startBal * 0.50) {

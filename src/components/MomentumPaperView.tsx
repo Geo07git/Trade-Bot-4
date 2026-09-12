@@ -1024,12 +1024,29 @@ export function MomentumPaperView() {
             {language === 'ro' ? 'Jurnal Activitate Paper Engine' : 'Paper Engine Activity Log'}
           </h2>
           <div className="max-h-80 overflow-y-auto space-y-2 font-mono text-[11px] pr-1">
-            {state.logs.map((log, idx) => (
-              <div key={idx} className="bg-zinc-900/40 border border-white/5 rounded-lg p-2.5 flex items-start gap-2.5">
-                <span className="text-zinc-500 shrink-0">{new Date(log.timestamp).toLocaleTimeString()}</span>
-                <span className="text-zinc-300 leading-tight">{log.message}</span>
-              </div>
-            ))}
+            {state.logs.map((log, idx) => {
+              const isBtcDiag = log.message.includes('BTC_DIAGNOSTIC');
+              return (
+                <div key={idx} className={cn(
+                  "border rounded-lg p-2.5 flex items-start gap-2.5 transition-all",
+                  isBtcDiag
+                    ? "bg-amber-500/15 border-amber-500/50 shadow-lg shadow-amber-950/40 text-amber-100 ring-1 ring-amber-500/30"
+                    : "bg-zinc-900/40 border-white/5 text-zinc-300"
+                )}>
+                  <span className="text-zinc-500 shrink-0">{new Date(log.timestamp).toLocaleTimeString()}</span>
+                  <div className="flex-1 leading-tight">
+                    {isBtcDiag && (
+                      <span className="inline-block px-2 py-0.5 rounded bg-amber-500 text-zinc-950 font-bold text-[10px] uppercase mb-1.5 mr-2 shadow-sm">
+                        Bitcoin Live Diagnostic 🌟
+                      </span>
+                    )}
+                    <span className={isBtcDiag ? "font-bold text-amber-200 font-mono text-xs block mt-0.5" : "text-zinc-300"}>
+                      {log.message}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
