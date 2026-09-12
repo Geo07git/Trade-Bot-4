@@ -1,12 +1,14 @@
 export interface EquityProtectionConfig {
   enabled: boolean;
-  profitThresholdPct: number; // e.g. 0.6%
-  drawdownProtectionPct: number; // e.g. 0.2%
+  trailingDistancePct: number; // e.g. 0.40%
+  highWaterMark?: number;
+  isLocked?: boolean;
+  profitThresholdPct?: number;
 }
 
 export type ViewState = 'bloomberg' | 'superDashboard' | 'dashboard' | 'strategy' | 'scalping' | 'audit' | 'momentumPaper' | 'journal' | 'analyst' | 'alerts' | 'logs' | 'settings' | 'calibration' | 'backtest';
 
-export type ExecutionEngineMode = 'both' | 'scalping';
+export type ExecutionEngineMode = 'both' | 'scalping' | 'momentum' | 'none';
 
 export type MlModelSelection = 'rf';
 

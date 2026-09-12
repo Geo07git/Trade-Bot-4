@@ -29,8 +29,6 @@ export function Sidebar({ currentView, onViewChange, isOpenMobile, onCloseMobile
     testnetApiKey,
     testnetApiSecret,
     circuitBreakerTriggered,
-    accumulationBalance = 0,
-    sessionCycleCount = 1
   } = useTradingStore();
 
   const t = getTranslation(language);
@@ -246,13 +244,7 @@ export function Sidebar({ currentView, onViewChange, isOpenMobile, onCloseMobile
                   </div>
                 </div>
 
-                <div className="pt-1.5 border-t border-white/5 flex items-center justify-between text-[10px]">
-                  <span className="text-amber-400/90 font-medium">Vault:</span>
-                  <span className="text-amber-300 font-bold">
-                    ${accumulationBalance.toFixed(2)} USDT <span className="text-[9px] text-zinc-500">(#{sessionCycleCount})</span>
-                  </span>
-                </div>
-              </div>
+                              </div>
             );
           })()}
         </div>

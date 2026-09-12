@@ -24,6 +24,7 @@ import {
   Bell, 
   Sliders, 
   ShieldAlert,
+  ShieldCheck,
   Layers,
   Server,
   Globe,
@@ -34,7 +35,9 @@ import {
   GitMerge,
   Sparkles,
   BrainCircuit,
-  Target
+  Target,
+  Rocket,
+  Pause
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -198,16 +201,9 @@ export function Settings() {
     lastCheckAt,
     checkEnginePulse,
     watchlist,
+    initialBalance,
     equityProtectionConfig,
     setEquityProtectionConfig,
-    accumulationBalance = 0,
-    sessionCycleCount = 1,
-    accumulationTargetPercent = 3.0,
-    accumulationTargetEnabled = true,
-    setAccumulationTargetPercent,
-    toggleAccumulationTarget,
-    resetAccumulationVault,
-    consolidateAccumulation
   } = useTradingStore();
 
   const t = getTranslation(language);
@@ -259,7 +255,7 @@ export function Settings() {
   };
 
   const tabItems: Array<{ id: 'engine' | 'intervals' | 'account' | 'ai' | 'notifications' | 'system' | 'alerts' | 'analyst' | 'calibration'; label: string; icon: any; badge?: string }> = [
-    { id: 'engine', label: language === 'ro' ? 'Execuție & Risc' : 'Execution & Risk', icon: Activity, badge: executionEngine === 'both' ? (language === 'ro' ? 'Hibrid' : 'Hybrid') : 'Scalping' },
+    { id: 'engine', label: language === 'ro' ? 'Risc & Execuție' : 'Risk & Execution', icon: Activity },
     { id: 'intervals', label: language === 'ro' ? 'Intervale & Server 24/7' : 'Intervals & 24/7 Server', icon: Clock },
     { id: 'account', label: language === 'ro' ? 'Cont & Exchange' : 'Account & Exchange', icon: CreditCard, badge: binanceMode.toUpperCase() },
     { id: 'ai', label: language === 'ro' ? 'Modele AI & Gemini' : 'AI Models & Gemini', icon: Bot },
@@ -352,50 +348,184 @@ export function Settings() {
             </div>
           </div>
 
-          {/* Execution Engine Selector Card (Both / Grid / Scalping) */}
-          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/50 to-cyan-950/20 border border-cyan-500/20 rounded-2xl p-6">
+          {/* Equity Trailing / Capital Protection Card */}
+          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/50 to-emerald-950/20 border border-emerald-500/20 rounded-2xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                  <ShieldCheck className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Equity Trailing / Capital Protection</h3>
+                  <p className="text-xs text-zinc-400">Protejează câștigurile acumulate bazat pe High-Water Mark și Trailing Drawdown.</p>
+                </div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input 
+                  type="checkbox" 
+                  checked={equityProtectionConfig?.enabled ?? true}
+                  onChange={(e) => setEquityProtectionConfig({ enabled: e.target.checked })}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+              </label>
+            </div>
+
+            <div className="space-y-6 pt-2">
+              {/* Slider 1: Prag Minim de Profit pentru Activare */}
+              <div className="space-y-2 p-3.5 bg-black/30 rounded-xl border border-white/5">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-zinc-200 block">
+                      {language === 'ro' ? '1. Prag Minim de Profit pentru Activare Trailing (%)' : '1. Minimum Profit Activation Threshold (%)'}
+                    </span>
+                    <span className="text-[11px] text-zinc-400">
+                      {language === 'ro' ? 'Protecția pornește urmărirea DOAR DUPĂ ce contul acumulează acest profit minim' : 'Trailing activates ONLY AFTER the account accumulates this minimum profit'}
+                    </span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-xs font-mono font-bold bg-emerald-500/20 text-emerald-300 px-2.5 py-1 rounded border border-emerald-500/40 inline-block">
+                      +{(equityProtectionConfig?.profitThresholdPct ?? 0.80).toFixed(2)}%
+                    </span>
+                    <span className="block text-[10px] font-mono text-zinc-400 mt-0.5">
+                      ~+${(((initialBalance || balance || 1000) * (equityProtectionConfig?.profitThresholdPct ?? 0.80)) / 100).toFixed(2)} USDT
+                    </span>
+                  </div>
+                </div>
+                <input 
+                  type="range" 
+                  min="0.00" 
+                  max="5.00" 
+                  step="0.05"
+                  value={equityProtectionConfig?.profitThresholdPct ?? 0.80}
+                  onChange={(e) => setEquityProtectionConfig({ profitThresholdPct: parseFloat(e.target.value) })}
+                  className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                />
+                <div className="flex justify-between text-[10px] text-zinc-500 font-mono">
+                  <span>0.00% (Imediat)</span>
+                  <span>+0.80% (Recomandat)</span>
+                  <span>+2.00%</span>
+                  <span>+5.00%</span>
+                </div>
+                <p className="text-[11px] text-zinc-400 leading-relaxed pt-1">
+                  {language === 'ro' 
+                    ? `Cât timp profitul contului este sub +${(equityProtectionConfig?.profitThresholdPct ?? 0.80).toFixed(2)}%, botul lasă pozițiile deschise să respire și NU va închide prematur pe zgomot de piață. Comisioanele de schimb nu vă vor afecta.`
+                    : `While account profit is under +${(equityProtectionConfig?.profitThresholdPct ?? 0.80).toFixed(2)}%, trailing is on hold, preventing early liquidation on market noise.`}
+                </p>
+              </div>
+
+              {/* Slider 2: Distanța de Retragere din Vârf (Trailing Distance) */}
+              <div className="space-y-2 p-3.5 bg-black/30 rounded-xl border border-white/5">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-zinc-200 block">
+                      {language === 'ro' ? '2. Distanță Retragere din Vârf / Trailing Drawdown (%)' : '2. Trailing Drawdown from Peak (%)'}
+                    </span>
+                    <span className="text-[11px] text-zinc-400">
+                      {language === 'ro' ? 'Distanța maximă de cădere permisă din cel mai înalt punct (HWM)' : 'Maximum pullback allowed from high-water mark peak'}
+                    </span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-xs font-mono font-bold bg-amber-500/20 text-amber-300 px-2.5 py-1 rounded border border-amber-500/40 inline-block">
+                      -{(equityProtectionConfig?.trailingDistancePct ?? 0.40).toFixed(2)}%
+                    </span>
+                    <span className="block text-[10px] font-mono text-zinc-400 mt-0.5">
+                      ~-${(((initialBalance || balance || 1000) * (equityProtectionConfig?.trailingDistancePct ?? 0.40)) / 100).toFixed(2)} USDT
+                    </span>
+                  </div>
+                </div>
+                <input 
+                  type="range" 
+                  min="0.10" 
+                  max="3.00" 
+                  step="0.05"
+                  value={equityProtectionConfig?.trailingDistancePct ?? 0.40}
+                  onChange={(e) => setEquityProtectionConfig({ trailingDistancePct: parseFloat(e.target.value) })}
+                  className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                />
+                <div className="flex justify-between text-[10px] text-zinc-500 font-mono">
+                  <span>-0.10% (Foarte strâns)</span>
+                  <span>-0.40% (Optim)</span>
+                  <span>-1.00%</span>
+                  <span>-3.00% (Larg)</span>
+                </div>
+                <p className="text-[11px] text-zinc-400 leading-relaxed pt-1">
+                  {language === 'ro'
+                    ? `După ce pragul 1 a fost atins, dacă capitalul (Equity) scade cu ${(equityProtectionConfig?.trailingDistancePct ?? 0.40).toFixed(2)}% față de vârful maxim atins, botul vinde instant toate pozițiile la piață și securizează profitul net în Free Balance.`
+                    : `Once Step 1 is reached, if equity drops by ${(equityProtectionConfig?.trailingDistancePct ?? 0.40).toFixed(2)}% from peak HWM, all positions close immediately.`}
+                </p>
+              </div>
+
+              {/* Caseta de Exemplu Vizual Live */}
+              {(() => {
+                const base = initialBalance || balance || 1000;
+                const pThresh = equityProtectionConfig?.profitThresholdPct ?? 0.80;
+                const tDist = equityProtectionConfig?.trailingDistancePct ?? 0.40;
+                const minHwm = base * (1 + pThresh / 100);
+                const examplePeak = Math.max(minHwm + base * 0.007, base * 1.015);
+                const triggerEq = examplePeak * (1 - tDist / 100);
+                const netLocked = triggerEq - base;
+
+                return (
+                  <div className="p-3 bg-emerald-950/20 rounded-xl border border-emerald-500/20 text-xs">
+                    <div className="font-bold text-emerald-300 mb-1 flex items-center gap-1.5">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                      <span>{language === 'ro' ? 'Cum funcționează concret pe contul tău:' : 'How it works on your account:'}</span>
+                    </div>
+                    <ul className="space-y-1 text-zinc-300 text-[11px] pl-5 list-disc">
+                      <li>
+                        {language === 'ro' 
+                          ? <>Contul pleacă de la <strong>${base.toFixed(2)} USDT</strong>. Până când nu atinge minim <strong>${minHwm.toFixed(2)} USDT</strong> (+{pThresh.toFixed(2)}%), trailing-ul nu se panichează.</>
+                          : <>Starts at <strong>${base.toFixed(2)} USDT</strong>. Trailing stays idle until reaching at least <strong>${minHwm.toFixed(2)} USDT</strong>.</>}
+                      </li>
+                      <li>
+                        {language === 'ro'
+                          ? <>Dacă atinge de exemplu <strong>${examplePeak.toFixed(2)} USDT</strong> și apoi se retrage cu {tDist.toFixed(2)}%, vinde tot automat la <strong>${triggerEq.toFixed(2)} USDT</strong>.</>
+                          : <>If equity hits <strong>${examplePeak.toFixed(2)} USDT</strong> and drops {tDist.toFixed(2)}%, it sells all at <strong>${triggerEq.toFixed(2)} USDT</strong>.</>}
+                      </li>
+                      <li className="text-emerald-300 font-semibold">
+                        {language === 'ro'
+                          ? <>Profit net securizat în buzunar: <strong>+${netLocked.toFixed(2)} USDT</strong> (acoperind confortabil orice comision Binance!).</>
+                          : <>Secured net profit in pocket: <strong>+${netLocked.toFixed(2)} USDT</strong>.</>}
+                      </li>
+                    </ul>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+
+          {/* Motor de Execuție Strategii Active */}
+          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/50 to-cyan-950/20 border border-cyan-500/20 rounded-2xl p-5 sm:p-6">
             <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 rounded-xl bg-cyan-500/10 border border-cyan-500/20 text-cyan-400">
+              <div className="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/20 text-cyan-400">
                 <Activity className="w-5 h-5" />
               </div>
               <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="text-lg font-serif text-white">Motor de Execuție Automatizată</h3>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="text-base sm:text-lg font-serif text-white">
+                    {language === 'ro' ? 'Motor de Execuție Strategii' : 'Strategy Execution Engine'}
+                  </h3>
                   <span className="text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-300 px-2 py-0.5 rounded border border-cyan-500/30">
-                    {(executionEngine || 'both') === 'both' ? 'HIBRID (SCALPING)' : 'DOAR SCALPING'}
+                    {executionEngine === 'scalping' 
+                      ? 'SCALPING ML' 
+                      : executionEngine === 'momentum' 
+                        ? 'MOMENTUM BREAKOUT' 
+                        : executionEngine === 'none'
+                          ? 'OPRIT (NONE)'
+                          : (language === 'ro' ? 'AMBELE ACTIVE (HIBRID)' : 'BOTH ACTIVE (HYBRID)')}
                   </span>
                 </div>
-                <p className="text-xs text-cyan-400/90">Alege modul în care se vor executa ordinele automate pe piață.</p>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  {language === 'ro' 
+                    ? 'Comutator direct între strategiile active din platformă: alege ce motoare pot deschide poziții noi.'
+                    : 'Direct toggle between active platform strategies: choose which engines can open new positions.'}
+                </p>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-2">
-              {/* Option 1: Both */}
-              <button
-                onClick={() => setExecutionEngine('both')}
-                className={cn(
-                  "p-4 rounded-xl text-left border transition-all relative flex flex-col justify-between space-y-3 cursor-pointer",
-                  (executionEngine || 'both') === 'both'
-                    ? "bg-cyan-500/15 border-cyan-500/50 text-white shadow-lg shadow-cyan-950/50 ring-1 ring-cyan-500/30"
-                    : "bg-zinc-950/60 border-white/5 text-zinc-400 hover:bg-white/5 hover:border-white/10"
-                )}
-              >
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs font-bold text-cyan-300">⚡ Hibrid</span>
-                    <span className="text-[9px] font-mono bg-cyan-500/20 text-cyan-300 px-1.5 py-0.5 rounded">Hibrid Complete</span>
-                  </div>
-                  <p className="text-[11px] text-zinc-300 leading-snug">
-                    Rulează <strong>AI Scalping</strong> pe impuls.
-                  </p>
-                </div>
-                <div className="text-[10px] font-mono text-cyan-400/80 pt-2 border-t border-cyan-500/20 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></span>
-                  <span>Flexibilitate Maximă 24/7</span>
-                </div>
-              </button>
-
-              {/* Option 3: Scalping Only */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {/* Option 1: Scalping ML */}
               <button
                 onClick={() => setExecutionEngine('scalping')}
                 className={cn(
@@ -407,391 +537,113 @@ export function Settings() {
               >
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs font-bold text-amber-300">🚀 Doar Scalping</span>
-                    <span className="text-[9px] font-mono bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded">Momentum Only</span>
+                    <span className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                      <Zap className="w-3.5 h-3.5 text-amber-400" />
+                      Scalping ML
+                    </span>
+                    <span className="text-[9px] font-mono bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded">1m TF</span>
                   </div>
                   <p className="text-[11px] text-zinc-300 leading-snug">
-                    Execută exclusiv semnale de <strong>AI Scalping</strong> bazate pe scorul ML.
+                    {language === 'ro' 
+                      ? 'Execută exclusiv semnalele de Scalping bazate pe ansamblul Random Forest și confirmări de volum.'
+                      : 'Executes exclusively ML Scalping signals driven by the Random Forest ensemble and volume spikes.'}
                   </p>
                 </div>
-                <div className="text-[10px] font-mono text-amber-400/80 pt-2 border-t border-amber-500/20 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-                  <span>Intrări Ultra-Rapide</span>
+                <div className="text-[10px] font-mono text-amber-400/80 pt-2 border-t border-amber-500/20 flex items-center gap-1.5">
+                  <span className={cn("w-1.5 h-1.5 rounded-full", executionEngine === 'scalping' ? "bg-amber-400 animate-pulse" : "bg-zinc-600")}></span>
+                  <span>{language === 'ro' ? 'Intrări Rapide' : 'Fast Entries'}</span>
                 </div>
               </button>
-            </div>
-          </div>
 
-          {/* ML Calculation Model Selection Card */}
-          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/50 to-amber-950/20 border border-amber-500/20 rounded-2xl p-6 shadow-xl">
-            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-              <div className="flex items-center gap-3">
-                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400">
-                  <BrainCircuit className="w-5 h-5" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-lg font-serif text-white">Motor Calcul Semnale ML</h3>
-                    <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded font-mono font-bold">
-                      ACTIV
-                    </span>
-                  </div>
-                  <p className="text-xs text-amber-300/80">
-                    Procesare ultra-rapidă și stabilă a probabilităților de intrare, oportunităților de piață și semnalelor de tranzacționare.
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2 bg-zinc-950/80 border border-white/10 px-3 py-1.5 rounded-xl">
-                <span className="text-[11px] text-zinc-400">Mod Activ:</span>
-                <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                  🌲 RANDOM FOREST (RF)
-                </span>
-              </div>
-            </div>
-
-            <div className="p-4 rounded-xl text-left border border-amber-500/30 bg-amber-500/10 text-white space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5">
-                  <Cpu className="w-4 h-4 text-amber-400" />
-                  <span className="text-xs font-bold text-amber-300">Random Forest Classifier (18 Arbori Decizionali)</span>
-                </div>
-                <span className="text-[9px] font-mono bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded font-bold">RF Active</span>
-              </div>
-              <p className="text-[11px] text-zinc-300 leading-snug">
-                Calculează semnalele pe baza ansamblului <strong>Random Forest (18 arbori decizionali)</strong>, evaluând în timp real indicatorii tehnici cheie (RSI, ADX, EMA, Volum, Reversals, Platt Calibration) cu inferență sub 1ms.
-              </p>
-            </div>
-          </div>
-
-          {/* Engine Exit & Risk:Reward Management Card */}
-          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/40 to-emerald-950/20 border border-emerald-500/20 rounded-2xl p-6">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
-                <Zap className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-lg font-serif text-white">Motor Ieșire Dinamică & Risk:Reward (G&S-Trade-Bot)</h3>
-                <p className="text-xs text-emerald-400/90">Optimare asimetrică: Profit Mediu ~ +4.0% vs. Pierdere Medie ~ -2.0% (Raport 2:1)</p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-zinc-300 mb-4">
-              <div className="bg-zinc-950/60 p-3.5 rounded-xl border border-white/5 space-y-1.5">
-                <div className="font-semibold text-emerald-300 flex items-center justify-between">
-                  <span>🚀 Lăsare Câștigători să Alerge</span>
-                  <span className="text-[10px] bg-emerald-500/20 px-2 py-0.5 rounded text-emerald-400 font-mono">ScorIeșire &lt; 55</span>
-                </div>
-                <p className="text-zinc-400 text-[11px] leading-relaxed">
-                  Profitul nu se mai închide fix la +1.5%! Dacă semnalul AI rămâne puternic, poziția urcă spre +4%, +6%+!
-                </p>
-              </div>
-
-              <div className="bg-zinc-950/60 p-3.5 rounded-xl border border-white/5 space-y-1.5">
-                <div className="font-semibold text-rose-300 flex items-center justify-between">
-                  <span>✂️ Tăiere Agresivă Pierderi</span>
-                  <span className="text-[10px] bg-rose-500/20 px-2 py-0.5 rounded text-rose-400 font-mono">Smart Cut at -2%</span>
-                </div>
-                <p className="text-zinc-400 text-[11px] leading-relaxed">
-                  Dacă probabilitatea AI scade sau trendul devine bearish, pierderea se taie la -1.8% ~ -2.0%!
-                </p>
-              </div>
-
-              <div className="bg-zinc-950/60 p-3.5 rounded-xl border border-white/5 space-y-1.5">
-                <div className="font-semibold text-amber-300 flex items-center justify-between">
-                  <span>🛡️ Protecție Break-Even</span>
-                  <span className="text-[10px] bg-amber-500/20 px-2 py-0.5 rounded text-amber-400 font-mono">Vârf &ge; +1.5%</span>
-                </div>
-                <p className="text-zinc-400 text-[11px] leading-relaxed">
-                  Când PnL atinge +1.5%, Stop Loss urcă automat la +0.3% net pentru acoperirea comisioanelor.
-                </p>
-              </div>
-
-              <div className="bg-zinc-950/60 p-3.5 rounded-xl border border-white/5 space-y-1.5">
-                <div className="font-semibold text-sky-300 flex items-center justify-between">
-                  <span>🛑 Cooldown Anti-Whipsaw</span>
-                  <span className="text-[10px] bg-sky-500/20 px-2 py-0.5 rounded text-sky-400 font-mono">30 Min Protecție</span>
-                </div>
-                <p className="text-zinc-400 text-[11px] leading-relaxed">
-                  După orice vânzare, moneda intră în cooldown 30 min, blocând re-intrările impulsive.
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* Equity Cycle Protection */}
-          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/50 to-indigo-950/20 border border-indigo-500/20 rounded-2xl p-6">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
-                <ShieldAlert className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-lg font-serif text-white">Equity Cycle Protection</h3>
-                <p className="text-xs text-indigo-400/90">
-                  Protejează profitul acumulat prin închiderea ciclului dacă equity-ul scade sub un prag după atingerea țintei.
-                </p>
-              </div>
-              <div className="ml-auto">
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input 
-                    type="checkbox" 
-                    checked={equityProtectionConfig.enabled} 
-                    onChange={(e) => setEquityProtectionConfig({ enabled: e.target.checked })}
-                    className="sr-only peer" 
-                  />
-                  <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
-                </label>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-zinc-300">Prag Profit Activare (%)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={equityProtectionConfig.profitThresholdPct}
-                  onChange={(e) => setEquityProtectionConfig({ profitThresholdPct: parseFloat(e.target.value) })}
-                  className="w-full bg-zinc-950/60 border border-white/5 rounded-lg p-2 text-sm text-white focus:border-indigo-500/50"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-zinc-300">Drawdown Protecție (%)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={equityProtectionConfig.drawdownProtectionPct}
-                  onChange={(e) => setEquityProtectionConfig({ drawdownProtectionPct: parseFloat(e.target.value) })}
-                  className="w-full bg-zinc-950/60 border border-white/5 rounded-lg p-2 text-sm text-white focus:border-indigo-500/50"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Dynamic Position Sizing & Stop Loss Control Card */}
-          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/50 to-amber-950/20 border border-amber-500/20 rounded-2xl p-6">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400">
-                <Activity className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-lg font-serif text-white">Dimensionare Dinamică Poziții (% din Capital) & Stop Loss</h3>
-                <p className="text-xs text-amber-400/90">Botul calculează automat mărimea fiecărui ordin ca procent din Equity total.</p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Position Sizing % */}
-              <div className="space-y-3 bg-zinc-950/60 p-4 rounded-xl border border-white/5">
-                <div className="flex items-center justify-between">
-                  <label className="text-sm font-semibold text-white">Mărime Poziție (% din Equity)</label>
-                  <span className="text-xs font-mono font-bold bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded border border-amber-500/30">
-                    {positionSizePercent || 5}% din Capital
-                  </span>
-                </div>
-
-                <div className="flex gap-2 flex-wrap">
-                  {[2, 3, 5, 8, 10, 15].map(pct => (
-                    <button
-                      key={pct}
-                      onClick={() => setPositionSizePercent(pct)}
-                      className={cn(
-                        "px-3 py-1.5 rounded-lg text-xs font-medium transition-all border cursor-pointer",
-                        (positionSizePercent || 5) === pct
-                          ? "bg-amber-500/20 text-amber-300 border-amber-500/40 font-semibold"
-                          : "bg-zinc-900/60 text-zinc-400 border-white/5 hover:bg-white/5"
-                      )}
-                    >
-                      {pct}%
-                    </button>
-                  ))}
-                </div>
-
-                <div className="text-[11px] text-zinc-300 bg-zinc-900/80 p-2.5 rounded-lg border border-amber-500/10 space-y-1 font-mono">
-                  <div className="flex justify-between">
-                    <span className="text-zinc-400">Ordin pe Equity curent (${(balance || 100).toFixed(2)}):</span>
-                    <span className="text-amber-400 font-bold">${((balance || 100) * ((positionSizePercent || 5) / 100)).toFixed(2)} USDT</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Stop Loss % */}
-              <div className="space-y-3 bg-zinc-950/60 p-4 rounded-xl border border-white/5">
-                <div className="flex items-center justify-between">
-                  <label className="text-sm font-semibold text-white">Stop Loss Siguranță (%)</label>
-                  <span className="text-xs font-mono font-bold bg-rose-500/20 text-rose-300 px-2 py-0.5 rounded border border-rose-500/30">
-                    -{Math.abs(stopLossPercent || 2.0).toFixed(1)}%
-                  </span>
-                </div>
-
-                <div className="flex gap-2 flex-wrap">
-                  {[0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0].map(sl => (
-                    <button
-                      key={sl}
-                      onClick={() => setStopLossPercent(sl)}
-                      className={cn(
-                        "px-3 py-1.5 rounded-lg text-xs font-medium transition-all border cursor-pointer",
-                        (stopLossPercent || 2.0) === sl
-                          ? "bg-rose-500/20 text-rose-300 border-rose-500/40 font-semibold"
-                          : "bg-zinc-900/60 text-zinc-400 border-white/5 hover:bg-white/5"
-                      )}
-                    >
-                      -{sl.toFixed(1)}%
-                    </button>
-                  ))}
-                </div>
-
-                <div className="text-[11px] text-zinc-300 bg-zinc-900/80 p-2.5 rounded-lg border border-rose-500/10 space-y-1 font-mono">
-                  <div className="flex justify-between">
-                    <span className="text-zinc-400">Pierdere max per ordin:</span>
-                    <span className="text-rose-400 font-bold">-{(((positionSizePercent || 5) / 100) * (stopLossPercent || 2.0)).toFixed(2)}% din capital</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Levier Ajustabil (Doar la Scalping) */}
-              <div className="space-y-3 bg-amber-950/20 p-4 rounded-xl border border-amber-500/30 md:col-span-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-sm font-semibold text-amber-200 flex items-center gap-2">
-                    <span>⚡ Levier Multiplicator (Exclusiv Scalping)</span>
-                  </label>
-                  <span className="text-xs font-mono font-bold bg-amber-500/20 text-amber-300 px-2.5 py-1 rounded border border-amber-500/40">
-                    {scalpingConfig?.leverage ?? 1}x Multiplicator
-                  </span>
-                </div>
-                <p className="text-xs text-zinc-400 leading-relaxed">
-                  Amplifică volumul pozițiilor și expunerea pentru tranzacțiile rapide de <strong>Scalping</strong>. Această setare se aplică <strong>doar la modul Scalping</strong>, menținând strategia Smart Grid și tranzacțiile manuale fără risc de levier.
-                </p>
-
-                <div className="flex items-center gap-3 pt-1">
-                  <input 
-                    type="range" 
-                    min="1" 
-                    max="50" 
-                    step="1" 
-                    value={scalpingConfig?.leverage ?? 1} 
-                    onChange={(e) => setScalpingConfig({ leverage: Number(e.target.value) })}
-                    className="w-full accent-amber-500 cursor-pointer" 
-                  />
-                </div>
-
-                <div className="flex gap-2 flex-wrap pt-1 font-mono">
-                  {[1, 2, 3, 5, 10, 20].map(lev => (
-                    <button
-                      key={lev}
-                      onClick={() => setScalpingConfig({ leverage: lev })}
-                      className={cn(
-                        "px-3 py-1.5 rounded-lg text-xs font-medium transition-all border cursor-pointer",
-                        (scalpingConfig?.leverage ?? 1) === lev
-                          ? "bg-amber-500/30 text-amber-200 border-amber-500/50 font-bold"
-                          : "bg-zinc-900/60 text-zinc-400 border-white/5 hover:bg-white/5"
-                      )}
-                    >
-                      {lev}x {lev === 1 ? '(Fără levier)' : ''}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Max Hold Time Limit (Minutes) */}
-              <div className="space-y-3 bg-zinc-950/60 p-4 rounded-xl border border-white/5 md:col-span-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-sm font-semibold text-white">Timp Maxim Deținere Scalping (Min)</label>
-                  <span className="text-xs font-mono font-bold bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded border border-amber-500/30">
-                    {maxHoldMinutes && maxHoldMinutes > 0 ? `${maxHoldMinutes} minute (Scalping)` : 'Dezactivat (0 min)'}
-                  </span>
-                </div>
-                <p className="text-xs text-zinc-400">
-                  Scalping-ul folosește această limită (ex: {maxHoldMinutes ?? 15}m) pentru pozițiile pe pierdere sau stagnare. Pozițiile pe profit sunt preluate de Trailing Stop & TP fără limită de timp. <strong>Smart Grid folosește limita sa configurată de 90 minute per nivel.</strong>
-                </p>
-
-                <div className="flex gap-2 flex-wrap">
-                  {[3, 5, 10, 15, 30, 60, 120, 180, 240, 0].map(mins => (
-                    <button
-                      key={mins}
-                      onClick={() => setMaxHoldMinutes(mins)}
-                      className={cn(
-                        "px-3 py-1.5 rounded-lg text-xs font-medium transition-all border cursor-pointer font-mono",
-                        (maxHoldMinutes ?? 15) === mins
-                          ? "bg-amber-500/20 text-amber-300 border-amber-500/40 font-semibold"
-                          : "bg-zinc-900/60 text-zinc-400 border-white/5 hover:bg-white/5"
-                      )}
-                    >
-                      {mins === 0 ? 'Fără limită (0m)' : (mins >= 60 ? `${mins / 60}h (${mins}m)` : `${mins} min`)}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Max Negative Hold Time Limit (Minute pe Minus) */}
-              {/* Regula de limită de timp pe minus cu comutator ON/OFF */}
-              <div className="space-y-3 bg-rose-950/30 p-4 rounded-xl border border-rose-500/30 md:col-span-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-sm font-semibold text-rose-200 flex items-center gap-2">
-                    <span>⏳ Limită Timp de la Intrarea pe Minus (PnL &lt; 0)</span>
-                  </label>
-                  <div className="flex items-center gap-3">
-                    <span className={cn(
-                      "text-xs font-mono font-bold px-2.5 py-1 rounded border transition-colors",
-                      (scalpingConfig?.enableMaxNegativeHold ?? false)
-                        ? "bg-rose-500/20 text-rose-300 border-rose-500/40"
-                        : "bg-zinc-800 text-zinc-400 border-zinc-700"
-                    )}>
-                      {(scalpingConfig?.enableMaxNegativeHold ?? false) ? `${scalpingConfig?.maxNegativeHoldMinutes ?? 1.0} minute` : 'DEZACTIVAT'}
-                    </span>
-                    {/* Toggle ON/OFF Switch */}
-                    <label className="relative inline-flex items-center cursor-pointer">
-                      <input 
-                        type="checkbox" 
-                        checked={scalpingConfig?.enableMaxNegativeHold ?? false} 
-                        onChange={(e) => setEnableMaxNegativeHold(e.target.checked)}
-                        className="sr-only peer" 
-                      />
-                      <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-rose-600"></div>
-                    </label>
-                  </div>
-                </div>
-
-                {(scalpingConfig?.enableMaxNegativeHold ?? true) ? (
-                  <>
-                    <p className="text-xs text-rose-200/80 leading-relaxed">
-                      Când o poziție BUY trece în PnL negativ (sub prețul de intrare), pornește o numărătoare inversă de exact <strong>{scalpingConfig?.maxNegativeHoldMinutes ?? 1.0} min</strong>. Dacă tranzacția nu își revine pe plus înainte de expirarea timpului, botul execută un SELL automat (dacă nu a atins Stop Loss-ul mai devreme).
-                    </p>
-
-                    <div className="flex items-center gap-3 pt-1">
-                      <input 
-                        type="range" 
-                        min="0.1" 
-                        max="10" 
-                        step="0.1" 
-                        value={scalpingConfig?.maxNegativeHoldMinutes ?? 1.0} 
-                        onChange={(e) => setMaxNegativeHoldMinutes(Number(e.target.value))}
-                        className="w-full accent-rose-500 cursor-pointer" 
-                      />
-                    </div>
-
-                    <div className="flex gap-2 flex-wrap pt-1">
-                      {[0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0].map(mins => (
-                        <button
-                          key={mins}
-                          onClick={() => setMaxNegativeHoldMinutes(mins)}
-                          className={cn(
-                            "px-3 py-1 rounded-lg text-xs font-medium transition-all border cursor-pointer font-mono",
-                            (scalpingConfig?.maxNegativeHoldMinutes ?? 1.0) === mins
-                              ? "bg-rose-500/30 text-rose-200 border-rose-500/50 font-bold"
-                              : "bg-zinc-900/60 text-zinc-400 border-white/5 hover:bg-white/5"
-                          )}
-                        >
-                          {mins} min
-                        </button>
-                      ))}
-                    </div>
-                  </>
-                ) : (
-                  <p className="text-xs text-zinc-400 italic bg-black/20 p-2.5 rounded-lg border border-white/5">
-                    Regula de limita de timp pe minus este <strong className="text-zinc-300">Dezactivată</strong>. Pozițiile pe minus vor rămâne deschise și vor fi protejate exclusiv prin Stop Loss sau deținerea maximă standard.
-                  </p>
+              {/* Option 2: Momentum Breakout */}
+              <button
+                onClick={() => setExecutionEngine('momentum')}
+                className={cn(
+                  "p-4 rounded-xl text-left border transition-all relative flex flex-col justify-between space-y-3 cursor-pointer",
+                  executionEngine === 'momentum'
+                    ? "bg-purple-500/15 border-purple-500/50 text-white shadow-lg shadow-purple-950/50 ring-1 ring-purple-500/30"
+                    : "bg-zinc-950/60 border-white/5 text-zinc-400 hover:bg-white/5 hover:border-white/10"
                 )}
-              </div>
+              >
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-bold text-purple-300 flex items-center gap-1.5">
+                      <Rocket className="w-3.5 h-3.5 text-purple-400" />
+                      Momentum Breakout
+                    </span>
+                    <span className="text-[9px] font-mono bg-purple-500/20 text-purple-300 px-1.5 py-0.5 rounded">15m/1h TF</span>
+                  </div>
+                  <p className="text-[11px] text-zinc-300 leading-snug">
+                    {language === 'ro'
+                      ? 'Execută exclusiv scanerul de Momentum pe monede cu breakout de volatilitate și Trailing Stop dinamic.'
+                      : 'Executes exclusively Momentum Breakout scanner on high volatility coins with dynamic Trailing Stop.'}
+                  </p>
+                </div>
+                <div className="text-[10px] font-mono text-purple-400/80 pt-2 border-t border-purple-500/20 flex items-center gap-1.5">
+                  <span className={cn("w-1.5 h-1.5 rounded-full", executionEngine === 'momentum' ? "bg-purple-400 animate-pulse" : "bg-zinc-600")}></span>
+                  <span>{language === 'ro' ? 'Tendințe & Expansiuni' : 'Trends & Expansions'}</span>
+                </div>
+              </button>
+
+              {/* Option 3: Ambele Active Simultan */}
+              <button
+                onClick={() => setExecutionEngine('both')}
+                className={cn(
+                  "p-4 rounded-xl text-left border transition-all relative flex flex-col justify-between space-y-3 cursor-pointer",
+                  (executionEngine || 'both') === 'both'
+                    ? "bg-cyan-500/15 border-cyan-500/50 text-white shadow-lg shadow-cyan-950/50 ring-1 ring-cyan-500/30"
+                    : "bg-zinc-950/60 border-white/5 text-zinc-400 hover:bg-white/5 hover:border-white/10"
+                )}
+              >
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
+                      <Globe className="w-3.5 h-3.5 text-cyan-400" />
+                      Ambele Active
+                    </span>
+                    <span className="text-[9px] font-mono bg-cyan-500/20 text-cyan-300 px-1.5 py-0.5 rounded">Hibrid</span>
+                  </div>
+                  <p className="text-[11px] text-zinc-300 leading-snug">
+                    {language === 'ro'
+                      ? 'Rulează ambele strategii în paralel pe oportunități diferite, cu protecție maxim 1 poziție per monedă.'
+                      : 'Runs both trading strategies concurrently on distinct opportunities with strict max 1 position per coin.'}
+                  </p>
+                </div>
+                <div className="text-[10px] font-mono text-cyan-400/80 pt-2 border-t border-cyan-500/20 flex items-center gap-1.5">
+                  <span className={cn("w-1.5 h-1.5 rounded-full", (executionEngine || 'both') === 'both' ? "bg-cyan-400 animate-pulse" : "bg-zinc-600")}></span>
+                  <span>{language === 'ro' ? 'Capacitate Maximă' : 'Maximum Coverage'}</span>
+                </div>
+              </button>
+
+              {/* Option 4: Oprit / Niciunul */}
+              <button
+                onClick={() => setExecutionEngine('none')}
+                className={cn(
+                  "p-4 rounded-xl text-left border transition-all relative flex flex-col justify-between space-y-3 cursor-pointer",
+                  executionEngine === 'none'
+                    ? "bg-rose-500/15 border-rose-500/50 text-white shadow-lg shadow-rose-950/50 ring-1 ring-rose-500/30"
+                    : "bg-zinc-950/60 border-white/5 text-zinc-400 hover:bg-white/5 hover:border-white/10"
+                )}
+              >
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-bold text-rose-300 flex items-center gap-1.5">
+                      <Pause className="w-3.5 h-3.5 text-rose-400" />
+                      {language === 'ro' ? 'Oprit (Niciunul)' : 'Paused (None)'}
+                    </span>
+                    <span className="text-[9px] font-mono bg-rose-500/20 text-rose-300 px-1.5 py-0.5 rounded">Standby</span>
+                  </div>
+                  <p className="text-[11px] text-zinc-300 leading-snug">
+                    {language === 'ro'
+                      ? 'Suspendează deschiderea de noi poziții automate pe toate motoarele (Scalping și Momentum).'
+                      : 'Suspends opening new automated positions across all trading engines (Scalping & Momentum).'}
+                  </p>
+                </div>
+                <div className="text-[10px] font-mono text-rose-400/80 pt-2 border-t border-rose-500/20 flex items-center gap-1.5">
+                  <span className={cn("w-1.5 h-1.5 rounded-full", executionEngine === 'none' ? "bg-rose-400 animate-pulse" : "bg-zinc-600")}></span>
+                  <span>{language === 'ro' ? 'Pauză Execuție' : 'Paused Execution'}</span>
+                </div>
+              </button>
             </div>
           </div>
         </div>
@@ -1179,407 +1031,7 @@ export function Settings() {
             </div>
           </div>
 
-          {/* Resetare Sold Acumulare Vault */}
-          <div className="bg-gradient-to-b from-amber-950/20 to-zinc-900/50 border border-amber-500/20 rounded-2xl p-6">
-            <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
-              <h3 className="text-lg font-serif text-amber-200">Resetare Sold "Acumulare" (Vault)</h3>
-              <span className="text-xs font-mono font-bold px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                Sold: ${accumulationBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (Ciclu #{sessionCycleCount})
-              </span>
-            </div>
-            <p className="text-xs text-zinc-400 mb-4">
-              Resetează doar profitul conservat din Vault-ul de Acumulare la $0.00 și reinițializează numărul de cicluri la #1, fără a afecta balanța principală sau pozițiile active.
-            </p>
-            {confirmResetAcc ? (
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={async () => {
-                    await resetAccumulationVault();
-                    setConfirmResetAcc(false);
-                  }}
-                  className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-mono font-bold transition-all cursor-pointer shadow-lg"
-                >
-                  Confirmi resetarea la $0.00?
-                </button>
-                <button
-                  onClick={() => setConfirmResetAcc(false)}
-                  className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-xs font-mono transition-all cursor-pointer"
-                >
-                  Anulează
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => setConfirmResetAcc(true)}
-                className="px-4 py-2 bg-amber-500/20 hover:bg-rose-500/30 text-amber-200 hover:text-rose-200 border border-amber-500/40 hover:border-rose-500/50 rounded-lg text-xs font-mono font-semibold transition-all cursor-pointer flex items-center gap-2"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                Resetează Sold "Acumulare" la $0.00
-              </button>
-            )}
-          </div>
-
-          {/* Multi-Exchange Provider & Credentials Setup */}
-          <div className="bg-zinc-900/50 border border-white/5 rounded-2xl p-6 space-y-6">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <div>
-                <h3 className="text-lg font-serif text-white">Furnizor Exchange & Execuție Multi-Bursă</h3>
-                <p className="text-xs text-zinc-400 mt-1">
-                  Pregătit pentru Binance, Bybit (recomandat UE) și OKX (rezervă), cu suport Paper, Testnet și Real (Live).
-                </p>
-              </div>
-              <div className="flex items-center gap-1.5 bg-zinc-800/60 p-1 rounded-xl border border-white/10 font-mono text-xs">
-                {(['binance', 'bybit', 'okx'] as const).map(prov => (
-                  <button
-                    key={prov}
-                    type="button"
-                    onClick={() => setExchangeProvider(prov)}
-                    className={`px-3 py-1.5 rounded-lg font-bold transition-all cursor-pointer uppercase ${
-                      exchangeProvider === prov
-                        ? 'bg-amber-500 text-zinc-950 shadow-md'
-                        : 'text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    {prov}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="mb-4">
-              <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-2 font-mono">Mod Execuție pentru {exchangeProvider.toUpperCase()}</label>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 font-mono">
-                {(['paper', 'testnet', 'live'] as const).map(mode => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => setBinanceMode(mode)}
-                    className={`px-3 py-2.5 rounded-xl text-xs font-medium transition-colors border text-center cursor-pointer ${
-                      binanceMode === mode 
-                        ? (mode === 'live' 
-                            ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 font-bold' 
-                            : mode === 'testnet' 
-                            ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold' 
-                            : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 font-bold') 
-                        : 'bg-zinc-800/40 text-zinc-400 border-white/5 hover:bg-white/5'
-                    }`}
-                  >
-                    {mode === 'paper' ? 'Paper (Demo)' : mode === 'testnet' ? `${exchangeProvider.toUpperCase()} Testnet` : `${exchangeProvider.toUpperCase()} LIVE`}
-                  </button>
-                ))}
-              </div>
-              {binanceMode === 'live' && (
-                <p className="text-xs text-rose-300 mt-3 bg-rose-500/10 p-2.5 rounded-lg border border-rose-500/20 font-mono">
-                  ⚠️ ATENȚIE: Modul LIVE este activat pe {exchangeProvider.toUpperCase()}! Ordinele vor fi trimise direct pe bursa reală.
-                </p>
-              )}
-            </div>
-
-            {exchangeProvider === 'binance' && (
-              <div className="space-y-4 pt-2">
-                <div className="p-4 rounded-xl bg-amber-500/5 border border-amber-500/15 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-amber-300 uppercase tracking-wider font-mono">Binance Testnet Credentials</span>
-                    <a href="https://testnet.binance.vision" target="_blank" rel="noreferrer" className="text-[11px] text-amber-400 hover:underline">
-                      Obține Chei Testnet ↗
-                    </a>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">Testnet API Key</label>
-                    <input 
-                      type="text" 
-                      value={testnetApiKey}
-                      onChange={(e) => setTestnetApiKey(e.target.value)}
-                      placeholder="Ex: 62a8f9b2c3d4..." 
-                      className="w-full bg-zinc-800/60 border border-amber-500/20 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-amber-500/50 font-mono text-sm" 
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">Testnet Secret Key</label>
-                    <input 
-                      type="password" 
-                      value={testnetApiSecret}
-                      onChange={(e) => setTestnetApiSecret(e.target.value)}
-                      placeholder="Ex: 98f7e6d5c4b3..." 
-                      className="w-full bg-zinc-800/60 border border-amber-500/20 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-amber-500/50 font-mono text-sm" 
-                    />
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-zinc-800/30 border border-white/5 space-y-4">
-                  <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono block">Binance Live Credentials</span>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">Live API Key</label>
-                    <input 
-                      type="text" 
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      placeholder="Introdu Live API Key..." 
-                      className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-white/20 font-mono text-sm" 
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">Live Secret Key</label>
-                    <input 
-                      type="password" 
-                      value={apiSecret}
-                      onChange={(e) => setApiSecret(e.target.value)}
-                      placeholder="Introdu Live API Secret..." 
-                      className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-white/20 font-mono text-sm" 
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {exchangeProvider === 'bybit' && (
-              <div className="space-y-4 pt-2">
-                <div className="p-4 rounded-xl bg-blue-500/5 border border-blue-500/15 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-blue-300 uppercase tracking-wider font-mono">Bybit Testnet Credentials</span>
-                    <a href="https://testnet.bybit.com" target="_blank" rel="noreferrer" className="text-[11px] text-blue-400 hover:underline">
-                      Obține Chei Bybit Testnet ↗
-                    </a>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">Bybit Testnet API Key</label>
-                    <input 
-                      type="text" 
-                      value={bybitTestnetApiKey}
-                      onChange={(e) => setBybitTestnetApiKey(e.target.value)}
-                      placeholder="Bybit Testnet API Key..." 
-                      className="w-full bg-zinc-800/60 border border-blue-500/20 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-blue-500/50 font-mono text-sm" 
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">Bybit Testnet Secret Key</label>
-                    <input 
-                      type="password" 
-                      value={bybitTestnetApiSecret}
-                      onChange={(e) => setBybitTestnetApiSecret(e.target.value)}
-                      placeholder="Bybit Testnet API Secret..." 
-                      className="w-full bg-zinc-800/60 border border-blue-500/20 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-blue-500/50 font-mono text-sm" 
-                    />
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-zinc-800/30 border border-white/5 space-y-4">
-                  <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono block">Bybit Live Credentials (Europa / Global)</span>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">Bybit Live API Key</label>
-                    <input 
-                      type="text" 
-                      value={bybitApiKey}
-                      onChange={(e) => setBybitApiKey(e.target.value)}
-                      placeholder="Bybit Live API Key..." 
-                      className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-white/20 font-mono text-sm" 
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">Bybit Live Secret Key</label>
-                    <input 
-                      type="password" 
-                      value={bybitApiSecret}
-                      onChange={(e) => setBybitApiSecret(e.target.value)}
-                      placeholder="Bybit Live API Secret..." 
-                      className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 focus:outline-none focus:border-white/20 font-mono text-sm" 
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {exchangeProvider === 'okx' && (
-              <div className="space-y-4 pt-2">
-                <div className="p-4 rounded-xl bg-purple-500/5 border border-purple-500/15 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-purple-300 uppercase tracking-wider font-mono">OKX Testnet / Demo Credentials</span>
-                    <a href="https://www.okx.com" target="_blank" rel="noreferrer" className="text-[11px] text-purple-400 hover:underline">
-                      OKX Portal ↗
-                    </a>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">OKX Testnet API Key</label>
-                      <input 
-                        type="text" 
-                        value={okxTestnetApiKey}
-                        onChange={(e) => setOkxTestnetApiKey(e.target.value)}
-                        placeholder="OKX Testnet Key..." 
-                        className="w-full bg-zinc-800/60 border border-purple-500/20 rounded-lg px-4 py-2 text-zinc-100 font-mono text-sm" 
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">OKX Testnet Secret</label>
-                      <input 
-                        type="password" 
-                        value={okxTestnetApiSecret}
-                        onChange={(e) => setOkxTestnetApiSecret(e.target.value)}
-                        placeholder="OKX Testnet Secret..." 
-                        className="w-full bg-zinc-800/60 border border-purple-500/20 rounded-lg px-4 py-2 text-zinc-100 font-mono text-sm" 
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-zinc-400 mb-1 font-mono">OKX Testnet Passphrase</label>
-                    <input 
-                      type="password" 
-                      value={okxTestnetPassphrase}
-                      onChange={(e) => setOkxTestnetPassphrase(e.target.value)}
-                      placeholder="Passphrase..." 
-                      className="w-full bg-zinc-800/60 border border-purple-500/20 rounded-lg px-4 py-2 text-zinc-100 font-mono text-sm" 
-                    />
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-zinc-800/30 border border-white/5 space-y-4">
-                  <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono block">OKX Live Credentials (Backup)</span>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">OKX Live API Key</label>
-                      <input 
-                        type="text" 
-                        value={okxApiKey}
-                        onChange={(e) => setOkxApiKey(e.target.value)}
-                        placeholder="OKX Live API Key..." 
-                        className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 font-mono text-sm" 
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">OKX Live Secret</label>
-                      <input 
-                        type="password" 
-                        value={okxApiSecret}
-                        onChange={(e) => setOkxApiSecret(e.target.value)}
-                        placeholder="OKX Live Secret..." 
-                        className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 font-mono text-sm" 
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-mono">OKX Live Passphrase</label>
-                    <input 
-                      type="password" 
-                      value={okxPassphrase}
-                      onChange={(e) => setOkxPassphrase(e.target.value)}
-                      placeholder="Passphrase..." 
-                      className="w-full bg-zinc-800/40 border border-white/5 rounded-lg px-4 py-2 text-zinc-100 font-mono text-sm" 
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Test & Sync Balance Button */}
-            <div className="mt-6 pt-4 border-t border-white/5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <button
-                type="button"
-                disabled={syncStatus.loading || binanceMode === 'paper'}
-                onClick={async () => {
-                  setSyncStatus({ loading: true, message: 'Se testează conexiunea...', error: false });
-                  const res = await syncBinanceBalance();
-                  if (res && res.success) {
-                    setSyncStatus({ 
-                      loading: false, 
-                      message: `Balanță citită din Binance: $${res.balance?.toFixed(2) || '0.00'} USDT`, 
-                      error: false 
-                    });
-                  } else {
-                    setSyncStatus({ 
-                      loading: false, 
-                      message: `Eroare conexiune: ${res?.error || 'Cheile API sunt invalide'}`, 
-                      error: true 
-                    });
-                  }
-                }}
-                className="px-4 py-2 bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30 font-medium rounded-xl text-xs transition-colors flex items-center gap-2 disabled:opacity-50 cursor-pointer font-mono"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${syncStatus.loading ? 'animate-spin' : ''}`} />
-                <span>Sincronizează Balanța {binanceMode === 'testnet' ? 'Testnet' : 'Live'}</span>
-              </button>
-
-              {syncStatus.message && (
-                <div className={`text-xs px-3 py-1.5 rounded-lg flex items-center gap-2 font-mono ${
-                  syncStatus.error 
-                    ? 'bg-rose-500/10 text-rose-300 border border-rose-500/20' 
-                    : 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'
-                }`}>
-                  {syncStatus.error ? <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" /> : <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />}
-                  <span>{syncStatus.message}</span>
-                </div>
-              )}
-            </div>
-
-            {/* Binance Service Inspector */}
-            <div className="mt-6 pt-4 border-t border-white/5 bg-zinc-950/50 rounded-xl p-4 border border-white/5">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-amber-400 mb-2 flex items-center gap-2 font-mono">
-                <RefreshCw className="w-3.5 h-3.5" /> Inspector BinanceService.ts
-              </h4>
-
-              <div className="flex flex-wrap items-center gap-3 mb-3">
-                <button
-                  type="button"
-                  disabled={binanceInspectorLoading || binanceMode === 'paper'}
-                  onClick={async () => {
-                    setBinanceInspectorLoading(true);
-                    try {
-                      const res = await apiFetch('/api/binance/account');
-                      const data = await safeJson(res, { error: 'Răspuns invalid de la server' });
-                      setBinanceInspectorResult(data);
-                    } catch (err: any) {
-                      setBinanceInspectorResult({ error: err?.message || 'Eroare conectare' });
-                    } finally {
-                      setBinanceInspectorLoading(false);
-                    }
-                  }}
-                  className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-mono border border-white/10 transition-colors disabled:opacity-50 cursor-pointer"
-                >
-                  1. Interogare Cont (/api/binance/account)
-                </button>
-
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={binanceInspectorSymbol}
-                    onChange={(e) => setBinanceInspectorSymbol(e.target.value.toUpperCase())}
-                    placeholder="BTCUSDT"
-                    className="w-24 bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs font-mono text-zinc-200 focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    disabled={binanceInspectorLoading || binanceMode === 'paper'}
-                    onClick={async () => {
-                      setBinanceInspectorLoading(true);
-                      try {
-                        const res = await apiFetch(`/api/binance/trades?symbol=${binanceInspectorSymbol}`);
-                        const data = await safeJson(res, { error: 'Răspuns invalid de la server' });
-                        setBinanceInspectorResult(data);
-                      } catch (err: any) {
-                        setBinanceInspectorResult({ error: err?.message || 'Eroare conectare' });
-                      } finally {
-                        setBinanceInspectorLoading(false);
-                      }
-                    }}
-                    className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-mono border border-white/10 transition-colors disabled:opacity-50 cursor-pointer"
-                  >
-                    2. Interogare Tranzacții
-                  </button>
-                </div>
-              </div>
-
-              {binanceInspectorResult && !binanceInspectorLoading && (
-                <div className="mt-2 bg-zinc-900 border border-white/5 rounded-lg p-3 text-xs font-mono overflow-x-auto max-h-60">
-                  <div className="flex justify-between items-center mb-1 text-[10px] text-zinc-500 uppercase">
-                    <span>Răspuns Binance API:</span>
-                    <button type="button" onClick={() => setBinanceInspectorResult(null)} className="text-zinc-400 hover:text-white cursor-pointer">Închide</button>
-                  </div>
-                  <pre className="text-amber-300/90 text-[11px] whitespace-pre-wrap">
-                    {JSON.stringify(binanceInspectorResult, null, 2)}
-                  </pre>
-                </div>
-              )}
-            </div>
-          </div>
+          
         </div>
       )}
 

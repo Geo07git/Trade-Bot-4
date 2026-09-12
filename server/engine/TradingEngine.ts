@@ -77,8 +77,8 @@ export class TradingEngine {
     await db.logEvent('ENGINE_RESUMED', { reason }, undefined, 'TradeBot', 'RESUME');
   }
 
-  async reconcile(localPositions: any[], localBalance: number, explicitExchangeBalances?: Record<string, number>, explicitExchangePositions?: any[]) {
-    return await this.reconciliationEngine.reconcile(localPositions, localBalance, explicitExchangeBalances, explicitExchangePositions);
+  async reconcile(localPositions: any[], localBalance: number, explicitExchangeBalances?: Record<string, number>, explicitExchangePositions?: any[], forceAuditLog: boolean = false) {
+    return await this.reconciliationEngine.reconcile(localPositions, localBalance, explicitExchangeBalances, explicitExchangePositions, forceAuditLog);
   }
 
   unlockDesync(reason: string = 'Manual operator unlock') {

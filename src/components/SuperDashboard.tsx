@@ -132,11 +132,6 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
     maxHoldMinutes,
     scalpingConfig,
     initialBalance,
-    accumulationBalance = 0,
-    sessionCycleCount = 1,
-    accumulationTargetPercent = 3.0,
-    consolidateAccumulation,
-    resetAccumulationVault,
     logs,
     autoTradingActive,
     setAutoTradingActive,
@@ -282,64 +277,6 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
           </div>
         </div>
 
-        {/* Sold Acumulare (Vault Profit Conservat) */}
-        <div className="bg-gradient-to-b from-amber-950/40 to-zinc-900/90 border border-amber-500/30 rounded-2xl p-3.5 sm:p-5 relative overflow-hidden">
-          <div className="flex items-center justify-between text-amber-300 mb-1">
-            <span className="text-[11px] uppercase tracking-wider font-semibold flex items-center gap-1">
-              <span>Sold "Acumulare"</span>
-            </span>
-            <div className="flex flex-col items-end gap-1">
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono font-bold border border-amber-500/30">
-                Ciclu #{sessionCycleCount}
-              </span>
-              {resetAccumulationVault && (
-                confirmResetAcc ? (
-                  <div className="flex items-center gap-1 mt-0.5">
-                    <button
-                      onClick={async () => {
-                        await resetAccumulationVault();
-                        setConfirmResetAcc(false);
-                      }}
-                      className="px-1.5 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold text-[10px] shadow transition-all cursor-pointer"
-                    >
-                      Confirmi $0?
-                    </button>
-                    <button
-                      onClick={() => setConfirmResetAcc(false)}
-                      className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono text-[10px] transition-all cursor-pointer"
-                    >
-                      Nu
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    onClick={() => setConfirmResetAcc(true)}
-                    className="px-1.5 py-0.5 rounded bg-amber-500/10 hover:bg-rose-500/20 text-amber-300 hover:text-rose-300 border border-amber-500/30 hover:border-rose-500/40 text-[10px] font-mono font-semibold transition-all cursor-pointer flex items-center gap-1"
-                    title="Resetează Soldul Acumulare la $0.00"
-                  >
-                    <RefreshCw className="w-2.5 h-2.5" />
-                    Reset
-                  </button>
-                )
-              )}
-            </div>
-          </div>
-          <div className="text-xl sm:text-2xl font-bold font-mono text-amber-300 tracking-tight">
-            ${accumulationBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </div>
-          <div className="text-[11px] text-amber-400/80 mt-1 flex items-center justify-between font-mono">
-            <span>Țintă: +{accumulationTargetPercent}%</span>
-            {totalPnLPercent >= accumulationTargetPercent && (
-              <button
-                onClick={() => consolidateAccumulation && consolidateAccumulation()}
-                className="px-1.5 py-0.5 rounded bg-emerald-500 text-black text-[10px] font-bold hover:bg-emerald-400 transition-all cursor-pointer"
-                title="Consolidează profitul manual"
-              >
-                Salvează
-              </button>
-            )}
-          </div>
-        </div>
 
         {/* Profit / Pierdere Total (PnL) */}
         <div className="bg-zinc-900/90 border border-white/10 rounded-2xl p-3.5 sm:p-5 relative overflow-hidden">

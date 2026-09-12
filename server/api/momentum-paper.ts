@@ -2,15 +2,18 @@ import { Router } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { paperTrader } from '../services/momentum/PaperTrader';
+import { botEngine } from '../bot';
 
 const router = Router();
 
 // Reset paper trading state
 router.post('/reset', (req, res) => {
   const { balance } = req.body;
+  const newBalance = balance ? Number(balance) : 1000;
   console.log('[API] Resetting momentum paper state...');
   try {
-    paperTrader.resetState(balance || 1000);
+    paperTrader.resetState(newBalance);
+    botEngine.resetPortfolio(newBalance);
     res.json({ success: true, message: 'Simulator reset successfully', state: paperTrader.getState() });
   } catch (err: any) {
     console.error('[API] Reset error:', err);

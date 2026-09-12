@@ -168,10 +168,6 @@ export function TradingJournal() {
     binanceMode, 
     timezone, 
     initialBalance,
-    accumulationBalance = 0,
-    sessionCycleCount = 1,
-    consolidateAccumulation,
-    resetAccumulationVault
   } = useTradingStore();
   const [entries, setEntries] = useState<JournalEntry[]>([]);
   const [snapshots, setSnapshots] = useState<DailySnapshot[]>([]);
@@ -944,61 +940,6 @@ export function TradingJournal() {
           </div>
         </div>
 
-        {/* Card Vault: Sold "Acumulare" (Profit Conservat 3%) */}
-        <div className="bg-gradient-to-b from-amber-950/40 to-zinc-900/60 border border-amber-500/30 rounded-2xl p-4 md:p-5 flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between text-amber-300 mb-1">
-              <span className="text-xs font-semibold uppercase tracking-wider">Sold "Acumulare"</span>
-              <div className="flex flex-col items-end gap-1">
-                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                  Ciclu #{sessionCycleCount}
-                </span>
-                {resetAccumulationVault && (
-                  confirmResetAcc ? (
-                    <div className="flex items-center gap-1 mt-0.5">
-                      <button
-                        onClick={async () => {
-                          await resetAccumulationVault();
-                          setConfirmResetAcc(false);
-                        }}
-                        className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold text-[10px] shadow transition-all cursor-pointer"
-                      >
-                        Confirmi $0?
-                      </button>
-                      <button
-                        onClick={() => setConfirmResetAcc(false)}
-                        className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono text-[10px] transition-all cursor-pointer"
-                      >
-                        Nu
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => setConfirmResetAcc(true)}
-                      className="px-2 py-0.5 rounded bg-amber-500/10 hover:bg-rose-500/20 text-amber-300 hover:text-rose-300 border border-amber-500/30 hover:border-rose-500/40 text-[10px] font-mono font-semibold transition-all cursor-pointer"
-                      title="Resetează Soldul Acumulare la $0.00"
-                    >
-                      Reset
-                    </button>
-                  )
-                )}
-              </div>
-            </div>
-            <div className="text-2xl font-serif text-amber-300 font-mono font-bold">
-              ${accumulationBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </div>
-          </div>
-          <div className="flex items-center justify-between mt-2 pt-2 border-t border-amber-500/20 text-[11px] font-mono text-amber-400/90">
-            <span>Profit Salvat:</span>
-            <button
-              onClick={() => consolidateAccumulation && consolidateAccumulation()}
-              className="px-2 py-0.5 rounded bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-[10px] transition-all cursor-pointer"
-              title="Extras profitul curent în balanța Acumulare și resetare ciclu"
-            >
-              🔒 Consolidează +{summarySessionStats.sessionNetPnLPercent.toFixed(1)}%
-            </button>
-          </div>
-        </div>
 
         {/* Card 2: Target Profit Sesiune */}
         <div className="bg-zinc-900/40 border border-white/5 rounded-2xl p-4 md:p-5 flex flex-col justify-between">

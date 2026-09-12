@@ -131,10 +131,6 @@ export default function App() {
 
           if (data.balance !== undefined && data.balance !== currentStore.balance) updates.balance = data.balance;
           if (data.initialBalance !== undefined && data.initialBalance !== currentStore.initialBalance) updates.initialBalance = data.initialBalance;
-          if (data.accumulationBalance !== undefined && data.accumulationBalance !== currentStore.accumulationBalance) updates.accumulationBalance = data.accumulationBalance;
-          if (data.accumulationTargetPercent !== undefined && data.accumulationTargetPercent !== currentStore.accumulationTargetPercent) updates.accumulationTargetPercent = data.accumulationTargetPercent;
-          if (data.sessionCycleCount !== undefined && data.sessionCycleCount !== currentStore.sessionCycleCount) updates.sessionCycleCount = data.sessionCycleCount;
-          if (data.accumulationTargetEnabled !== undefined && data.accumulationTargetEnabled !== currentStore.accumulationTargetEnabled) updates.accumulationTargetEnabled = data.accumulationTargetEnabled;
           if (data.positions && JSON.stringify(data.positions) !== JSON.stringify(currentStore.positions)) updates.positions = data.positions;
           if (data.logs && JSON.stringify(data.logs) !== JSON.stringify(currentStore.logs)) updates.logs = data.logs;
           if (data.signalJournal && JSON.stringify(data.signalJournal) !== JSON.stringify(currentStore.signalJournal)) updates.signalJournal = data.signalJournal;

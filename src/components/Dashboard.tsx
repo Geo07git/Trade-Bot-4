@@ -37,9 +37,6 @@ export function Dashboard() {
     syncBinanceBalance,
     executeTrade,
     equityProtectionConfig,
-    isEquityProtectionActivated,
-    currentCyclePeakEquity,
-    cycleStartEquity
   } = useTradingStore();
 
   const [newSymbol, setNewSymbol] = useState('');
@@ -650,42 +647,86 @@ export function Dashboard() {
               )}
             </div>
 
-            {/* Equity Cycle Protection Card */}
-            {equityProtectionConfig?.enabled && (
-              <div className={cn(
-                "mt-4 p-4 rounded-xl border flex items-center justify-between",
-                isEquityProtectionActivated ? "bg-red-950/30 border-red-500/40" : "bg-zinc-900/50 border-white/10"
-              )}>
-                <div className="flex items-center gap-3">
-                  <ShieldAlert className={cn("w-5 h-5", isEquityProtectionActivated ? "text-red-400" : "text-zinc-500")} />
-                  <div>
-                    <h4 className="text-xs font-bold text-zinc-200">Equity Cycle Protection</h4>
-                    <p className="text-[10px] text-zinc-400">
-                      Status: {isEquityProtectionActivated ? <span className="text-red-400 font-bold">ACTIVAT</span> : "Monitorizare"}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex gap-4 text-[10px] font-mono text-zinc-400">
-                  <div className="text-center">
-                    <span className="block text-zinc-500">Start</span>
-                    <span className="text-white">${cycleStartEquity?.toFixed(2) || '0.00'}</span>
-                  </div>
-                  <div className="text-center">
-                    <span className="block text-zinc-500">Peak</span>
-                    <span className="text-white">${currentCyclePeakEquity?.toFixed(2) || '0.00'}</span>
-                  </div>
-                  <div className="text-center">
-                    <span className="block text-zinc-500">Drawdown</span>
-                    <span className={cn(
-                      "font-bold",
-                      ((currentCyclePeakEquity || 0) > 0 && ((currentCyclePeakEquity || 0) - equity) / (currentCyclePeakEquity || 1) * 100 > 0.05) ? "text-red-400" : "text-emerald-400"
+            {/* Equity Trailing & Capital Protection Status Card */}
+            {equityProtectionConfig?.enabled && (() => {
+              const base = initialBalance || 1000;
+              const hwm = equityProtectionConfig?.highWaterMark || base;
+              const eq = equity;
+              const currentDrawdown = hwm > 0 ? Math.max(0, ((hwm - eq) / hwm) * 100) : 0;
+              const trailingLimit = equityProtectionConfig?.trailingDistancePct ?? 0.40;
+              const profitThreshold = equityProtectionConfig?.profitThresholdPct ?? 0.80;
+              const minRequiredHwm = base * (1 + profitThreshold / 100);
+              const isArmed = hwm >= minRequiredHwm;
+              const isLocked = equityProtectionConfig?.isLocked;
+              const triggerPrice = hwm * (1 - trailingLimit / 100);
+
+              return (
+                <div className={cn(
+                  "mt-4 p-4 rounded-xl border flex flex-col xl:flex-row items-start xl:items-center justify-between gap-3",
+                  isLocked 
+                    ? "bg-rose-950/20 border-rose-500/30 text-rose-300" 
+                    : isArmed
+                      ? "bg-emerald-950/20 border-emerald-500/30 text-emerald-300"
+                      : "bg-zinc-900/60 border-white/5 text-zinc-300"
+                )}>
+                  <div className="flex items-center gap-3">
+                    <div className={cn("p-2 rounded-xl border", 
+                      isLocked ? "bg-rose-500/10 border-rose-500/30 text-rose-400" : 
+                      isArmed ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400" :
+                      "bg-amber-500/10 border-amber-500/20 text-amber-400"
                     )}>
-                      {((currentCyclePeakEquity || 0) > 0 ? ((currentCyclePeakEquity || 0) - equity) / (currentCyclePeakEquity || 1) * 100 : 0).toFixed(2)}%
-                    </span>
+                      <ShieldAlert className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h4 className="text-xs font-bold text-zinc-200">Equity Trailing Protection</h4>
+                        <span className={cn("text-[10px] px-2 py-0.5 rounded font-mono font-bold", 
+                          isLocked 
+                            ? "bg-rose-500/20 text-rose-300 border border-rose-500/30" 
+                            : isArmed
+                              ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 animate-pulse"
+                              : "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                        )}>
+                          {isLocked 
+                            ? "DECLANȘAT (LOCKED)" 
+                            : isArmed
+                              ? "ARMAT & ACTIV (URMĂRIRE VÂRF)"
+                              : `AȘTEPTARE PROFIT (NECESITĂ +${profitThreshold.toFixed(2)}%)`}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-zinc-400 mt-0.5">
+                        {isArmed 
+                          ? <span>Protecția este activă: securizează câștigul dacă scade cu <strong className="text-amber-300">{trailingLimit}%</strong> din Peak (${hwm.toFixed(2)}).</span>
+                          : <span>Urmărirea pornește la atingerea pragului de <strong className="text-emerald-300">${minRequiredHwm.toFixed(2)}</strong> (+{profitThreshold}%). Pozițiile respiră liber.</span>
+                        }
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex gap-4 sm:gap-6 text-[11px] font-mono flex-wrap">
+                    <div className="text-center sm:text-right">
+                      <span className="block text-[10px] text-zinc-500">Prag Activare</span>
+                      <span className="font-bold text-zinc-200">${minRequiredHwm.toFixed(2)} <span className="text-[9px] text-emerald-400">(+{profitThreshold}%)</span></span>
+                    </div>
+                    <div className="text-center sm:text-right">
+                      <span className="block text-[10px] text-zinc-500">High-Water Mark (Peak)</span>
+                      <span className="font-bold text-zinc-200">${hwm.toFixed(2)}</span>
+                    </div>
+                    <div className="text-center sm:text-right">
+                      <span className="block text-[10px] text-zinc-500">Prag Vânzare</span>
+                      <span className={cn("font-bold", isArmed ? "text-amber-400" : "text-zinc-500")}>
+                        {isArmed ? `$${triggerPrice.toFixed(2)}` : 'În așteptare'}
+                      </span>
+                    </div>
+                    <div className="text-center sm:text-right">
+                      <span className="block text-[10px] text-zinc-500">Drawdown Curent</span>
+                      <span className={cn("font-bold", (isArmed && currentDrawdown >= trailingLimit) ? "text-rose-400" : "text-emerald-400")}>
+                        {currentDrawdown.toFixed(2)}%
+                      </span>
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {positions.length === 0 ? (
               <div className="p-12 text-center border border-white/5 rounded-2xl bg-zinc-950/40 flex flex-col items-center justify-center gap-3">

@@ -45,10 +45,6 @@ interface TradingStore {
   };
   balance: number;
   initialBalance: number;
-  accumulationBalance: number;
-  accumulationTargetPercent: number;
-  sessionCycleCount: number;
-  accumulationTargetEnabled: boolean;
   watchlist: WatchlistItem[];
   marketOpportunities: MarketOpportunity[];
   symbolStats: Record<string, SymbolPerformanceStat>;
@@ -62,10 +58,6 @@ interface TradingStore {
   autoTradingActive: boolean;
   circuitBreakerTriggered: boolean;
   circuitBreakerReason: string | null;
-  isEquityProtectionActivated?: boolean;
-  currentCyclePeakEquity?: number;
-  cycleStartEquity?: number;
-  protectedPiggyBank?: number;
   dataInterval: number;
   analysisInterval: number;
   positionSizePercent: number;
@@ -162,10 +154,6 @@ interface TradingStore {
   setOkxTestnetApiSecret: (secret: string) => void;
   setOkxTestnetPassphrase: (pass: string) => void;
   setReportConfig: (config: Partial<TradingStore['reportConfig']>) => void;
-  setAccumulationTargetPercent: (pct: number) => void;
-  toggleAccumulationTarget: (enabled?: boolean) => void;
-  consolidateAccumulation: () => Promise<any>;
-  resetAccumulationVault: () => Promise<any>;
   language: Language;
   setLanguage: (lang: Language) => void;
   syncBinanceBalance: () => Promise<any>;
@@ -182,10 +170,6 @@ export const useTradingStore = create<TradingStore>()(
   currentView: 'bloomberg',
   balance: 10000,
   initialBalance: 250,
-  accumulationBalance: 0,
-  accumulationTargetPercent: 3.0,
-  sessionCycleCount: 1,
-  accumulationTargetEnabled: true,
   watchlist: [
     { symbol: 'BTCUSDT', price: null, signal: null, active: true },
     { symbol: 'ETHUSDT', price: null, signal: null, active: true },
@@ -283,8 +267,10 @@ export const useTradingStore = create<TradingStore>()(
   },
   equityProtectionConfig: {
     enabled: true,
-    profitThresholdPct: 0.8,
-    drawdownProtectionPct: 0.1
+    trailingDistancePct: 0.40,
+    profitThresholdPct: 0.80,
+    highWaterMark: 0,
+    isLocked: false
   },
   presets: {
     Free: {
@@ -329,69 +315,9 @@ export const useTradingStore = create<TradingStore>()(
   
   setCurrentView: (view) => set({ currentView: view }),
 
-  setAccumulationTargetPercent: (pct) => {
-    set({ accumulationTargetPercent: pct });
-    apiFetch('/api/bot/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accumulationTargetPercent: pct })
-    }).catch(() => {});
-  },
 
-  toggleAccumulationTarget: (enabled) => {
-    set(state => {
-      const nextVal = enabled !== undefined ? enabled : !state.accumulationTargetEnabled;
-      apiFetch('/api/bot/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accumulationTargetEnabled: nextVal })
-      }).catch(() => {});
-      return { accumulationTargetEnabled: nextVal };
-    });
-  },
 
-  consolidateAccumulation: async () => {
-    try {
-      const res = await apiFetch('/api/bot/consolidate-accumulation', { method: 'POST' });
-      const data = await safeJson(res, null);
-      if (data && data.state) {
-        set({
-          balance: data.state.balance,
-          initialBalance: data.state.initialBalance,
-          accumulationBalance: data.state.accumulationBalance,
-          sessionCycleCount: data.state.sessionCycleCount,
-          logs: data.state.logs || []
-        });
-      }
-      return data;
-    } catch (e: any) {
-      console.error('Error consolidating accumulation:', e);
-      return null;
-    }
-  },
 
-  resetAccumulationVault: async () => {
-    try {
-      const res = await apiFetch('/api/bot/reset-accumulation', { method: 'POST' });
-      const data = await safeJson(res, null);
-      if (data && data.state) {
-        set((state) => ({
-          accumulationBalance: data.state.accumulationBalance !== undefined ? data.state.accumulationBalance : 0,
-          sessionCycleCount: data.state.sessionCycleCount !== undefined ? data.state.sessionCycleCount : 1,
-          initialBalance: data.state.initialBalance !== undefined ? data.state.initialBalance : state.initialBalance,
-          balance: data.state.balance !== undefined ? data.state.balance : state.balance,
-          logs: data.state.logs || []
-        }));
-      } else {
-        set({ accumulationBalance: 0, sessionCycleCount: 1 });
-      }
-      return data;
-    } catch (e: any) {
-      console.error('Error resetting accumulation vault:', e);
-      set({ accumulationBalance: 0, sessionCycleCount: 1 });
-      return null;
-    }
-  },
   setServerUrl: (url) => set({ serverUrl: url }),
   setBalance: (amount) => {
     set({ balance: amount, initialBalance: amount, positions: [], logs: [] });
@@ -879,8 +805,6 @@ export const useTradingStore = create<TradingStore>()(
         set({
           balance: data.state.balance,
           initialBalance: data.state.initialBalance,
-          accumulationBalance: data.state.accumulationBalance ?? 0,
-          sessionCycleCount: data.state.sessionCycleCount ?? 1,
           positions: data.state.positions || [],
           watchlist: data.state.watchlist || [],
           logs: data.state.logs,
@@ -949,21 +873,10 @@ export const useTradingStore = create<TradingStore>()(
   },
   runClientEnginePulse: () => {
     // Decoupled UI architecture: all execution and order management is handled exclusively by the server engine.
-    // Client pulse only updates UI opportunity timers and visual indicators without placing trades.
+    // Client pulse only updates UI opportunity timers without overriding server-side PnL calculations to prevent flickering.
     const state = useTradingStore.getState();
     if (state.marketOpportunities && state.marketOpportunities.length > 0) {
-      const updatedPositions = state.positions.map(pos => {
-        const opp = state.marketOpportunities.find(o => o.symbol === pos.symbol);
-        const watch = state.watchlist.find(w => w.symbol === pos.symbol);
-        const currentPrice = opp?.price || watch?.price || pos.currentPrice;
-        if (currentPrice && currentPrice !== pos.currentPrice) {
-          const pnlUSD = (currentPrice - pos.entryPrice) * pos.amount;
-          const pnlPercent = pos.entryPrice > 0 ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100 : 0;
-          return { ...pos, currentPrice, pnl: pnlUSD, pnlPercent };
-        }
-        return pos;
-      });
-      set({ positions: updatedPositions });
+      // Do not recalculate PnL here as it causes conflicts with server-side updates.
     }
   }
     }),

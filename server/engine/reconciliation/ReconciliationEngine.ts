@@ -29,6 +29,7 @@ export class ReconciliationEngine {
   private exchangePositionsCount: number = 0;
   private unmatchedPositions: string[] = [];
   private maxAllowedDriftUSDT: number = 5.0; // $5 tolerance for small fee discrepancies
+  private lastAuditLoggedAt: number = 0;
 
   constructor(stateMachine: StateMachine) {
     this.stateMachine = stateMachine;
@@ -57,7 +58,13 @@ export class ReconciliationEngine {
     };
   }
 
-  async reconcile(localPositions: any[] = [], localBalance: number = 0, explicitExchangeBalances?: Record<string, number>, explicitExchangePositions?: any[]): Promise<boolean> {
+  async reconcile(
+    localPositions: any[] = [],
+    localBalance: number = 0,
+    explicitExchangeBalances?: Record<string, number>,
+    explicitExchangePositions?: any[],
+    forceAuditLog: boolean = false
+  ): Promise<boolean> {
     this.lastReconciledAt = Date.now();
     this.lastLocalBalance = localBalance;
     this.localPositionsCount = localPositions.length;
@@ -136,14 +143,24 @@ export class ReconciliationEngine {
       this.stateMachine.transitionTo(EngineState.TRADING, 'Reconciliation resolved successfully');
     }
 
-    await db.logEvent('RECONCILIATION_CHECK', {
-      status: 'SYNCHRONIZED',
-      localBalance,
-      exchangeBalance: usdtBalance,
-      driftUSDT: this.balanceDrift,
-      localPositionsCount: this.localPositionsCount,
-      exchangePositionsCount: this.exchangePositionsCount
-    }, undefined, 'reconciliation', 'AUDIT');
+    // Log RECONCILIATION_CHECK to audit ledger only when:
+    // 1. Force requested (e.g. user clicked [Reconcile Parity] via API or on startup)
+    // 2. Or periodic interval elapsed (1 check per hour = 60 * 60 * 1000 ms)
+    const ONE_HOUR_MS = 60 * 60 * 1000;
+    const shouldLogAudit = forceAuditLog || (Date.now() - this.lastAuditLoggedAt >= ONE_HOUR_MS);
+
+    if (shouldLogAudit) {
+      this.lastAuditLoggedAt = Date.now();
+      await db.logEvent('RECONCILIATION_CHECK', {
+        status: 'SYNCHRONIZED',
+        localBalance,
+        exchangeBalance: usdtBalance,
+        driftUSDT: this.balanceDrift,
+        localPositionsCount: this.localPositionsCount,
+        exchangePositionsCount: this.exchangePositionsCount,
+        trigger: forceAuditLog ? 'ON_DEMAND' : 'HOURLY_HEARTBEAT'
+      }, undefined, 'reconciliation', 'AUDIT');
+    }
 
     logger.info(`✅ [Reconciliation] State verified. Drift: $${this.balanceDrift.toFixed(2)} USDT.`);
     return true;

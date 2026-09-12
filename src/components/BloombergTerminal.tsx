@@ -100,7 +100,6 @@ export function BloombergTerminal() {
     resetCircuitBreaker,
     binanceMode,
     initialBalance,
-    protectedPiggyBank,
     equityProtectionConfig,
     logs,
     signalJournal,
@@ -128,6 +127,8 @@ export function BloombergTerminal() {
   };
   const [isReconciling, setIsReconciling] = useState(false);
   const [reconcileFeedback, setReconcileFeedback] = useState<string | null>(null);
+  const [isClosingAll, setIsClosingAll] = useState(false);
+  const [closeFeedback, setCloseFeedback] = useState<string | null>(null);
   const [tickAnimation, setTickAnimation] = useState<Record<string, 'up' | 'down'>>({});
   const [currentTime, setCurrentTime] = useState<string>('');
   const [ticker24hMap, setTicker24hMap] = useState<Record<string, {
@@ -238,26 +239,26 @@ export function BloombergTerminal() {
   }, [language]);
 
   // Aggregate Market Stats
-  const equity = useMemo(() => {
-    const positionsValue = positions.reduce((acc, pos) => {
+  const { investedCapital, unrealizedPnL } = useMemo(() => {
+    let inv = 0;
+    let pnl = 0;
+    positions.forEach(pos => {
       const ticker = ticker24hMap[pos.symbol];
       const opp = marketOpportunities.find(o => o.symbol === pos.symbol);
       const watch = watchlist.find(w => w.symbol === pos.symbol);
       const price = ticker?.price || opp?.price || watch?.price || pos.currentPrice || pos.entryPrice;
-      return acc + (pos.amount * price);
-    }, 0);
-    return balance + positionsValue;
-  }, [balance, positions, marketOpportunities, watchlist, ticker24hMap]);
-
-  const unrealizedPnL = useMemo(() => {
-    return positions.reduce((acc, pos) => {
-      const ticker = ticker24hMap[pos.symbol];
-      const opp = marketOpportunities.find(o => o.symbol === pos.symbol);
-      const watch = watchlist.find(w => w.symbol === pos.symbol);
-      const price = ticker?.price || opp?.price || watch?.price || pos.currentPrice || pos.entryPrice;
-      return acc + ((price - pos.entryPrice) * pos.amount);
-    }, 0);
+      
+      const lev = pos.leverage || 1;
+      const margin = pos.margin || ((pos.entryPrice * pos.amount) / lev);
+      inv += margin;
+      pnl += (price - pos.entryPrice) * pos.amount;
+    });
+    return { investedCapital: inv, unrealizedPnL: pnl };
   }, [positions, marketOpportunities, watchlist, ticker24hMap]);
+
+  const equity = balance + investedCapital + unrealizedPnL;
+
+
 
   const unrealizedPnLPct = equity > 0 ? (unrealizedPnL / (equity - unrealizedPnL)) * 100 : 0;
   const totalProfit = equity - initialBalance;
@@ -409,6 +410,28 @@ export function BloombergTerminal() {
     }
   };
 
+  const handleCloseAllPositions = async () => {
+    setIsClosingAll(true);
+    setCloseFeedback(null);
+    try {
+      const res = await apiFetch('/api/bot/close-all-positions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await safeJson(res, null);
+      if (data && data.success) {
+        setCloseFeedback(data.message || (language === 'ro' ? 'Toate pozițiile au fost închise!' : 'All positions closed!'));
+      } else {
+        setCloseFeedback(data?.error || (language === 'ro' ? 'Eroare la închidere' : 'Close error'));
+      }
+    } catch (err: any) {
+      setCloseFeedback(err?.message || (language === 'ro' ? 'Eroare la închiderea pozițiilor' : 'Failed to close positions'));
+    } finally {
+      setIsClosingAll(false);
+      setTimeout(() => setCloseFeedback(null), 6000);
+    }
+  };
+
   const activePositionItem = positions.find(p => p.symbol === selectedSymbol);
   const fallbackSecurity = {
     symbol: selectedSymbol || 'BTCUSDT',
@@ -539,29 +562,19 @@ export function BloombergTerminal() {
         <div className="xl:col-span-8 flex flex-col gap-1.5 h-auto xl:h-full min-h-[420px] xl:min-h-0 overflow-hidden">
           
           {/* TOP METRIC RIBBON */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-1 shrink-0">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 xl:grid-cols-8 gap-1 shrink-0">
             <div className="bg-[#0d1017] border border-amber-500/20 p-2 rounded flex flex-col">
-              <span className="text-[10px] text-zinc-400 uppercase font-semibold">{t.totalBalance}</span>
+              <span className="text-[10px] text-zinc-400 uppercase font-semibold">Free Balance</span>
               <span className="text-sm font-bold text-amber-400 font-mono mt-0.5">${balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
             </div>
-
             <div className="bg-[#0d1017] border border-amber-500/20 p-2 rounded flex flex-col">
-              <span className="text-[10px] text-zinc-400 uppercase font-semibold">Total Equity</span>
+              <span className="text-[10px] text-zinc-400 uppercase font-semibold">Margin (Invested)</span>
+              <span className="text-sm font-bold text-amber-200 font-mono mt-0.5">${investedCapital.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+            </div>
+            <div className="bg-[#0d1017] border border-emerald-500/30 p-2 rounded flex flex-col">
+              <span className="text-[10px] text-emerald-400 uppercase font-semibold">Total Equity</span>
               <span className="text-sm font-bold text-white font-mono mt-0.5">${equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
             </div>
-
-            <div className="bg-[#0d1017] border border-amber-500/20 p-2 rounded flex flex-col">
-              <span className="text-[10px] text-zinc-400 uppercase font-semibold">{language === 'ro' ? 'Profit Total' : 'Total Profit'}</span>
-              <div className="flex items-center gap-1 mt-0.5">
-                <span className={cn("text-sm font-bold font-mono", totalProfit >= 0 ? "text-emerald-400" : "text-rose-400")}>
-                  {totalProfit >= 0 ? '+' : ''}${totalProfit.toFixed(2)}
-                </span>
-                <span className={cn("text-[10px] font-bold", totalProfit >= 0 ? "text-emerald-400" : "text-rose-400")}>
-                  ({totalProfitPct.toFixed(2)}%)
-                </span>
-              </div>
-            </div>
-
             <div className="bg-[#0d1017] border border-amber-500/20 p-2 rounded flex flex-col">
               <span className="text-[10px] text-zinc-400 uppercase font-semibold">{t.unrealizedPnl}</span>
               <div className="flex items-center gap-1 mt-0.5">
@@ -573,7 +586,17 @@ export function BloombergTerminal() {
                 </span>
               </div>
             </div>
-
+            <div className="bg-[#0d1017] border border-amber-500/20 p-2 rounded flex flex-col">
+              <span className="text-[10px] text-zinc-400 uppercase font-semibold">{language === 'ro' ? 'Profit Total' : 'Total Profit'}</span>
+              <div className="flex items-center gap-1 mt-0.5">
+                <span className={cn("text-sm font-bold font-mono", totalProfit >= 0 ? "text-emerald-400" : "text-rose-400")}>
+                  {totalProfit >= 0 ? '+' : ''}${totalProfit.toFixed(2)}
+                </span>
+                <span className={cn("text-[10px] font-bold", totalProfit >= 0 ? "text-emerald-400" : "text-rose-400")}>
+                  ({totalProfitPct.toFixed(2)}%)
+                </span>
+              </div>
+            </div>
             <div className="bg-[#0d1017] border border-amber-500/20 p-2 rounded flex flex-col">
               <span className="text-[10px] text-zinc-400 uppercase font-semibold">{t.activePositions}</span>
               <span className="text-sm font-bold text-cyan-400 font-mono mt-0.5">{positions.length}</span>
@@ -593,45 +616,6 @@ export function BloombergTerminal() {
                 <ShieldCheck className="w-3 h-3 text-emerald-400" />
                 0.00 USDT (0 bps)
               </span>
-            </div>
-          </div>
-
-          {/* EQUITY MONITOR / PUSCULITA CARD */}
-          <div className="bg-gradient-to-r from-[#0d1017] via-[#111827] to-[#0d1017] border border-emerald-500/30 p-3 rounded flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0 shadow-lg">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-lg shadow-inner">
-                🐖
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Equity Monitor & Pușculiță ECP</h3>
-                  <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                    {equityProtectionConfig?.enabled ? 'ACTIV (0.8% Target)' : 'INACTIV'}
-                  </span>
-                </div>
-                <p className="text-[11px] text-zinc-400 mt-0.5">
-                  Profiturile peste capitalul de bază sunt blocate automat în pușculiță și protejate de ciclul următor.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3 text-xs font-mono">
-              <div className="bg-black/40 px-3 py-1.5 rounded border border-white/5 text-center">
-                <span className="block text-[9px] text-zinc-500 uppercase">Capital Inițial</span>
-                <span className="text-white font-bold">${initialBalance.toFixed(2)}</span>
-              </div>
-              <div className="bg-black/40 px-3 py-1.5 rounded border border-white/5 text-center">
-                <span className="block text-[9px] text-zinc-500 uppercase">Capital Curent</span>
-                <span className="text-amber-400 font-bold">${equity.toFixed(2)}</span>
-              </div>
-              <div className="bg-emerald-950/40 px-3 py-1.5 rounded border border-emerald-500/40 text-center">
-                <span className="block text-[9px] text-emerald-400 uppercase font-bold">Pușculiță 🐖</span>
-                <span className="text-emerald-300 font-bold text-sm">+${(protectedPiggyBank || 0).toFixed(2)}</span>
-              </div>
-              <div className="bg-black/40 px-3 py-1.5 rounded border border-white/5 text-center">
-                <span className="block text-[9px] text-zinc-500 uppercase">Net Worth Total</span>
-                <span className="text-cyan-400 font-bold">${(equity + (protectedPiggyBank || 0)).toFixed(2)}</span>
-              </div>
             </div>
           </div>
 
@@ -667,6 +651,26 @@ export function BloombergTerminal() {
               </div>
 
               <div className="flex items-center gap-2">
+                {closeFeedback && (
+                  <span className="text-[10px] font-bold text-amber-300 bg-amber-500/15 border border-amber-500/40 px-2 py-0.5 rounded animate-pulse whitespace-nowrap">
+                    {closeFeedback}
+                  </span>
+                )}
+
+                {positions.length > 0 && (
+                  <button
+                    onClick={handleCloseAllPositions}
+                    disabled={isClosingAll}
+                    className="px-2.5 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-[10px] font-bold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 whitespace-nowrap shadow-sm hover:border-rose-400"
+                    title={language === 'ro' ? 'Închide toate pozițiile active și returnează capitalul + profitul în balanță liberă (USDT)' : 'Close all active positions and return capital + profit to free balance (USDT)'}
+                  >
+                    <ShieldAlert className="w-3 h-3 text-rose-400" />
+                    {isClosingAll 
+                      ? (language === 'ro' ? 'Se închid...' : 'Closing all...') 
+                      : (language === 'ro' ? 'Închide Tot & Încasează Profitul' : 'Close All & Take Profit')}
+                  </button>
+                )}
+
                 <div className="relative">
                   <Search className="w-3 h-3 absolute left-2 top-2 text-zinc-500" />
                   <input 
@@ -679,6 +683,87 @@ export function BloombergTerminal() {
                 </div>
               </div>
             </div>
+
+            {/* Equity Trailing Protection Matrix Card */}
+            {equityProtectionConfig?.enabled && (() => {
+              const base = initialBalance || 1000;
+              const hwm = equityProtectionConfig?.highWaterMark || base;
+              const eq = equity;
+              const currentDrawdown = hwm > 0 ? Math.max(0, ((hwm - eq) / hwm) * 100) : 0;
+              const trailingLimit = equityProtectionConfig?.trailingDistancePct ?? 0.40;
+              const profitThreshold = equityProtectionConfig?.profitThresholdPct ?? 0.80;
+              const minRequiredHwm = base * (1 + profitThreshold / 100);
+              const isArmed = hwm >= minRequiredHwm;
+              const isLocked = equityProtectionConfig?.isLocked;
+              const triggerPrice = hwm * (1 - trailingLimit / 100);
+
+              return (
+                <div className={cn(
+                  "m-3 p-3 rounded border flex flex-col xl:flex-row items-start xl:items-center justify-between gap-3 font-mono text-xs",
+                  isLocked 
+                    ? "bg-rose-950/30 border-rose-500/40 text-rose-300" 
+                    : isArmed 
+                      ? "bg-emerald-950/20 border-emerald-500/40 text-emerald-300"
+                      : "bg-[#0c0e12] border-amber-500/30 text-amber-300"
+                )}>
+                  <div className="flex items-center gap-2.5">
+                    <div className={cn("p-1.5 rounded border", 
+                      isLocked ? "bg-rose-500/20 border-rose-500/40 text-rose-400" : 
+                      isArmed ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-400" :
+                      "bg-amber-500/10 border-amber-500/30 text-amber-400"
+                    )}>
+                      <ShieldAlert className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold tracking-wider uppercase text-white">EQUITY TRAILING PROTECTION</span>
+                        <span className={cn("text-[9px] px-1.5 py-0.5 rounded font-bold", 
+                          isLocked 
+                            ? "bg-rose-500/20 text-rose-300 border border-rose-500/40" 
+                            : isArmed
+                              ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse"
+                              : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                        )}>
+                          {isLocked 
+                            ? "DECLANȘAT (LOCKED)" 
+                            : isArmed 
+                              ? "ARMAT & ACTIV (URMĂRIRE VÂRF)" 
+                              : `AȘTEPTARE PROFIT (NECESITĂ +${profitThreshold.toFixed(2)}%)`}
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-zinc-400 mt-0.5">
+                        {isArmed 
+                          ? <span>Protecția este activă: vinde tot dacă scade cu <strong className="text-amber-300">{trailingLimit}%</strong> din Peak (${hwm.toFixed(2)}).</span>
+                          : <span>Urmărirea se activează când contul atinge <strong className="text-emerald-300">${minRequiredHwm.toFixed(2)}</strong> (+{profitThreshold}%). Până atunci pozițiile respiră liber.</span>
+                        }
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex gap-4 text-[11px] font-mono shrink-0 flex-wrap">
+                    <div className="text-right">
+                      <span className="block text-[9px] text-zinc-500 uppercase">Prag Activare</span>
+                      <span className="font-bold text-zinc-300">${minRequiredHwm.toFixed(2)} <span className="text-[9px] text-emerald-400">(+{profitThreshold}%)</span></span>
+                    </div>
+                    <div className="text-right">
+                      <span className="block text-[9px] text-zinc-500 uppercase">High-Water Mark (Peak)</span>
+                      <span className="font-bold text-white">${hwm.toFixed(2)}</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="block text-[9px] text-zinc-500 uppercase">Prag Vânzare</span>
+                      <span className={cn("font-bold", isArmed ? "text-amber-400" : "text-zinc-500")}>
+                        {isArmed ? `$${triggerPrice.toFixed(2)}` : 'În așteptare'}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="block text-[9px] text-zinc-500 uppercase">Retragere Curentă</span>
+                      <span className={cn("font-bold", (isArmed && currentDrawdown >= trailingLimit) ? "text-rose-400" : "text-emerald-400")}>
+                        {currentDrawdown.toFixed(2)}%
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Table Content */}
             <div className="flex-1 overflow-auto">

@@ -234,21 +234,14 @@ export interface BotState {
   circuitBreakerReason?: string | null;
   balance: number;
   initialBalance: number;
-  accumulationBalance?: number;
-  accumulationTargetPercent?: number;
-  sessionCycleCount?: number;
-  accumulationTargetEnabled?: boolean;
-  currentCyclePeakEquity?: number;
   cycleStartEquity?: number; // Capital la începutul ciclului curent
-  isEquityProtectionActivated?: boolean;
-  protectedPiggyBank?: number;
   forceCloseAllPositions?: boolean;
   positionSizePercent?: number; // % of equity per position (e.g. 5%)
   stopLossPercent?: number; // % hard safety stop loss limit (e.g. 2.0%)
   maxHoldMinutes?: number; // Timp maxim de deținere o poziție în minute (ex: 5 sau 10 minute). Ieșire automată după depășire.
   maxNegativeHoldMinutes?: number; // Timp maxim de deținere de la intrarea pe minus (ex: 1.0 min).
   enableMaxNegativeHold?: boolean; // ON/OFF switch for max negative hold limit rule
-  executionEngine?: 'both' | 'grid' | 'scalping'; // Execuție: amândouă, doar grid, sau doar scalping
+  executionEngine?: 'both' | 'grid' | 'scalping' | 'momentum' | 'none'; // Execuție: ambele, doar scalping, doar momentum, sau oprit
   // FIX: was 'rf'|'tcn'|'both'. TCN/Hybrid never actually ran — ml.ts accepted the
   // selectedModelType parameter but never read it, always running Random Forest only.
   // Kept as a field (rather than removed outright) only so old persisted bot_state.json
@@ -979,6 +972,7 @@ class ServerBotEngine {
   private consecutiveApiErrors = 0;
   private externalPositionChecker: ((symbol: string) => boolean) | null = null;
   private externalPositionsValueProvider: (() => number) | null = null;
+  private externalPositionsCloseProvider: ((reason: string) => Promise<void>) | null = null;
 
   public setExternalPositionChecker(checker: (symbol: string) => boolean) {
     this.externalPositionChecker = checker;
@@ -988,15 +982,15 @@ class ServerBotEngine {
     this.externalPositionsValueProvider = provider;
   }
 
+  public setExternalPositionsCloseProvider(provider: (reason: string) => Promise<void>) {
+    this.externalPositionsCloseProvider = provider;
+  }
+
   constructor() {
     this.state = {
       autoTradingActive: true,
       balance: 10000,
       initialBalance: 250,
-      accumulationBalance: 0,
-      accumulationTargetPercent: 3.0,
-      sessionCycleCount: 1,
-      accumulationTargetEnabled: true,
       watchlist: [
         { symbol: 'BTCUSDT', price: null, signal: null, active: true },
         { symbol: 'ETHUSDT', price: null, signal: null, active: true },
@@ -1095,10 +1089,11 @@ class ServerBotEngine {
       },
       equityProtectionConfig: {
         enabled: true,
-        profitThresholdPct: 0.8,
-        drawdownProtectionPct: 0.1
+        trailingDistancePct: 0.40,
+        profitThresholdPct: 0.80,
+        highWaterMark: 0,
+        isLocked: false
       },
-      isEquityProtectionActivated: false,
       gridConfig: {
         active: false,
         autoRegimeSwitch: true,
@@ -1173,10 +1168,6 @@ class ServerBotEngine {
       gridHistory: this.state.gridHistory,
       dynamicWatchlistSize: this.state.dynamicWatchlistSize,
       maxLogs: this.state.maxLogs,
-      accumulationBalance: this.state.accumulationBalance || 0,
-      accumulationTargetPercent: this.state.accumulationTargetPercent || 3.0,
-      sessionCycleCount: this.state.sessionCycleCount || 1,
-      accumulationTargetEnabled: this.state.accumulationTargetEnabled !== false,
       balance: this.state.balance || 10000,
       initialBalance: this.state.initialBalance || 250,
       positions: this.state.positions || [],
@@ -1223,10 +1214,6 @@ class ServerBotEngine {
           if (parsed.gridConfig !== undefined && typeof parsed.gridConfig === 'object') {
             this.state.gridConfig = { ...this.state.gridConfig, ...parsed.gridConfig };
           }
-          if (parsed.accumulationBalance !== undefined) this.state.accumulationBalance = parsed.accumulationBalance;
-          if (parsed.accumulationTargetPercent !== undefined) this.state.accumulationTargetPercent = parsed.accumulationTargetPercent;
-          if (parsed.sessionCycleCount !== undefined) this.state.sessionCycleCount = parsed.sessionCycleCount;
-          if (parsed.accumulationTargetEnabled !== undefined) this.state.accumulationTargetEnabled = parsed.accumulationTargetEnabled;
           if (parsed.balance !== undefined) this.state.balance = parsed.balance;
           if (parsed.initialBalance !== undefined) this.state.initialBalance = parsed.initialBalance;
           // FIX: restore Watch Mode cooldowns saved before the last restart (only
@@ -1238,6 +1225,8 @@ class ServerBotEngine {
         if (!this.state.apiKey && process.env.BINANCE_API_KEY) this.state.apiKey = process.env.BINANCE_API_KEY;
         if (!this.state.apiSecret && process.env.BINANCE_API_SECRET) this.state.apiSecret = process.env.BINANCE_API_SECRET;
         if (!this.state.testnetApiKey && process.env.BINANCE_TESTNET_API_KEY) this.state.testnetApiKey = process.env.BINANCE_TESTNET_API_KEY;
+        
+
         if (!this.state.testnetApiSecret && process.env.BINANCE_TESTNET_API_SECRET) this.state.testnetApiSecret = process.env.BINANCE_TESTNET_API_SECRET;
         if (!this.state.telegramBotToken && process.env.TELEGRAM_BOT_TOKEN) this.state.telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
         if (!this.state.telegramChatId && process.env.TELEGRAM_CHAT_ID) this.state.telegramChatId = process.env.TELEGRAM_CHAT_ID;
@@ -1251,6 +1240,18 @@ class ServerBotEngine {
           this.state.positions = parsed.positions;
         } else {
           this.state.positions = [];
+        }
+
+
+        
+        // Ensure HWM is never randomly inflated
+        if (this.state.equityProtectionConfig) {
+           const mSum = this.state.positions.reduce((acc, pos) => acc + (pos.margin || 0), 0);
+           const currentEq = this.state.balance + mSum; // Base equity without unclosed PnL to anchor it
+           if (this.state.equityProtectionConfig.highWaterMark > currentEq + 50) {
+              logger.info(`[SANITATION] HWM was artificially high (${this.state.equityProtectionConfig.highWaterMark}). Resetting to ${currentEq}`);
+              this.state.equityProtectionConfig.highWaterMark = currentEq;
+           }
         }
         this.state.symbolStats = {};
 
@@ -1339,102 +1340,85 @@ class ServerBotEngine {
     this.savePersistedState(true);
   }
 
-  public checkAccumulationTarget(): boolean {
-    if (this.state.accumulationTargetEnabled === false) return false;
-
-    const currentEquity = this.calculateEquity();
-    const initialCapital = (this.state.initialBalance && this.state.initialBalance > 0) ? this.state.initialBalance : 1000;
-    const targetPct = this.state.accumulationTargetPercent || 3.0;
-
-    const cyclePnlPercent = ((currentEquity - initialCapital) / initialCapital) * 100;
-
-    if (cyclePnlPercent >= targetPct) {
-      if (Array.isArray(this.state.positions) && this.state.positions.length > 0) {
-        for (const pos of [...this.state.positions]) {
-          this.executeTrade(pos.symbol, 'SELL', pos.currentPrice || pos.entryPrice, pos.amount);
+  public async closeAllPositionsForProtection() {
+    const positions = [...(this.state.positions || [])];
+    for (const pos of positions) {
+      if (pos.amount > 0) {
+        const livePrice = pos.currentPrice || pos.entryPrice;
+        try {
+          await this.executeTrade(pos.symbol, 'SELL', livePrice, pos.amount, {
+            notes: 'Protecție automată a capitalului (Trailing Protection)'
+          });
+        } catch (err) {
+          console.error(`[closeAllPositionsForProtection Error] ${pos.symbol}:`, err);
         }
       }
+    }
 
-      const finalCash = this.state.balance;
-      const profitToConserve = parseFloat((finalCash - initialCapital).toFixed(2));
+    // Also close external positions (e.g. Momentum PaperTrader)
+    if (this.externalPositionsCloseProvider) {
+      try {
+        await this.externalPositionsCloseProvider('Equity Trailing Protection');
+      } catch (err) {
+        console.error('[closeAllPositionsForProtection external Error]', err);
+      }
+    }
+  }
 
-      if (profitToConserve > 0) {
-        this.state.accumulationBalance = parseFloat(((this.state.accumulationBalance || 0) + profitToConserve).toFixed(2));
-        this.state.balance = initialCapital;
-        this.state.sessionCycleCount = (this.state.sessionCycleCount || 1) + 1;
+  public checkCircuitBreaker(): boolean {
+    const equity = this.calculateEquity();
+    const initBal = (this.state.initialBalance && this.state.initialBalance > 0) ? this.state.initialBalance : 250;
 
-        const cycleNum = this.state.sessionCycleCount - 1;
-        const logMsg = `🛡️ [CONSERVARE CÂȘTIG ${targetPct}%] Țintă atinsă! Profitul de +${profitToConserve.toFixed(2)} USDT a fost salvat în Soldul "Acumulare" (Total Acumulat: ${this.state.accumulationBalance.toFixed(2)} USDT). Ciclul #${this.state.sessionCycleCount} reîncepe cu capitalul inițial de ${initialCapital.toFixed(2)} USDT.`;
+    // Equity Trailing / Capital Protection Check (Risk Engine Level)
+    if (this.state.equityProtectionConfig && this.state.equityProtectionConfig.enabled) {
+      const config = this.state.equityProtectionConfig;
+      if (!config.highWaterMark || config.highWaterMark < initBal) {
+        config.highWaterMark = initBal;
+      }
+      // If HWM is absurdly higher than equity (e.g. from an old bug), pull it down.
+      if (config.highWaterMark > equity + 50) {
+         config.highWaterMark = equity;
+      }
+      if (equity > config.highWaterMark) {
+        config.highWaterMark = equity;
+      }
 
-        this.addLog(logMsg, 'success', this.state.balance);
+      const trailingPct = config.trailingDistancePct ?? 0.40;
+      const profitThresholdPct = (config.profitThresholdPct !== undefined && config.profitThresholdPct !== null)
+        ? config.profitThresholdPct
+        : 0.80;
 
-        const telegramMsg = `🏦 **[G&S-Trade-Bot 24/7] Ciclul #${cycleNum} Finalizat & Profit Conservat (+${cyclePnlPercent.toFixed(2)}%)**\n\n` +
-          `• **Profit Transferat în Acumulare:** +${profitToConserve.toFixed(2)} USDT\n` +
-          `• **Sold Total "Acumulare":** ${this.state.accumulationBalance.toFixed(2)} USDT\n` +
-          `• **Ciclu Nou (#${this.state.sessionCycleCount}):** Capital reînceput cu ${initialCapital.toFixed(2)} USDT`;
+      // Trailing protection only arms once High-Water Mark reaches the minimum profit threshold
+      // E.g. with initBal = $1000 and profitThresholdPct = 0.80%, HWM must reach >= $1008 before trailing kicks in
+      const minRequiredHwm = initBal * (1 + Math.max(0, profitThresholdPct) / 100);
+      const isArmed = config.highWaterMark >= minRequiredHwm;
+      const protectionThreshold = config.highWaterMark * (1 - trailingPct / 100);
 
+      // Trigger ONLY when armed (profit reached) and equity retreats below protectionThreshold
+      if (isArmed && equity < protectionThreshold && !config.isLocked && this.state.autoTradingActive) {
+        config.isLocked = true;
+        this.state.autoTradingActive = false;
+        this.state.circuitBreakerTriggered = true;
+        const reason = `🛡️ [EQUITY TRAILING PROTECTION] HWM: ${config.highWaterMark.toFixed(2)} | Equity: ${equity.toFixed(2)} (Scădere > ${trailingPct}% după profit > ${profitThresholdPct}%). Poziții închise și auto-trading oprit.`;
+        this.state.circuitBreakerReason = reason;
+
+        this.addLog(`[EQUITY TRAILING PROTECTION] Prag trailing atins! HWM: ${config.highWaterMark.toFixed(2)}, Curent: ${equity.toFixed(2)} (Drop > ${trailingPct}% după profit > ${profitThresholdPct}%). Auto-trading blocat și poziții închise pentru protecția câștigurilor.`, 'warning', equity);
+        db.logEvent('EQUITY_TRAILING_ACTIVATED', { highWaterMark: config.highWaterMark, equity, trailingPct, profitThresholdPct, threshold: protectionThreshold }, undefined, 'RiskEngine', 'EMERGENCY');
+
+        this.closeAllPositionsForProtection();
+
+        const telegramMsg = `🛡️ **[EQUITY TRAILING PROTECTION ACTIVAT]**\n\n` +
+          `Sistemul a securizat profitul după atingerea pragului de activare (+${profitThresholdPct}%).\n\n` +
+          `• **High-Water Mark (Vârf):** ${config.highWaterMark.toFixed(2)} USDT\n` +
+          `• **Equity Curent:** ${equity.toFixed(2)} USDT\n` +
+          `• **Trailing Prag:** ${trailingPct}%\n` +
+          `• **Prag Minim Profit:** +${profitThresholdPct}%\n` +
+          `• **Acțiune:** Toate pozițiile au fost închise la piață și profitul net a fost securizat în balanță.`;
         this.sendNotification(telegramMsg);
         this.savePersistedState();
         return true;
       }
     }
-    return false;
-  }
-
-  public consolidateAccumulation(): { success: boolean; profitConserved: number; accumulationBalance: number } {
-    const currentEquity = this.calculateEquity();
-    const initialCapital = (this.state.initialBalance && this.state.initialBalance > 0) ? this.state.initialBalance : 1000;
-
-    if (Array.isArray(this.state.positions) && this.state.positions.length > 0) {
-      for (const pos of [...this.state.positions]) {
-        this.executeTrade(pos.symbol, 'SELL', pos.currentPrice || pos.entryPrice, pos.amount);
-      }
-    }
-
-    const finalCash = this.state.balance;
-    const profitToConserve = parseFloat((finalCash - initialCapital).toFixed(2));
-
-    if (profitToConserve <= 0) {
-      return { success: false, profitConserved: 0, accumulationBalance: this.state.accumulationBalance || 0 };
-    }
-
-    this.state.accumulationBalance = parseFloat(((this.state.accumulationBalance || 0) + profitToConserve).toFixed(2));
-    this.state.balance = initialCapital;
-    this.state.sessionCycleCount = (this.state.sessionCycleCount || 1) + 1;
-
-    const cycleNum = this.state.sessionCycleCount - 1;
-    this.addLog(`🔒 [CONSERVARE MANUALĂ] Câștigul de +${profitToConserve.toFixed(2)} USDT din Ciclul #${cycleNum} a fost salvat în Soldul "Acumulare" (Total Acumulat: ${this.state.accumulationBalance.toFixed(2)} USDT). Ciclul #${this.state.sessionCycleCount} reîncepe cu ${initialCapital.toFixed(2)} USDT.`, 'success', this.state.balance);
-
-    this.sendNotification(
-      `🔒 **[G&S-Trade-Bot] Consolidează Profit în Acumulare**\n\n` +
-      `• **Profit Transferat:** +${profitToConserve.toFixed(2)} USDT\n` +
-      `• **Sold Total "Acumulare":** ${this.state.accumulationBalance.toFixed(2)} USDT\n` +
-      `• **Nou Ciclu #${this.state.sessionCycleCount}:** Reîncepe cu ${initialCapital.toFixed(2)} USDT`
-    );
-
-    this.savePersistedState();
-    return { success: true, profitConserved: profitToConserve, accumulationBalance: this.state.accumulationBalance };
-  }
-
-  public resetAccumulationVault(): { success: boolean } {
-    const currentEq = this.calculateEquity();
-    this.state.accumulationBalance = 0;
-    this.state.sessionCycleCount = 1;
-    if (currentEq > 0) {
-      this.state.initialBalance = currentEq;
-    } else {
-      this.state.initialBalance = this.state.balance || 250;
-    }
-    this.addLog(`🏦 Soldul "Acumulare" a fost resetat la $0.00 USDT. Ciclul de acumulare re-ancorat la $${this.state.initialBalance.toFixed(2)} USDT.`, 'info');
-    this.savePersistedState(true);
-    return { success: true };
-  }
-
-  public checkCircuitBreaker(): boolean {
-    // 1. Check Accumulation Target (+3% cycle profit rule)
-    this.checkAccumulationTarget();
-
-    const equity = this.calculateEquity();
     const initial = (this.state.initialBalance && this.state.initialBalance > 0) ? this.state.initialBalance : 250;
     const pnlPercent = ((equity - initial) / initial) * 100;
 
@@ -1501,23 +1485,18 @@ class ServerBotEngine {
     this.state.autoTradingActive = true;
     const currentEquity = this.calculateEquity();
     this.state.initialBalance = currentEquity > 0 ? currentEquity : 250;
-    this.addLog(`[CIRCUIT BREAKER RESETAT] Circuit breaker eliberat. Capital re-ancorat la $${this.state.initialBalance.toFixed(2)} USDT. Auto-trading reluat.`, 'info', this.state.initialBalance);
+    
+    // Also reset Equity Trailing protection state
+    if (this.state.equityProtectionConfig) {
+      this.state.equityProtectionConfig.isLocked = false;
+      this.state.equityProtectionConfig.highWaterMark = currentEquity > 0 ? currentEquity : 250;
+    }
+
+    this.addLog(`[CIRCUIT BREAKER RESETAT] Circuit breaker și Equity Trailing eliberate. Capital re-ancorat la ${this.state.initialBalance.toFixed(2)} USDT. Auto-trading reluat.`, 'info', this.state.initialBalance);
     this.savePersistedState();
   }
 
   public updateConfig(newConfig: Partial<BotState>) {
-    if (newConfig.accumulationTargetPercent !== undefined) {
-      this.state.accumulationTargetPercent = Math.max(0.5, Math.min(50, Number(newConfig.accumulationTargetPercent)));
-    }
-    if (newConfig.accumulationTargetEnabled !== undefined) {
-      this.state.accumulationTargetEnabled = Boolean(newConfig.accumulationTargetEnabled);
-    }
-    if (newConfig.accumulationBalance !== undefined) {
-      this.state.accumulationBalance = Math.max(0, Number(newConfig.accumulationBalance));
-    }
-    if (newConfig.sessionCycleCount !== undefined) {
-      this.state.sessionCycleCount = Math.max(1, Number(newConfig.sessionCycleCount));
-    }
     if (newConfig.autoTradingActive !== undefined) {
       const isStarting = Boolean(newConfig.autoTradingActive);
       this.state.autoTradingActive = isStarting;
@@ -1525,6 +1504,10 @@ class ServerBotEngine {
         this.state.circuitBreakerTriggered = false;
         this.state.circuitBreakerReason = null;
         const currentEq = this.calculateEquity();
+        if (this.state.equityProtectionConfig) {
+           this.state.equityProtectionConfig.isLocked = false;
+           this.state.equityProtectionConfig.highWaterMark = currentEq > 0 ? currentEq : 250;
+        }
         if (currentEq > 0) {
           this.state.initialBalance = currentEq;
         }
@@ -1563,10 +1546,15 @@ class ServerBotEngine {
     if (newConfig.enableMaxNegativeHold !== undefined) {
       if (this.state.scalpingConfig) this.state.scalpingConfig.enableMaxNegativeHold = Boolean(newConfig.enableMaxNegativeHold);
     }
-    if (newConfig.executionEngine !== undefined && ['both', 'grid', 'scalping'].includes(newConfig.executionEngine)) {
+    if (newConfig.executionEngine !== undefined && ['both', 'grid', 'scalping', 'momentum', 'none'].includes(newConfig.executionEngine)) {
       this.state.executionEngine = newConfig.executionEngine;
-      const modeLabel = newConfig.executionEngine === 'both' ? 'HIBRID (Grid + Scalping)' : (newConfig.executionEngine === 'grid' ? 'DOAR GRID' : 'DOAR SCALPING');
+      const modeLabel = newConfig.executionEngine === 'both' 
+        ? 'AMBELE ACTIVE (Scalping ML + Momentum Breakout)' 
+        : (newConfig.executionEngine === 'momentum' 
+            ? 'DOAR MOMENTUM BREAKOUT' 
+            : (newConfig.executionEngine === 'scalping' ? 'DOAR SCALPING ML' : 'OPRIT (NICIUNUL)'));
       this.addLog(`[Motor Execuție Modificat ⚙️] Modul de execuție a fost schimbat pe: ${modeLabel}.`, 'info');
+      this.savePersistedState(true);
     }
     if (newConfig.mlModelType !== undefined && ['rf', 'tcn', 'both'].includes(newConfig.mlModelType)) {
       // FIX: 'tcn'/'both' never actually selected a different model (ml.ts never read
@@ -1755,7 +1743,10 @@ class ServerBotEngine {
 
   public async syncBinanceBalance() {
     if (this.state.binanceMode === 'paper') {
-      return { success: true, mode: 'paper', balance: this.state.balance };
+      const paperBal = this.state.balance || 0;
+      const paperPositions = this.state.positions || [];
+      await tradingEngine.reconcile(paperPositions, paperBal, { USDT: paperBal }, paperPositions);
+      return { success: true, mode: 'paper', balance: paperBal };
     }
 
     const mode = this.state.binanceMode;
@@ -1880,9 +1871,11 @@ class ServerBotEngine {
     this.state.logs = [];
     this.state.circuitBreakerTriggered = false;
     this.state.circuitBreakerReason = null;
-    this.state.accumulationBalance = 0;
-    this.state.sessionCycleCount = 1;
-    this.addLog(`Portofoliu resetat la $${newBalance} pe server. Sold Acumulare resetat.`, 'warning');
+    if (this.state.equityProtectionConfig) {
+      this.state.equityProtectionConfig.isLocked = false;
+      this.state.equityProtectionConfig.highWaterMark = newBalance;
+    }
+    this.addLog(`Portofoliu resetat la $${newBalance} pe server. `, 'warning');
     this.savePersistedState(true);
   }
 
@@ -2093,28 +2086,11 @@ class ServerBotEngine {
                 `• Capital Inițial: ${this.state.initialBalance.toFixed(2)}\n` +
                 `• Capital Curent: ${equity.toFixed(2)}\n` +
                 `• Balanță Liberă (Cash): ${this.state.balance.toFixed(2)}\n` +
-                `• 🏦 Sold "Acumulare": ${(this.state.accumulationBalance || 0).toFixed(2)} USDT\n` +
-                `• Ciclu Activ: #${this.state.sessionCycleCount || 1}\n` +
                 `• Profit / Pierdere: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} (${pnl >= 0 ? '+' : ''}${pnlPct}%)\n` +
                 `• Tranzacții Executate: ${this.state.totalTradesExecuted || 0}`;
         break;
       }
 
-      case '/acumulare':
-      case '/vault': {
-        const accumBal = (this.state.accumulationBalance || 0).toFixed(2);
-        const cycle = this.state.sessionCycleCount || 1;
-        const target = this.state.accumulationTargetPercent || 3.0;
-        const enabled = this.state.accumulationTargetEnabled !== false ? '✅ ACTIVATĂ' : '❌ DEZACTIVATĂ';
-
-        reply = `<b>🏦 Sold "Acumulare" (Profit Conservat)</b>\n\n` +
-                `• <b>Total Profit Salvat:</b> ${accumBal} USDT\n` +
-                `• <b>Ciclu Activ:</b> #${cycle}\n` +
-                `• <b>Țintă Profit Conservare:</b> +${target}%\n` +
-                `• <b>Automatizare Regulă:</b> ${enabled}\n\n` +
-                `<i>La atingeria țintei de +${target}% per ciclu, profitul este extras automat în Soldul "Acumulare", iar tranzacționarea se reia de la capitalul inițial.</i>`;
-        break;
-      }
 
       case '/position':
       case '/positions':
@@ -2561,9 +2537,7 @@ class ServerBotEngine {
               orderSuccess = true;
               this.consecutiveApiErrors = 0; // Reset error counter
 
-              if (realFreeUSDT !== null) {
-                this.state.balance = realFreeUSDT;
-              }
+              // Skipped setting balance to realFreeUSDT because it is the PRE-TRADE balance.
               logger.info(`[Binance Executed ${order.status}] ${action} ${symbol}: ${actualExecutedQty} @ $${actualEntryPrice.toFixed(4)} (Fee: $${actualFee.toFixed(4)})`);
             } else {
               orderSuccess = false;
@@ -2669,9 +2643,8 @@ class ServerBotEngine {
           } as any);
         }
 
-        if (this.state.binanceMode !== 'live') {
-          this.state.balance = Math.max(0, this.state.balance - actualDeductCost - finalFee);
-        }
+        // Deduct balance locally for all modes so Equity remains correct
+        this.state.balance = Math.max(0, this.state.balance - actualDeductCost - finalFee);
         this.state.totalTradesExecuted += 1;
 
         journalService.addJournalEntry({
@@ -2879,49 +2852,6 @@ class ServerBotEngine {
     }, 0);
     const externalVal = this.externalPositionsValueProvider ? this.externalPositionsValueProvider() : 0;
     return parseFloat((this.state.balance + positionsValue + externalVal).toFixed(2));
-  }
-
-  public checkEquityCycleProtection() {
-    if (!this.state.equityProtectionConfig?.enabled) return;
-
-    const currentEquity = this.calculateEquity();
-    const initial = this.state.initialBalance || 250;
-    
-    // Initialize cycleStartEquity if not set
-    if (this.state.cycleStartEquity === undefined) {
-        this.state.cycleStartEquity = initial;
-    }
-    
-    const profitPct = (currentEquity - this.state.cycleStartEquity) / this.state.cycleStartEquity;
-    const profitThreshold = (this.state.equityProtectionConfig?.profitThresholdPct || 0.6) / 100;
-
-    if (profitPct >= profitThreshold) {
-       this.triggerProfitLockAndReset('Equity Cycle Profit Target Reached');
-    }
-  }
-
-  private triggerProfitLockAndReset(reason: string) {
-      const currentEquity = this.calculateEquity();
-      const initial = this.state.initialBalance || 250;
-      
-      const profit = currentEquity - initial;
-      if (profit > 0) {
-          this.state.protectedPiggyBank = (this.state.protectedPiggyBank || 0) + profit;
-          this.addLog(`[PUȘCULIȚĂ 🐖] Prag atins! Profit de $${profit.toFixed(2)} mutat în pușculiță. Total pusculită: $${this.state.protectedPiggyBank.toFixed(2)}`, 'success');
-      }
-
-      this.addLog(`[ECP BLOCARE PROFIT 🛡️] ${reason}. Se resetează ciclul la capitalul inițial $${initial.toFixed(2)}.`, 'warning');
-      this.state.positions = [];
-      this.state.balance = initial;
-      this.state.isEquityProtectionActivated = false;
-      this.state.currentCyclePeakEquity = undefined;
-      this.state.cycleStartEquity = initial;
-      this.state.sessionCycleCount = (this.state.sessionCycleCount || 1) + 1;
-      this.savePersistedState();
-  }
-
-  private triggerProtectionClose(reason: string) {
-      this.triggerProfitLockAndReset(reason);
   }
 
   public async cleanupDelistedAssets(): Promise<Set<string>> {
@@ -3418,12 +3348,12 @@ class ServerBotEngine {
       this.isLoopRunning = true;
 
       try {
+        this.checkCircuitBreaker();
         this.secondsCounter += 5;
         this.state.lastCheckAt = new Date().toISOString();
 
         // Check prices every 5s loop (always update prices continuously)
         await this.checkPricesAndSLTP();
-        this.checkEquityCycleProtection();
 
         // Run ML analysis according to analysisInterval (always update AI signals)
         if (this.secondsCounter % Math.max(10, this.state.analysisInterval) === 0) {
@@ -3433,6 +3363,9 @@ class ServerBotEngine {
         // Check reports every minute
         if (this.secondsCounter % 60 === 0) {
           this.checkAndSendReports();
+          if (this.state.binanceMode === 'live' || this.state.binanceMode === 'testnet') {
+             this.syncBinanceBalance().catch(() => {});
+          }
         }
 
         // Periodic Automatic Heartbeat Log every 3 minutes (180s)
@@ -4020,7 +3953,8 @@ class ServerBotEngine {
       }
 
       // Auto-replenish paper/testnet trading capital if balance depleted and no positions held
-      if ((this.state.binanceMode === 'paper' || this.state.binanceMode === 'testnet') && this.state.balance < 9.5 && this.state.positions.length === 0) {
+      const hasAnyPositions = this.state.positions.length > 0 || (this.externalPositionsValueProvider ? this.externalPositionsValueProvider() > 0 : false);
+      if ((this.state.binanceMode === 'paper' || this.state.binanceMode === 'testnet') && this.state.balance < 9.5 && !hasAnyPositions && this.calculateEquity() < 9.5) {
         const replenishAmt = (this.state.initialBalance && this.state.initialBalance >= 10) ? this.state.initialBalance : 300;
         this.state.balance = replenishAmt;
         this.state.initialBalance = replenishAmt;
@@ -4136,9 +4070,9 @@ class ServerBotEngine {
         logger.warn(`[Smart Grid Analysis Warning] ${gridErr}`);
       }
 
-      // Phase 2: Sequential Execution of Scalping Signals (bypassed if executionEngine is 'grid')
+      // Phase 2: Sequential Execution of Scalping Signals (bypassed if executionEngine is 'grid', 'momentum', or 'none')
       const execEngine = this.state.executionEngine || 'both';
-      if (execEngine !== 'grid') {
+      if (execEngine !== 'grid' && execEngine !== 'momentum' && execEngine !== 'none') {
         for (const { item, currentPrice, signal, mlRes, oppScore, oppInfo, fullSignalObj } of itemsWithSignals) {
           if (!signal || currentPrice <= 0) continue;
 

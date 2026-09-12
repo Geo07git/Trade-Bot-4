@@ -6,6 +6,7 @@ import { fetchActiveTickers } from './MultiExchangeMarket';
 import { calculateMomentumScore } from './Scorer';
 import { journalService } from '../JournalService';
 import { MomentumConfig } from './types';
+import { db } from '../../engine/database/Database';
 
 export interface PositionSnapshot {
   timestamp: number;
@@ -147,6 +148,40 @@ export class PaperTrader {
       this.log('Reactivating paper trading from state...');
       this.start(this.state.intervalMinutes);
     }
+
+    this.syncExistingPositionsToAudit();
+  }
+
+  public syncExistingPositionsToAudit() {
+    try {
+      const existingEvents = db.getAuditEvents({ limit: 500 }).events;
+      const loggedPosIds = new Set(
+        existingEvents
+          .filter(e => e.eventType === 'POSITION_OPENED' && e.details?.orderId)
+          .map(e => e.details.orderId)
+      );
+
+      for (const pos of this.state.positions || []) {
+        if (pos.status === 'OPEN' && !loggedPosIds.has(pos.id)) {
+          db.logEvent('POSITION_OPENED', {
+            orderId: pos.id,
+            symbol: pos.symbol,
+            side: 'BUY',
+            entryPrice: pos.entryPrice,
+            sizeUSDT: pos.sizeUSDT,
+            amount: pos.sizeUSDT / pos.entryPrice,
+            feePaid: pos.feePaid,
+            scoreAtEntry: pos.scoreAtEntry,
+            trailingActivationPct: this.state.trailingActivationPct,
+            trailingDistancePct: this.state.trailingDistancePct,
+            hardStopLossPct: this.state.hardStopLossPct,
+            entryReason: `Scor Momentum: ${(pos.scoreAtEntry || 60).toFixed(1)}/100 (Momentum Breakout Active Position)`
+          }, pos.symbol, 'MomentumBreakout', 'BUY').catch(() => {});
+        }
+      }
+    } catch (err) {
+      console.error('[PaperTrader] syncExistingPositionsToAudit error:', err);
+    }
   }
 
   private deduplicateHistory(history: PaperPosition[]): PaperPosition[] {
@@ -253,46 +288,60 @@ export class PaperTrader {
     }
   }
 
+  private onBalanceChange?: (newBalance: number) => void;
+  private onPositionChange?: () => void;
+
+  public setOnBalanceChange(cb: (newBalance: number) => void) {
+    this.onBalanceChange = cb;
+  }
+
+  public setOnPositionChange(cb: () => void) {
+    this.onPositionChange = cb;
+  }
+
+  private notifyPositionChange() {
+    if (this.onPositionChange) {
+      try {
+        this.onPositionChange();
+      } catch (e) {
+        console.error('[PaperTrader onPositionChange Error]', e);
+      }
+    }
+  }
+
   public setExternalPositionChecker(checker: (symbol: string) => boolean) {
     this.externalPositionChecker = checker;
   }
 
-  private externalBalanceHandler: {
-    getBalance: () => number;
-    deduct: (amount: number) => void;
-    refund: (amount: number) => void;
-  } | null = null;
+  private executionEngineChecker?: () => string;
 
-  public setExternalBalanceHandler(handler: {
-    getBalance: () => number;
-    deduct: (amount: number) => void;
-    refund: (amount: number) => void;
-  }) {
-    this.externalBalanceHandler = handler;
+  public setExecutionEngineChecker(checker: () => string) {
+    this.executionEngineChecker = checker;
   }
 
   public getEffectiveBalance(): number {
-    if (this.externalBalanceHandler) {
-      return this.externalBalanceHandler.getBalance();
-    }
     return this.state.paperBalanceUSDT;
   }
 
   public deductCapital(amount: number) {
-    if (this.externalBalanceHandler) {
-      this.externalBalanceHandler.deduct(amount);
-      this.state.paperBalanceUSDT = this.externalBalanceHandler.getBalance();
-    } else {
-      this.state.paperBalanceUSDT = Math.max(0, parseFloat((this.state.paperBalanceUSDT - amount).toFixed(4)));
+    this.state.paperBalanceUSDT = Math.max(0, parseFloat((this.state.paperBalanceUSDT - amount).toFixed(4)));
+    if (this.onBalanceChange) {
+      try {
+        this.onBalanceChange(this.state.paperBalanceUSDT);
+      } catch (e) {
+        console.error('[PaperTrader onBalanceChange Error]', e);
+      }
     }
   }
 
   public refundCapital(amount: number) {
-    if (this.externalBalanceHandler) {
-      this.externalBalanceHandler.refund(amount);
-      this.state.paperBalanceUSDT = this.externalBalanceHandler.getBalance();
-    } else {
-      this.state.paperBalanceUSDT = parseFloat((this.state.paperBalanceUSDT + amount).toFixed(4));
+    this.state.paperBalanceUSDT = parseFloat((this.state.paperBalanceUSDT + amount).toFixed(4));
+    if (this.onBalanceChange) {
+      try {
+        this.onBalanceChange(this.state.paperBalanceUSDT);
+      } catch (e) {
+        console.error('[PaperTrader onBalanceChange Error]', e);
+      }
     }
   }
 
@@ -347,9 +396,6 @@ export class PaperTrader {
 
   public getState(): PaperState {
     this.enforceMaxOnePositionPerCoin();
-    if (this.externalBalanceHandler) {
-      this.state.paperBalanceUSDT = this.externalBalanceHandler.getBalance();
-    }
     if (this.state.history) {
       this.state.history = this.deduplicateHistory(this.state.history);
     }
@@ -357,6 +403,19 @@ export class PaperTrader {
   }
 
   public resetState(newBalance = 1000) {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    if (this.hourTimer) {
+      clearInterval(this.hourTimer);
+      this.hourTimer = null;
+    }
+    if (this.positionTimer) {
+      clearInterval(this.positionTimer);
+      this.positionTimer = null;
+    }
+
     const minScore = this.state.minMomentumScore ?? 50;
     const interval = this.state.intervalMinutes ?? 15;
     const trailingAct = this.state.trailingActivationPct ?? 3.0;
@@ -386,7 +445,14 @@ export class PaperTrader {
       logs: []
     };
     this.saveState();
-    this.log('Simulatorul a fost resetat la $1,000 cu regulile de Hard Stop (-50% / +100%) rearmate.');
+    if (this.onBalanceChange) {
+      try {
+        this.onBalanceChange(newBalance);
+      } catch (e) {
+        console.error('[PaperTrader onBalanceChange Error]', e);
+      }
+    }
+    this.log(`Simulatorul a fost resetat la $${newBalance} cu pozițiile închise și regulile de Hard Stop (-50% / +100%) rearmate.`);
   }
 
   public setConfig(options: {
@@ -515,6 +581,18 @@ export class PaperTrader {
     this.log(`Paper trading started with interval ${intervalMinutes}m (min score: ${this.config.minMomentumScore}, Trailing: +${this.state.trailingActivationPct}% / -${this.state.trailingDistancePct}%, SL: -${this.state.hardStopLossPct}%, MaxHold: ${this.state.maxHoldMinutes}m).`);
     this.saveState();
 
+    try {
+      db.logEvent('ENGINE_STARTED', {
+        strategy: 'MomentumBreakout',
+        intervalMinutes,
+        minMomentumScore: this.config.minMomentumScore,
+        trailingActivationPct: this.state.trailingActivationPct,
+        trailingDistancePct: this.state.trailingDistancePct,
+        hardStopLossPct: this.state.hardStopLossPct,
+        maxHoldMinutes: this.state.maxHoldMinutes
+      }, undefined, 'MomentumBreakout', 'START').catch(() => {});
+    } catch (e) {}
+
     // Run main signal scan cycle immediately once, then schedule
     this.runCycle();
     this.timer = setInterval(() => {
@@ -550,6 +628,13 @@ export class PaperTrader {
     this.state.active = false;
     this.log('Paper trading stopped.');
     this.saveState();
+
+    try {
+      db.logEvent('ENGINE_STOPPED', {
+        strategy: 'MomentumBreakout',
+        reason: 'Operator stopped or circuit breaker triggered'
+      }, undefined, 'MomentumBreakout', 'STOP').catch(() => {});
+    } catch (e) {}
   }
 
   /**
@@ -592,6 +677,16 @@ export class PaperTrader {
       const initialTrailingStop = (pos.highestPrice || currentPrice) * (1 - trailingDistance / 100);
       pos.trailingStopPrice = initialTrailingStop;
       this.log(`[TRAILING ACTIVE 🎯] ${pos.symbol} a atins pragul de activare (+${trailingActivation.toFixed(1)}%). Trailing Stop fixat la $${initialTrailingStop.toFixed(4)} (-${trailingDistance.toFixed(1)}% față de vârf $${(pos.highestPrice || currentPrice).toFixed(4)}).`);
+
+      try {
+        db.logEvent('MOMENTUM_TRAILING_ACTIVATED', {
+          symbol: pos.symbol,
+          activationPct: trailingActivation,
+          trailingDistancePct: trailingDistance,
+          peakPrice: pos.highestPrice || currentPrice,
+          trailingStopPrice: initialTrailingStop
+        }, pos.symbol, 'MomentumBreakout', 'UPDATE').catch(() => {});
+      } catch (e) {}
     }
 
     // Update trailing stop level if price moves higher while trailing is active
@@ -685,11 +780,33 @@ export class PaperTrader {
         modelName: 'Momentum Breakout',
         entryReason: reasonLabel,
         mode: 'paper',
-          timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString()
       });
     } catch (err) {
       console.error('[PaperTrader] Failed to log sell journal entry:', err);
     }
+
+    try {
+      db.logEvent('POSITION_CLOSED', {
+        positionId: pos.id,
+        symbol: pos.symbol,
+        side: 'SELL',
+        entryPrice: pos.entryPrice,
+        exitPrice: exitPrice,
+        sizeUSDT: pos.sizeUSDT,
+        grossPnL: grossPnlUsdt,
+        realizedPnL: netPnL,
+        realizedPnLPct: pos.realizedPnLPct,
+        totalFees: totalFees,
+        exitReason: reasonLabel,
+        durationMinutes: elapsedMinutes,
+        mfe: pos.maxFavorableExcursion,
+        mae: pos.maxAdverseExcursion
+      }, pos.symbol, 'MomentumBreakout', 'SELL').catch(() => {});
+    } catch (err) {
+      console.error('[PaperTrader] Failed to log audit POSITION_CLOSED:', err);
+    }
+    this.notifyPositionChange();
   }
 
   private async updatePositionsFast() {
@@ -863,6 +980,12 @@ export class PaperTrader {
     if (!this.state.active) return;
     if (this.checkHardStopCircuitBreaker()) return;
 
+    const currentEngine = this.executionEngineChecker ? this.executionEngineChecker() : 'both';
+    if (currentEngine === 'scalping' || currentEngine === 'none') {
+      this.log(`[Momentum Breakout] Modul de execuție activ este ${currentEngine === 'none' ? 'OPRIT (NONE)' : 'DOAR SCALPING ML'}. Sărit deschiderea de poziții noi.`);
+      return;
+    }
+
     if (this.isScanning) {
       this.log('Un ciclu de scanare este deja în desfășurare. Se evită execuția concurentă.');
       return;
@@ -998,6 +1121,26 @@ export class PaperTrader {
             console.error('[PaperTrader] Failed to log buy journal entry:', err);
           }
 
+          try {
+            db.logEvent('POSITION_OPENED', {
+              orderId: newPos.id,
+              symbol: newPos.symbol,
+              side: 'BUY',
+              entryPrice: newPos.entryPrice,
+              sizeUSDT: newPos.sizeUSDT,
+              amount: newPos.sizeUSDT / newPos.entryPrice,
+              feePaid: newPos.feePaid,
+              scoreAtEntry: scores.momentumScore,
+              trailingActivationPct: this.state.trailingActivationPct,
+              trailingDistancePct: this.state.trailingDistancePct,
+              hardStopLossPct: this.state.hardStopLossPct,
+              entryReason: `Scor Momentum: ${scores.momentumScore.toFixed(1)}/100 (RVOL: ${scores.rvol_current.toFixed(2)}, ATR: ${scores.atrExpansion.toFixed(2)})`
+            }, newPos.symbol, 'MomentumBreakout', 'BUY').catch(() => {});
+          } catch (err) {
+            console.error('[PaperTrader] Failed to log audit POSITION_OPENED:', err);
+          }
+          this.notifyPositionChange();
+
           // Immediate initial hour snapshot
           const initialSnapshot: PositionSnapshot = {
             timestamp: now,
@@ -1063,6 +1206,31 @@ export class PaperTrader {
     }
     this.saveState();
     return pos;
+  }
+
+  /**
+   * Closes all open paper positions immediately (e.g. for Risk Engine / Equity Trailing Protection).
+   */
+  public async closeAllPositions(reason: string = 'PROTECTION'): Promise<number> {
+    const openPositions = [...this.state.positions.filter(p => p.status === 'OPEN')];
+    let closedCount = 0;
+    for (const pos of openPositions) {
+      try {
+        await this.closePositionManual(pos.id);
+        closedCount++;
+      } catch (err: any) {
+        console.error(`[PaperTrader] Eroare la închiderea de protecție a poziției ${pos.symbol}:`, err?.message || err);
+      }
+    }
+    this.log(`[PROTECTION 🛡️] Au fost închise toate cele ${closedCount} poziții deschise (${reason}).`);
+    try {
+      db.logEvent('EMERGENCY_CLOSE_ALL', {
+        reason: reason || 'Risk Engine triggered',
+        closedCount
+      }, undefined, 'RiskEngine', 'EMERGENCY').catch(() => {});
+    } catch (e) {}
+    this.notifyPositionChange();
+    return closedCount;
   }
 }
 

@@ -20,58 +20,88 @@ async function startServer() {
 
   app.use(express.json());
 
-  // Strict Rule: Maximum 1 position / transaction per coin across all engines
+  // Cross-Engine Safety: Maximum 1 position / transaction per coin across all engines
   botEngine.setExternalPositionChecker((symbol: string) => {
-    return paperTrader.getState().positions.some(p => p.symbol === symbol && p.status === 'OPEN');
+    return (paperTrader.getState().positions || []).some(p => p.symbol === symbol && p.status === 'OPEN');
   });
 
   paperTrader.setExternalPositionChecker((symbol: string) => {
     return (botEngine.state.positions || []).some(p => p.symbol === symbol && p.amount > 0);
   });
 
-  // Strict Capital Accounting: Momentum trades deduct from & refund to the shared bot capital
-  paperTrader.setExternalBalanceHandler({
-    getBalance: () => botEngine.state.balance,
-    deduct: (amount: number) => {
-      botEngine.state.balance = Math.max(0, parseFloat((botEngine.state.balance - amount).toFixed(4)));
-      botEngine.savePersistedState(true);
-    },
-    refund: (amount: number) => {
-      botEngine.state.balance = parseFloat((botEngine.state.balance + amount).toFixed(4));
-      botEngine.savePersistedState(true);
-    }
-  });
-
-  // Reconcile existing open momentum positions into botEngine.state.balance if legacy state hadn't deducted them
-  try {
-    const openPaperPositions = paperTrader.getState().positions?.filter(p => p.status === 'OPEN') || [];
-    const totalOpenMomentumCost = openPaperPositions.reduce((acc, p) => acc + (p.sizeUSDT || 0) + (p.feePaid || 0), 0);
-    const botPositionsMargin = (botEngine.state.positions || []).reduce((acc, p) => {
-      if (!p.amount) return acc;
-      const lev = p.leverage || 1;
-      return acc + (p.margin || ((p.entryPrice * p.amount) / lev));
-    }, 0);
-
-    // If bot balance plus bot margin is approximately the initial balance, it means momentum positions were never deducted
-    if (totalOpenMomentumCost > 0 && (botEngine.state.balance + botPositionsMargin) > (botEngine.state.initialBalance - 15)) {
-      console.log(`[Reconcile Capital] Deducting ${totalOpenMomentumCost.toFixed(2)} USDT of existing open momentum positions from bot capital.`);
-      botEngine.state.balance = Math.max(0, parseFloat((botEngine.state.balance - totalOpenMomentumCost).toFixed(4)));
-      botEngine.savePersistedState(true);
-    }
-  } catch (err) {
-    console.error('[Reconcile Capital Error]', err);
-  }
-
+  // Connect live positions equity provider so botEngine.calculateEquity() accounts for momentum paper positions
   botEngine.setExternalPositionsValueProvider(() => {
     const paperPositions = paperTrader.getState().positions || [];
     return paperPositions
       .filter(p => p.status === 'OPEN')
       .reduce((acc, p) => {
+        const amt = (p.sizeUSDT && p.entryPrice) ? p.sizeUSDT / p.entryPrice : 0;
         const curPrice = p.currentPrice || p.entryPrice;
-        const pnl = p.entryPrice > 0 ? ((curPrice - p.entryPrice) / p.entryPrice) * p.sizeUSDT : 0;
+        const pnl = amt > 0 ? (curPrice - p.entryPrice) * amt : 0;
         return acc + (p.sizeUSDT + pnl);
       }, 0);
   });
+
+  // Connect live positions close provider so Equity Trailing Protection closes momentum paper positions and stops trading
+  botEngine.setExternalPositionsCloseProvider(async (reason: string) => {
+    try {
+      await paperTrader.closeAllPositions(reason);
+      paperTrader.stop();
+    } catch (err) {
+      console.error('[server] Error closing paperTrader positions on protection trigger:', err);
+    }
+  });
+
+  // Link execution engine mode (both / scalping / momentum) to paperTrader
+  paperTrader.setExecutionEngineChecker(() => botEngine.state.executionEngine || 'both');
+
+  // Centralized reconciliation function ensuring Local vs Exchange / Paper states remain synchronized
+  const triggerReconciliation = async (forceAuditLog: boolean = false) => {
+    try {
+      const sanitized = getSanitizedBotState();
+      await tradingEngine.reconcile(
+        sanitized.positions,
+        sanitized.balance,
+        { USDT: sanitized.balance },
+        sanitized.positions,
+        forceAuditLog
+      );
+    } catch (e) {
+      console.warn('[server reconciliation warning]', e);
+    }
+  };
+
+  // Keep botEngine cash balance in sync when paperTrader deducts or refunds capital
+  paperTrader.setOnBalanceChange((newBalance: number) => {
+    botEngine.state.balance = newBalance;
+    botEngine.savePersistedState(true);
+    triggerReconciliation(false);
+  });
+
+  // Reconcile on position changes (open, close, manual close)
+  paperTrader.setOnPositionChange(() => {
+    triggerReconciliation(false);
+  });
+
+  // Reconcile and synchronize state between botEngine and paperTrader on startup
+  try {
+    const paperState = paperTrader.getState();
+    const openPaperPositions = (paperState.positions || []).filter(p => p.status === 'OPEN');
+    if (openPaperPositions.length > 0) {
+      console.log(`[Startup Sync] Sincronizare portofoliu: ${openPaperPositions.length} poziții deschise în Momentum Simulator. Balanță numerar: $${paperState.paperBalanceUSDT} USDT.`);
+      botEngine.state.balance = paperState.paperBalanceUSDT;
+      botEngine.state.initialBalance = paperState.startingBalanceUSDT || 1000;
+      botEngine.savePersistedState(true);
+    }
+    triggerReconciliation(true);
+  } catch (err) {
+    console.error('[Startup Sync Error]', err);
+  }
+
+  // Periodic Parity & Audit Heartbeat (runs 1 / oră to maintain clean audit logs without flooding)
+  setInterval(() => {
+    triggerReconciliation(false);
+  }, 60 * 60 * 1000);
 
   // Momentum Routers (Backtest & Paper Trading)
   app.use('/api/momentum-paper', momentumPaperRouter);
@@ -88,8 +118,8 @@ async function startServer() {
       botBalance: botEngine.state.balance,
       botPositionsCount: botEngine.state.positions?.length || 0
     });
-  });
 
+  });
   app.get('/api/engine/audit-events', (req, res) => {
     const { eventType, symbol, strategy, search, limit, offset, from, to } = req.query;
     const filter = {
@@ -108,8 +138,8 @@ async function startServer() {
       ...result,
       stats: db.getAuditStats()
     });
-  });
 
+  });
   app.post('/api/engine/audit-events/clear', (req, res) => {
     db.clearAuditEvents();
     res.json({ success: true, message: 'Audit events cleared' });
@@ -118,6 +148,7 @@ async function startServer() {
   app.post('/api/engine/reconcile', async (req, res) => {
     try {
       const syncResult = await botEngine.syncBinanceBalance();
+      await triggerReconciliation(true);
       const reconStatus = tradingEngine.getFullStatus().reconciliation;
       res.json({
         success: true,
@@ -137,8 +168,8 @@ async function startServer() {
       success: true,
       status: tradingEngine.getFullStatus()
     });
-  });
 
+  });
   app.post('/api/engine/kill-switch', async (req, res) => {
     const { reason } = req.body || {};
     botEngine.state.autoTradingActive = false;
@@ -147,8 +178,8 @@ async function startServer() {
       success: true,
       status: tradingEngine.getFullStatus()
     });
-  });
 
+  });
   app.post('/api/engine/resume', async (req, res) => {
     const { reason } = req.body || {};
     botEngine.state.autoTradingActive = true;
@@ -157,14 +188,30 @@ async function startServer() {
       success: true,
       status: tradingEngine.getFullStatus()
     });
-  });
 
+  });
   // Security helpers for Bot API
   function getSanitizedBotState() {
     const state = botEngine.state;
 
-    // Get open positions from Momentum PaperTrader
-    const paperPositions = paperTrader.getState().positions || [];
+    const botPositions = (state.positions || []).map(p => ({
+      ...p,
+      strategy: p.strategy || ((p as any)?.entryReason?.includes('Momentum') ? 'momentum' : ((p as any)?.entryReason?.includes('Manual') ? 'manual' : 'scalping'))
+    }));
+
+    // Invariantă P0: Maxim 1 tranzacție per monedă afișată și monitorizată
+    const seenSymbols = new Set<string>();
+    const uniqueBotPositions: any[] = [];
+    for (const p of botPositions) {
+      if (p.amount > 0 && !seenSymbols.has(p.symbol)) {
+        seenSymbols.add(p.symbol);
+        uniqueBotPositions.push(p);
+      }
+    }
+
+    // Include open positions from Momentum PaperTrader
+    const paperState = paperTrader.getState();
+    const paperPositions = paperState.positions || [];
     const openMomentumPositions = paperPositions
       .filter(p => p.status === 'OPEN')
       .map(p => {
@@ -186,8 +233,8 @@ async function startServer() {
           maePct: p.maxAdverseExcursion || 0,
           trailingActive: p.trailingActive || false,
           trailingStopPrice: p.trailingStopPrice,
-          stopLossPercent: 5.0,
-          takeProfitPercent: undefined,
+          stopLossPercent: paperState.hardStopLossPct ?? 5.0,
+          takeProfitPercent: paperState.takeProfitPct ?? undefined,
           scoreAtEntry: p.scoreAtEntry || 75,
           openedAt: p.entryTimestamp,
           shares: amt,
@@ -200,21 +247,6 @@ async function startServer() {
           status: 'OPEN'
         };
       });
-
-    const botPositions = (state.positions || []).map(p => ({
-      ...p,
-      strategy: p.strategy || ((p as any)?.entryReason?.includes('Momentum') ? 'momentum' : ((p as any)?.entryReason?.includes('Manual') ? 'manual' : 'scalping'))
-    }));
-
-    // Invariantă P0: Maxim 1 tranzacție per monedă afișată și monitorizată
-    const seenSymbols = new Set<string>();
-    const uniqueBotPositions: any[] = [];
-    for (const p of botPositions) {
-      if (p.amount > 0 && !seenSymbols.has(p.symbol)) {
-        seenSymbols.add(p.symbol);
-        uniqueBotPositions.push(p);
-      }
-    }
 
     const uniqueMomentumPositions: any[] = [];
     for (const p of openMomentumPositions) {
@@ -229,23 +261,27 @@ async function startServer() {
       ...uniqueMomentumPositions
     ];
 
-    // Correctly calculate total equity across all services
-    const getPositionsValue = (positions: any[]) => {
-      return positions.reduce((acc, pos) => {
-        const lev = pos.leverage || 1;
-        const margin = pos.margin || ((pos.entryPrice * (pos.amount || 0)) / lev);
-        const curPrice = pos.currentPrice || pos.entryPrice;
-        const pnl = (curPrice - pos.entryPrice) * (pos.amount || 0);
-        return acc + (margin + pnl);
-      }, 0);
-    };
+    // Synchronize available cash balance:
+    // If momentum simulator has active positions or is active, use paperBalanceUSDT
+    const effectiveBalance = (paperState.active || openMomentumPositions.length > 0)
+      ? paperState.paperBalanceUSDT
+      : state.balance;
 
-    // state.balance is the unified portfolio capital (debited when positions open, credited when closed)
-    const totalPositionsValue = getPositionsValue(combinedPositions);
-    const calculatedEquity = parseFloat(((state.balance || 0) + totalPositionsValue).toFixed(2));
+    if (botEngine.state.balance !== effectiveBalance) {
+      botEngine.state.balance = effectiveBalance;
+    }
+
+    const calculatedEquity = botEngine.calculateEquity();
+    botEngine.checkCircuitBreaker();
 
     return {
       ...state,
+      autoTradingActive: botEngine.state.autoTradingActive,
+      circuitBreakerTriggered: botEngine.state.circuitBreakerTriggered,
+      circuitBreakerReason: botEngine.state.circuitBreakerReason,
+      equityProtectionConfig: botEngine.state.equityProtectionConfig,
+      balance: effectiveBalance,
+      initialBalance: paperState.startingBalanceUSDT || state.initialBalance || 1000,
       positions: combinedPositions,
       apiKey: state.apiKey ? '••••••••' : '',
       apiSecret: state.apiSecret ? '••••••••' : '',
@@ -270,8 +306,8 @@ async function startServer() {
       dynamicWatchlistSize: botEngine.state.dynamicWatchlistSize || 20,
       lastScanAt: botEngine.state.lastScanAt || null
     });
-  });
 
+  });
   app.post('/api/bot/scan-opportunities', async (req, res) => {
     try {
       const opportunities = await botEngine.scanMarketOpportunities();
@@ -293,7 +329,7 @@ async function startServer() {
 
   app.post('/api/bot/reset', requireAdminAuth, (req, res) => {
     const { balance } = req.body;
-    const newBalance = balance || 10000;
+    const newBalance = balance ? Number(balance) : 1000;
     botEngine.resetPortfolio(newBalance);
     paperTrader.resetState(newBalance);
     res.json({ success: true, state: getSanitizedBotState() });
@@ -342,15 +378,6 @@ async function startServer() {
     res.json({ ...result, state: getSanitizedBotState(), calculatedEquity: botEngine.calculateEquity() });
   });
 
-  app.post('/api/bot/consolidate-accumulation', requireAdminAuth, (req, res) => {
-    const result = botEngine.consolidateAccumulation();
-    res.json({ ...result, state: getSanitizedBotState(), calculatedEquity: botEngine.calculateEquity() });
-  });
-
-  app.post('/api/bot/reset-accumulation', requireAdminAuth, (req, res) => {
-    const result = botEngine.resetAccumulationVault();
-    res.json({ ...result, state: getSanitizedBotState(), calculatedEquity: botEngine.calculateEquity() });
-  });
 
   app.post('/api/bot/trade', requireAdminAuth, async (req, res) => {
     try {
@@ -416,6 +443,45 @@ async function startServer() {
     } catch (err: any) {
       console.error('[API /api/bot/close-position Error]', err?.message || err);
       res.status(500).json({ success: false, error: err?.message || 'Manual close failed' });
+    }
+  });
+
+  app.post('/api/bot/close-all-positions', requireAdminAuth, async (req, res) => {
+    try {
+      let closedCount = 0;
+      // 1. Close all paper positions
+      try {
+        closedCount += await paperTrader.closeAllPositions('MANUAL_CLOSE_ALL');
+      } catch (e) {
+        console.warn('[API /api/bot/close-all-positions] Paper trader close warning:', e);
+      }
+
+      // 2. Close all bot engine positions
+      try {
+        const botPositions = [...(botEngine.state.positions || [])];
+        for (const pos of botPositions) {
+          if (pos.amount > 0) {
+            const livePrice = pos.currentPrice || pos.entryPrice;
+            await botEngine.executeTrade(pos.symbol, 'SELL', livePrice, pos.amount, {
+              notes: 'Închidere manuală a tuturor pozițiilor'
+            });
+            closedCount++;
+          }
+        }
+      } catch (e) {
+        console.warn('[API /api/bot/close-all-positions] Bot engine close warning:', e);
+      }
+
+      res.json({
+        success: true,
+        message: `Au fost închise cu succes ${closedCount} poziții, iar capitalul și profitul au fost returnate în balanță liberă.`,
+        closedCount,
+        state: getSanitizedBotState(),
+        calculatedEquity: botEngine.calculateEquity()
+      });
+    } catch (err: any) {
+      console.error('[API /api/bot/close-all-positions Error]', err?.message || err);
+      res.status(500).json({ success: false, error: err?.message || 'Close all positions failed' });
     }
   });
 
