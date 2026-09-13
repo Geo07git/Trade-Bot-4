@@ -1,0 +1,9 @@
+  public calculateEquity(): number {
+    const positionsValue = this.state.positions.reduce((acc, pos) => {
+      const lev = pos.leverage || 1;
+      const margin = pos.margin || ((pos.entryPrice * pos.amount) / lev);
+      const pnl = ((pos.currentPrice || pos.entryPrice) - pos.entryPrice) * pos.amount;
+      return acc + (margin + pnl);
+    }, 0);
+    const externalVal = this.externalPositionsValueProvider ? this.externalPositionsValueProvider() : 0;
+    return parseFloat((this.state.balance + positionsValue + externalVal).toFixed(2));

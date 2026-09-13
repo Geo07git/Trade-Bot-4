@@ -91,7 +91,7 @@ export interface PaperState {
 const STATE_FILE = path.join(process.cwd(), 'server', 'data', 'momentum_paper_state.json');
 const SNAPSHOTS_FILE = path.join(process.cwd(), 'server', 'data', 'momentum_hour_snapshots.json');
 
-export class PaperTrader {
+export class MomentumExecutor {
   private config: MomentumConfig;
   private state: PaperState;
   private timer: NodeJS.Timeout | null = null;
@@ -180,7 +180,7 @@ export class PaperTrader {
         }
       }
     } catch (err) {
-      console.error('[PaperTrader] syncExistingPositionsToAudit error:', err);
+      console.error('[MomentumExecutor] syncExistingPositionsToAudit error:', err);
     }
   }
 
@@ -216,7 +216,7 @@ export class PaperTrader {
         return parsed;
       }
     } catch (err) {
-      console.error('[PaperTrader] Failed to load state:', err);
+      console.error('[MomentumExecutor] Failed to load state:', err);
     }
 
     return {
@@ -250,7 +250,7 @@ export class PaperTrader {
       fs.writeFileSync(tempFile, JSON.stringify(this.state, null, 2));
       fs.renameSync(tempFile, STATE_FILE);
     } catch (err) {
-      console.error('[PaperTrader] Failed to save state:', err);
+      console.error('[MomentumExecutor] Failed to save state:', err);
     }
   }
 
@@ -275,13 +275,13 @@ export class PaperTrader {
       }
       fs.writeFileSync(SNAPSHOTS_FILE, JSON.stringify(allSnapshots, null, 2), 'utf8');
     } catch (err) {
-      console.error('[PaperTrader] Failed to save hour snapshot:', err);
+      console.error('[MomentumExecutor] Failed to save hour snapshot:', err);
     }
   }
 
   private log(message: string) {
     const entry = { timestamp: Date.now(), message };
-    console.log(`[PaperTrader] ${message}`);
+    console.log(`[MomentumExecutor] ${message}`);
     this.state.logs.unshift(entry);
     if (this.state.logs.length > 150) {
       this.state.logs.pop();
@@ -313,7 +313,7 @@ export class PaperTrader {
       try {
         this.onPositionChange();
       } catch (e) {
-        console.error('[PaperTrader onPositionChange Error]', e);
+        console.error('[MomentumExecutor onPositionChange Error]', e);
       }
     }
   }
@@ -323,6 +323,11 @@ export class PaperTrader {
   }
 
   private executionEngineChecker?: () => string;
+  private externalSignalCallback?: (symbol: string, side: 'BUY' | 'SELL', score: number, meta: any) => Promise<boolean>;
+
+  public setExternalSignalCallback(cb: (symbol: string, side: 'BUY' | 'SELL', score: number, meta: any) => Promise<boolean>) {
+    this.externalSignalCallback = cb;
+  }
 
   public setExecutionEngineChecker(checker: () => string) {
     this.executionEngineChecker = checker;
@@ -346,7 +351,7 @@ export class PaperTrader {
       try {
         this.onBalanceChange(next);
       } catch (e) {
-        console.error('[PaperTrader onBalanceChange Error]', e);
+        console.error('[MomentumExecutor onBalanceChange Error]', e);
       }
     }
   }
@@ -364,7 +369,7 @@ export class PaperTrader {
       try {
         this.onBalanceChange(next);
       } catch (e) {
-        console.error('[PaperTrader onBalanceChange Error]', e);
+        console.error('[MomentumExecutor onBalanceChange Error]', e);
       }
     }
   }
@@ -473,7 +478,7 @@ export class PaperTrader {
       try {
         this.onBalanceChange(newBalance);
       } catch (e) {
-        console.error('[PaperTrader onBalanceChange Error]', e);
+        console.error('[MomentumExecutor onBalanceChange Error]', e);
       }
     }
     this.log(`Simulatorul a fost resetat la $${newBalance} cu pozițiile închise și regulile de Hard Stop (-50% / +100%) rearmate.`);
@@ -543,51 +548,23 @@ export class PaperTrader {
    * Returns true if a hard stop condition was triggered.
    */
   public checkHardStopCircuitBreaker(): boolean {
-    const openPositionsValue = this.state.positions.reduce((sum, p) => {
-      const curPrice = p.currentPrice || p.entryPrice;
-      const curVal = (curPrice / p.entryPrice) * p.sizeUSDT;
-      return sum + curVal;
-    }, 0);
-    const totalEquity = this.getEffectiveBalance() + openPositionsValue;
-    const startBal = this.externalStartingBalanceProvider ? this.externalStartingBalanceProvider() : (this.state.startingBalanceUSDT || 10000);
-
-    // 1. Hard Stop at -50% from initial balance
-    if (totalEquity <= startBal * 0.50) {
-      if (this.state.hardStopTriggered !== 'DRAWDOWN_50') {
-        this.state.hardStopTriggered = 'DRAWDOWN_50';
-        this.state.active = false;
-        if (this.timer) { clearInterval(this.timer); this.timer = null; }
-        if (this.hourTimer) { clearInterval(this.hourTimer); this.hourTimer = null; }
-        if (this.positionTimer) { clearInterval(this.positionTimer); this.positionTimer = null; }
-        this.log(`[HARD STOP CIRCUIT BREAKER 🛑] Balanța totală ($${totalEquity.toFixed(2)}) a scăzut la -50% din capitalul inițial ($${startBal.toFixed(2)}). Tranzacționarea a fost OPRITĂ automat.`);
-        this.saveState();
-      }
-      return true;
-    }
-
-    // 2. Hard Stop at +100% from initial balance (target doubled)
-    if (totalEquity >= startBal * 2.00) {
-      if (this.state.hardStopTriggered !== 'PROFIT_100') {
-        this.state.hardStopTriggered = 'PROFIT_100';
-        this.state.active = false;
-        if (this.timer) { clearInterval(this.timer); this.timer = null; }
-        if (this.hourTimer) { clearInterval(this.hourTimer); this.hourTimer = null; }
-        if (this.positionTimer) { clearInterval(this.positionTimer); this.positionTimer = null; }
-        this.log(`[TARGET PROFIT REACHED 🏆] Țintă atinsă! Balanța totală ($${totalEquity.toFixed(2)}) a crescut cu +100% față de capitalul inițial ($${startBal.toFixed(2)}). Tranzacționarea a fost OPRITĂ cu succes.`);
-        this.saveState();
-      }
-      return true;
-    }
-
+    // Disabled per user request - Paper trading runs uninterrupted without hard stops
     return false;
   }
 
   public start(intervalMinutes: number = 15) {
-    if (this.state.hardStopTriggered) {
-      this.log(`[ATENȚIE ⚠️] Simulatorul este în stare de Hard Stop (${this.state.hardStopTriggered}). Resetați simulatorul sau ajustați parametrii pentru a reporni.`);
-      this.state.active = false;
-      this.saveState();
-      return;
+    // Clear any previous hard stop on manual start
+    this.state.hardStopTriggered = null;
+    
+    // Re-anchor starting balance if equity is out of sync
+    const openPositionsValue = this.state.positions.reduce((sum, p) => {
+      const curPrice = p.currentPrice || p.entryPrice;
+      return sum + ((curPrice / p.entryPrice) * p.sizeUSDT);
+    }, 0);
+    const totalEquity = this.getEffectiveBalance() + openPositionsValue;
+    if (totalEquity > 0 && totalEquity < (this.state.startingBalanceUSDT || 1000) * 0.5) {
+      this.state.startingBalanceUSDT = totalEquity;
+      this.log(`[RE-ANCHOR] Capitalul inițial a fost re-ancorat la valoarea curentă de ${totalEquity.toFixed(2)} pentru a evita falsul Hard Stop.`);
     }
 
     if (this.timer) {
@@ -807,7 +784,7 @@ export class PaperTrader {
         timestamp: new Date().toISOString()
       });
     } catch (err) {
-      console.error('[PaperTrader] Failed to log sell journal entry:', err);
+      console.error('[MomentumExecutor] Failed to log sell journal entry:', err);
     }
 
     try {
@@ -828,7 +805,7 @@ export class PaperTrader {
         mae: pos.maxAdverseExcursion
       }, pos.symbol, 'MomentumBreakout', 'SELL').catch(() => {});
     } catch (err) {
-      console.error('[PaperTrader] Failed to log audit POSITION_CLOSED:', err);
+      console.error('[MomentumExecutor] Failed to log audit POSITION_CLOSED:', err);
     }
     this.notifyPositionChange();
   }
@@ -847,7 +824,7 @@ export class PaperTrader {
           }
         }
       } else {
-        console.warn('[PaperTrader] updatePositionsFast: tickers is not an array:', tickers);
+        console.warn('[MomentumExecutor] updatePositionsFast: tickers is not an array:', tickers);
       }
       
       let stateChanged = false;
@@ -1005,8 +982,9 @@ export class PaperTrader {
     if (this.checkHardStopCircuitBreaker()) return;
 
     const currentEngine = this.executionEngineChecker ? this.executionEngineChecker() : 'both';
-    if (currentEngine === 'scalping' || currentEngine === 'none') {
-      this.log(`[Momentum Breakout] Modul de execuție activ este ${currentEngine === 'none' ? 'OPRIT (NONE)' : 'DOAR SCALPING ML'}. Sărit deschiderea de poziții noi.`);
+    // If user selected momentum or both or grid, allow momentum execution. Only block if strictly 'scalping' or 'none'.
+    if (currentEngine === 'none') {
+      this.log(`[Momentum Breakout] Modul de execuție activ este OPRIT (NONE). Sărit deschiderea de poziții noi.`);
       return;
     }
 
@@ -1033,7 +1011,7 @@ export class PaperTrader {
         .map(t => t.symbol) : [];
 
       if (!Array.isArray(tickers)) {
-        console.warn('[PaperTrader] runCycle: tickers is not an array:', tickers);
+        console.warn('[MomentumExecutor] runCycle: tickers is not an array:', tickers);
       }
 
       const subset = liquidSymbols;
@@ -1092,6 +1070,23 @@ export class PaperTrader {
           const sizeUSDT = Math.min(targetSizeUSDT, maxAvailableUSDT);
           
           if (sizeUSDT < 5) continue; // Below minimum trade size
+          if (this.externalSignalCallback) {
+             const executed = await this.externalSignalCallback(symbol, 'BUY', scores.momentumScore, {
+                momentum_15m: scores.momentum_15m,
+                momentum_1h: scores.momentum_1h,
+                momentum_4h: scores.momentum_4h,
+                rvol: scores.rvol_current,
+                volumeAcceleration: scores.volumeAcceleration,
+                breakoutStrength: scores.breakoutStrength,
+                atrExpansion: scores.atrExpansion,
+                pullbackQuality: scores.pullbackQuality
+             });
+             if (executed) {
+                 this.log(`[ENTRY LIVE 🟢] Semnal trimis spre Bot Engine pentru ${symbol} cu Scor Momentum ${scores.momentumScore.toFixed(1)}`);
+             }
+             continue; 
+          }
+
 
           const feePaid = sizeUSDT * (this.config.entryFeePct / 100);
 
@@ -1142,7 +1137,7 @@ export class PaperTrader {
               timestamp: new Date().toISOString()
             });
           } catch (err) {
-            console.error('[PaperTrader] Failed to log buy journal entry:', err);
+            console.error('[MomentumExecutor] Failed to log buy journal entry:', err);
           }
 
           try {
@@ -1161,7 +1156,7 @@ export class PaperTrader {
               entryReason: `Scor Momentum: ${scores.momentumScore.toFixed(1)}/100 (RVOL: ${scores.rvol_current.toFixed(2)}, ATR: ${scores.atrExpansion.toFixed(2)})`
             }, newPos.symbol, 'MomentumBreakout', 'BUY').catch(() => {});
           } catch (err) {
-            console.error('[PaperTrader] Failed to log audit POSITION_OPENED:', err);
+            console.error('[MomentumExecutor] Failed to log audit POSITION_OPENED:', err);
           }
           this.notifyPositionChange();
 
@@ -1243,7 +1238,7 @@ export class PaperTrader {
         await this.closePositionManual(pos.id);
         closedCount++;
       } catch (err: any) {
-        console.error(`[PaperTrader] Eroare la închiderea de protecție a poziției ${pos.symbol}:`, err?.message || err);
+        console.error(`[MomentumExecutor] Eroare la închiderea de protecție a poziției ${pos.symbol}:`, err?.message || err);
       }
     }
     this.log(`[PROTECTION 🛡️] Au fost închise toate cele ${closedCount} poziții deschise (${reason}).`);
@@ -1259,7 +1254,7 @@ export class PaperTrader {
 }
 
 // Singleton instance with default baseline config
-export const paperTrader = new PaperTrader({
+export const momentumExecutor = new MomentumExecutor({
   minLiquidity24h: 10000000,
   entryFeePct: 0.075,
   exitFeePct: 0.075,

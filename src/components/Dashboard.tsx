@@ -88,8 +88,9 @@ export function Dashboard() {
     return acc + ((cp - pos.entryPrice) * pos.amount);
   }, 0);
   const equity = balance + positionsMargin + unrealizedPnL;
-  const dayChange = equity - initialBalance;
-  const dayChangePercent = initialBalance > 0 ? (dayChange / initialBalance) * 100 : 0;
+  const effectiveBase = (initialBalance && initialBalance > 0) ? initialBalance : (equity - unrealizedPnL);
+  const dayChange = equity - effectiveBase;
+  const dayChangePercent = effectiveBase > 0 ? (dayChange / effectiveBase) * 100 : 0;
 
   useEffect(() => {
     if (activeChartId === 'PORTFOLIO') return;

@@ -331,21 +331,7 @@ export function MomentumPaperView() {
       </div>
     );
   }
-
-  // Exact mark-to-market total equity
-  const openPositionsValue = state.positions.reduce((sum, p) => {
-    const curPrice = p.currentPrice || p.entryPrice;
-    return sum + ((curPrice / p.entryPrice) * p.sizeUSDT);
-  }, 0);
-  const totalEquity = state.paperBalanceUSDT + openPositionsValue;
-  const totalPnL = totalEquity - state.startingBalanceUSDT;
-  const totalPnLPct = (totalPnL / state.startingBalanceUSDT) * 100;
-  const winningTrades = closedTrades.filter(t => (t.realizedPnL || 0) > 0);
-  const winRate = closedTrades.length > 0 ? (winningTrades.length / closedTrades.length) * 100 : 0;
   const totalFeesPaid = state.totalFeesPaid || 0;
-
-  const isHardStopDrawdown = state.hardStopTriggered === 'DRAWDOWN_50';
-  const isHardStopProfit = state.hardStopTriggered === 'PROFIT_100';
 
   return (
     <div className="flex-1 flex flex-col h-full bg-black text-zinc-100 overflow-y-auto p-4 md:p-6 space-y-6">
@@ -366,21 +352,12 @@ export function MomentumPaperView() {
                   ? (state.active ? "● MOTOR ACTIV (24/7)" : "○ MOTOR OPRIT")
                   : (state.active ? "● ACTIVE ENGINE (24/7)" : "○ ENGINE STOPPED")}
               </span>
-              {state.hardStopTriggered && (
-                <span className={cn(
-                  "px-2.5 py-0.5 rounded-full text-xs font-mono font-bold border",
-                  isHardStopDrawdown 
-                    ? "bg-rose-500/20 text-rose-300 border-rose-500/50" 
-                    : "bg-emerald-500/20 text-emerald-300 border-emerald-500/50"
-                )}>
-                  {isHardStopDrawdown ? "🛑 HARD STOP (-50%)" : "🏆 TARGET PROFIT (+100%)"}
-                </span>
-              )}
+              
             </div>
             <p className="text-xs text-zinc-400 mt-0.5">
               {language === 'ro'
-                ? 'Simulare automată pe date live Binance cu contabilizare exactă a balanței, taxe incluse și protecție Hard Stop (-50% / +100%).'
-                : 'Automated simulation on live Binance data with exact balance accounting, deducted fees and Hard Stop protection (-50% / +100%).'}
+                ? 'Scanare automată de momentum și breakout cu execuție în modul global.'
+                : 'Automated momentum and breakout scanning feeding the global execution module.'}
             </p>
           </div>
         </div>
@@ -398,13 +375,8 @@ export function MomentumPaperView() {
           ) : (
             <button
               onClick={handleStart}
-              disabled={actionLoading === 'start' || !!state.hardStopTriggered}
-              className={cn(
-                "px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all shadow-lg cursor-pointer",
-                state.hardStopTriggered 
-                  ? "bg-zinc-800 text-zinc-500 cursor-not-allowed border border-white/10"
-                  : "bg-emerald-500 hover:bg-emerald-600 text-black shadow-emerald-500/20"
-              )}
+              disabled={actionLoading === 'start'}
+              className="px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all shadow-lg cursor-pointer bg-emerald-500 hover:bg-emerald-600 text-black shadow-emerald-500/20"
             >
               <Play className="w-4 h-4 fill-current" />
               <span>{language === 'ro' ? 'Pornește Paper Trading' : 'Start Paper Trading'}</span>
@@ -429,13 +401,7 @@ export function MomentumPaperView() {
             <span>{language === 'ro' ? 'Snapshots (JSON)' : 'Snapshots (JSON)'}</span>
           </a>
 
-          <button
-            onClick={handleReset}
-            disabled={actionLoading === 'reset'}
-            className="px-4 py-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer"
-          >
-            <span>{language === 'ro' ? 'Reset Capital Global ($1,000)' : 'Reset Global Capital ($1,000)'}</span>
-          </button>
+          
         </div>
       </div>
 
@@ -453,92 +419,6 @@ export function MomentumPaperView() {
           <span>{successMsg}</span>
         </div>
       )}
-
-      {/* Hard Stop Trigger Banners */}
-      {isHardStopDrawdown && (
-        <div className="bg-rose-950/70 border-2 border-rose-500/80 rounded-2xl p-5 shadow-2xl flex items-start gap-4 text-rose-100">
-          <div className="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-500 flex items-center justify-center text-rose-400 shrink-0">
-            <ShieldAlert className="w-6 h-6 animate-pulse" />
-          </div>
-          <div className="space-y-1">
-            <div className="text-base font-bold text-white flex items-center gap-2">
-              <span>🛑 HARD STOP CIRCUIT BREAKER ACTIVAT (-50%)</span>
-              <span className="text-xs px-2 py-0.5 rounded bg-rose-500/30 border border-rose-500 text-rose-200 font-mono font-normal">
-                Balanță: ${totalEquity.toFixed(2)} / Initial: ${state.startingBalanceUSDT.toLocaleString()}
-              </span>
-            </div>
-            <p className="text-xs text-rose-200 leading-relaxed">
-              {language === 'ro'
-                ? `Balanța totală a scăzut cu 50% față de capitalul inițial (limita de siguranță de $${(state.startingBalanceUSDT * 0.5).toFixed(0)} a fost atinsă). Execuția automată a fost OPRITĂ pentru protejarea capitalului rămas. Apăsați butonul „Reset Simulator” pentru a reinițializa balanța la $${state.startingBalanceUSDT.toLocaleString()}.`
-                : `Total equity dropped by 50% from initial capital ($${(state.startingBalanceUSDT * 0.5).toFixed(0)} threshold reached). Automated trading was STOPPED to protect remaining funds. Click "Reset Simulator" to re-initialize balance to $${state.startingBalanceUSDT.toLocaleString()}.`}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {isHardStopProfit && (
-        <div className="bg-emerald-950/70 border-2 border-emerald-500/80 rounded-2xl p-5 shadow-2xl flex items-start gap-4 text-emerald-100">
-          <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-500 flex items-center justify-center text-emerald-400 shrink-0">
-            <Award className="w-6 h-6 animate-bounce" />
-          </div>
-          <div className="space-y-1">
-            <div className="text-base font-bold text-white flex items-center gap-2">
-              <span>🏆 ȚINTĂ ATINSĂ: CAPITAL DUBLAT (+100% PROFIT)!</span>
-              <span className="text-xs px-2 py-0.5 rounded bg-emerald-500/30 border border-emerald-500 text-emerald-200 font-mono font-normal">
-                Balanță: ${totalEquity.toFixed(2)} / Initial: ${state.startingBalanceUSDT.toLocaleString()}
-              </span>
-            </div>
-            <p className="text-xs text-emerald-200 leading-relaxed">
-              {language === 'ro'
-                ? `Felicitări! Balanța totală a depășit ținta de +100% (Capitalul de $${state.startingBalanceUSDT.toLocaleString()} a atins $${(state.startingBalanceUSDT * 2).toLocaleString()}+). Execuția a fost oprită conform regulii de securizare a profitului obținut.`
-                : `Congratulations! Total equity has doubled (+100% target profit hit, reaching $${(state.startingBalanceUSDT * 2).toLocaleString()}+). Trading stopped according to profit-taking target rule.`}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Metrics Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-        <div className="bg-zinc-950 border border-white/10 rounded-2xl p-4">
-          <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider">{language === 'ro' ? 'Sold Cash Disponibil' : 'Available Cash'}</span>
-          <div className="text-xl md:text-2xl font-bold font-mono text-white mt-1">
-            ${state.paperBalanceUSDT.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </div>
-          <span className="text-[11px] text-zinc-500">{language === 'ro' ? 'Capital Inițial:' : 'Initial Capital:'} ${state.startingBalanceUSDT.toLocaleString()}</span>
-        </div>
-
-        <div className="bg-zinc-950 border border-white/10 rounded-2xl p-4">
-          <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider">{language === 'ro' ? 'Total Equity (Live)' : 'Total Equity (Live)'}</span>
-          <div className={cn("text-xl md:text-2xl font-bold font-mono mt-1", totalPnL >= 0 ? "text-emerald-400" : "text-rose-400")}>
-            ${totalEquity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </div>
-          <span className="text-[11px] text-zinc-500">{language === 'ro' ? 'Cash + Poziții Deschise' : 'Cash + Open Positions'}</span>
-        </div>
-
-        <div className="bg-zinc-950 border border-white/10 rounded-2xl p-4">
-          <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider">{language === 'ro' ? 'PnL Total (+/-)' : 'Total Net PnL'}</span>
-          <div className={cn("text-xl md:text-2xl font-bold font-mono mt-1", totalPnL >= 0 ? "text-emerald-400" : "text-rose-400")}>
-            {totalPnL >= 0 ? '+' : ''}${totalPnL.toFixed(2)} ({totalPnLPct >= 0 ? '+' : ''}{totalPnLPct.toFixed(2)}%)
-          </div>
-          <span className="text-[11px] text-zinc-500">{language === 'ro' ? 'Calcul exact contabilizat' : 'Exact net accounting'}</span>
-        </div>
-
-        <div className="bg-zinc-950 border border-white/10 rounded-2xl p-4">
-          <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider">{language === 'ro' ? 'Taxe & Cheltuieli' : 'Total Fees Paid'}</span>
-          <div className="text-xl md:text-2xl font-bold font-mono text-amber-400 mt-1">
-            -${totalFeesPaid.toFixed(2)}
-          </div>
-          <span className="text-[11px] text-zinc-500">{language === 'ro' ? 'Comisioane intrare + ieșire' : 'Entry + Exit Fees'}</span>
-        </div>
-
-        <div className="bg-zinc-950 border border-white/10 rounded-2xl p-4 col-span-2 md:col-span-1">
-          <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider">{language === 'ro' ? 'Win Rate & Active' : 'Win Rate & Open'}</span>
-          <div className="text-xl md:text-2xl font-bold font-mono text-white mt-1">
-            {winRate.toFixed(1)}% <span className="text-xs text-emerald-400 font-normal">({state.positions.length} active)</span>
-          </div>
-          <span className="text-[11px] text-zinc-500">{winningTrades.length} win / {closedTrades.length} închise</span>
-        </div>
-      </div>
 
       {/* MOTOR DE REGLAJ PARAMETRI (Interactive Adjustment Engine Panel) */}
       <div className="bg-zinc-950 border border-white/10 rounded-2xl p-5 shadow-xl space-y-5">

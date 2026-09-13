@@ -111,7 +111,7 @@ export function BloombergTerminal() {
   const t = getTranslation(language);
 
   const [commandInput, setCommandInput] = useState('');
-  const [activeTab, setActiveTab] = useState<'matrix' | 'blotter' | 'intelligence' | 'audit'>('matrix');
+  const { terminalActiveTab: activeTab, setTerminalActiveTab: setActiveTab } = useTradingStore();
   const [selectedSymbol, setSelectedSymbol] = useState<string>('BTCUSDT');
   const [searchFilter, setSearchFilter] = useState('');
   const [sortField, setSortField] = useState<string>('change24h');
@@ -261,8 +261,9 @@ export function BloombergTerminal() {
 
 
   const unrealizedPnLPct = equity > 0 ? (unrealizedPnL / (equity - unrealizedPnL)) * 100 : 0;
-  const totalProfit = equity - initialBalance;
-  const totalProfitPct = initialBalance > 0 ? (totalProfit / initialBalance) * 100 : 0;
+  const effectiveBase = (initialBalance && initialBalance > 0) ? initialBalance : (equity - unrealizedPnL);
+  const totalProfit = equity - effectiveBase;
+  const totalProfitPct = effectiveBase > 0 ? (totalProfit / effectiveBase) * 100 : 0;
 
   // Filtered Securities
   const securities = useMemo(() => {
@@ -477,77 +478,10 @@ export function BloombergTerminal() {
               className="absolute right-1 px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded text-[10px] font-bold tracking-wider"
             >
               {t.cmdGo}
-            </button>
+                        </button>
           </form>
         </div>
-
-        {/* Function Keys Quick Chips */}
-        <div className="flex items-center gap-1.5 shrink-0 overflow-x-auto text-[10px]">
-          <button 
-            onClick={() => setActiveTab('matrix')}
-            className={cn(
-              "px-2 py-0.5 rounded border transition-all font-bold",
-              activeTab === 'matrix' ? "bg-amber-500 text-black border-amber-400" : "bg-zinc-900/80 text-amber-400 border-amber-500/30 hover:bg-amber-500/10"
-            )}
-          >
-            F2 {t.cmdMatrix}
-          </button>
-          <button 
-            onClick={() => setActiveTab('blotter')}
-            className={cn(
-              "px-2 py-0.5 rounded border transition-all font-bold",
-              activeTab === 'blotter' ? "bg-amber-500 text-black border-amber-400" : "bg-zinc-900/80 text-amber-400 border-amber-500/30 hover:bg-amber-500/10"
-            )}
-          >
-            F4 {t.cmdPort}
-          </button>
-          <button 
-            onClick={() => setCurrentView('strategy')}
-            className="px-2 py-0.5 rounded border bg-zinc-900/80 text-amber-400 border-amber-500/30 hover:bg-amber-500/10 font-bold"
-          >
-            F7 {t.cmdScalp}
-          </button>
-          <button 
-            onClick={() => setCurrentView('audit')}
-            className="px-2 py-0.5 rounded border bg-zinc-900/80 text-amber-400 border-amber-500/30 hover:bg-amber-500/10 font-bold"
-          >
-            F5 {t.cmdAudit}
-          </button>
-          <button 
-            onClick={handleManualReconcile}
-            disabled={isReconciling}
-            className="px-2 py-0.5 rounded border bg-emerald-950/60 text-emerald-300 border-emerald-500/40 hover:bg-emerald-900/60 font-bold flex items-center gap-1"
-          >
-            <RefreshCw className={cn("w-2.5 h-2.5", isReconciling && "animate-spin")} />
-            F6 {t.reconcileNow}
-          </button>
-
-          {/* Language Toggle */}
-          <div className="flex items-center border border-amber-500/40 rounded overflow-hidden ml-1">
-            <button
-              onClick={() => setLanguage('en')}
-              className={cn(
-                "px-1.5 py-0.5 text-[9px] font-bold tracking-wider",
-                language === 'en' ? "bg-amber-500 text-black" : "bg-zinc-900 text-zinc-400 hover:text-white"
-              )}
-            >
-              EN
-            </button>
-            <button
-              onClick={() => setLanguage('ro')}
-              className={cn(
-                "px-1.5 py-0.5 text-[9px] font-bold tracking-wider",
-                language === 'ro' ? "bg-amber-500 text-black" : "bg-zinc-900 text-zinc-400 hover:text-white"
-              )}
-            >
-              RO
-            </button>
-          </div>
-
-          <span className="text-[10px] text-amber-400/80 font-mono px-1 border-l border-white/10">{currentTime}</span>
-        </div>
       </div>
-
       {/* 2. REAL-TIME TICKER TAPE (INFINITE SCROLL) */}
       <MarketTickerMarquee 
         selectedSymbol={selectedSymbol} 
@@ -622,9 +556,9 @@ export function BloombergTerminal() {
           {/* MAIN MATRIX / BLOTTER TABLE */}
           <div className="flex-1 bg-[#0a0d12] border border-amber-500/30 rounded flex flex-col overflow-hidden">
             
-            {/* Header Tabs */}
-            <div className="bg-[#0e121a] border-b border-amber-500/20 px-3 py-1.5 flex items-center justify-between gap-3 shrink-0">
-              <div className="flex items-center gap-2 text-xs">
+            {/* Header Tabs - Hide on mobile */}
+            <div className="hidden xl:flex bg-[#0e121a] border-b border-amber-500/20 px-3 py-1.5 flex-wrap items-center justify-between gap-3 shrink-0">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
                 <button
                   onClick={() => setActiveTab('matrix')}
                   className={cn(
@@ -699,14 +633,14 @@ export function BloombergTerminal() {
 
               return (
                 <div className={cn(
-                  "m-3 p-3 rounded border flex flex-col xl:flex-row items-start xl:items-center justify-between gap-3 font-mono text-xs",
+                  "m-3 p-3 rounded border flex flex-col xl:flex-row items-start xl:items-center justify-between gap-3 font-mono text-xs overflow-x-auto",
                   isLocked 
                     ? "bg-rose-950/30 border-rose-500/40 text-rose-300" 
                     : isArmed 
                       ? "bg-emerald-950/20 border-emerald-500/40 text-emerald-300"
                       : "bg-[#0c0e12] border-amber-500/30 text-amber-300"
                 )}>
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-max">
                     <div className={cn("p-1.5 rounded border", 
                       isLocked ? "bg-rose-500/20 border-rose-500/40 text-rose-400" : 
                       isArmed ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-400" :
@@ -765,10 +699,10 @@ export function BloombergTerminal() {
               );
             })()}
 
-            {/* Table Content */}
-            <div className="flex-1 overflow-auto">
+            {/* Table Content - Hide on mobile */}
+            <div className="hidden xl:flex flex-1 overflow-auto w-full">
               {activeTab === 'matrix' ? (
-                <table className="w-full text-left text-[11px] font-mono border-collapse">
+                <table className="w-full text-left text-[11px] font-mono border-collapse min-w-[700px]">
                   <thead className="bg-[#0b0e14] text-zinc-400 sticky top-0 border-b border-amber-500/20 z-10 text-[10px] tracking-wider uppercase">
                     <tr>
                       <th className="py-2 px-2.5 font-semibold text-amber-400 cursor-pointer hover:text-amber-300" onClick={() => handleSort('symbol')}>
@@ -874,14 +808,14 @@ export function BloombergTerminal() {
                 </table>
               ) : (
                 /* POSITIONS BLOTTER VIEW */
-                <div className="p-2">
+                <div className="p-2 overflow-x-auto">
                   {positions.length === 0 ? (
                     <div className="py-12 text-center text-zinc-500 text-xs flex flex-col items-center justify-center gap-2 font-mono">
                       <Layers className="w-8 h-8 text-zinc-600" />
                       <span>{t.noOpenPositions}</span>
                     </div>
                   ) : (
-                    <table className="w-full text-left text-[11px] font-mono border-collapse">
+                    <table className="w-full text-left text-[11px] font-mono border-collapse min-w-[900px]">
                       <thead className="bg-[#0b0e14] text-zinc-400 border-b border-amber-500/20 text-[10px] uppercase">
                         <tr>
                           <th className="py-2 px-2 font-semibold text-amber-400">{t.symbol}</th>

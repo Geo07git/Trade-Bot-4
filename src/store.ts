@@ -56,6 +56,8 @@ interface TradingStore {
   tradeHistory: any[];
   maxLogs: number;
   autoTradingActive: boolean;
+  terminalActiveTab: 'matrix' | 'blotter' | 'intelligence' | 'audit';
+  setTerminalActiveTab: (tab: 'matrix' | 'blotter' | 'intelligence' | 'audit') => void;
   circuitBreakerTriggered: boolean;
   circuitBreakerReason: string | null;
   dataInterval: number;
@@ -207,6 +209,7 @@ export const useTradingStore = create<TradingStore>()(
   tradeHistory: [],
   maxLogs: 250,
   autoTradingActive: false,
+  terminalActiveTab: 'matrix' as const,
   circuitBreakerTriggered: false,
   circuitBreakerReason: null,
   dataInterval: 10, // 10 seconds
@@ -486,6 +489,8 @@ export const useTradingStore = create<TradingStore>()(
       })
       .catch(() => {});
   },
+
+  setTerminalActiveTab: (tab) => set({ terminalActiveTab: tab }),
 
   setAutoTradingActive: (active) => {
     set({ autoTradingActive: active });

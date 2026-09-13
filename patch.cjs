@@ -1,92 +1,52 @@
 const fs = require('fs');
-let content = fs.readFileSync('src/components/Settings.tsx', 'utf8');
-const search = `          {/* Equity Cycle Protection */}
-          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/50 to-indigo-950/20 border border-indigo-500/20 rounded-2xl p-6">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
-                <ShieldAlert className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-lg font-serif text-white">Equity Cycle Protection</h3>
-                <p className="text-xs text-indigo-400/90">
-                  Protejează profitul acumulat prin închiderea ciclului dacă equity-ul scade sub un prag după atingerea țintei.
-                </p>
-              </div>
-              <div className="ml-auto">
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input 
-                    type="checkbox" 
-                    checked={equityProtectionConfig.enabled} 
-                    onChange={(e) => setEquityProtectionConfig({ enabled: e.target.checked })}
-                    className="sr-only peer" 
-                  />
-                  <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
-                </label>
-              </div>
-            </div>
+let lines = fs.readFileSync('server/bot.ts', 'utf8').split('\n');
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-zinc-300">Prag Profit Activare (%)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={equityProtectionConfig.profitThresholdPct}
-                  onChange={(e) => setEquityProtectionConfig({ profitThresholdPct: parseFloat(e.target.value) })}
-                  className="w-full bg-zinc-950/60 border border-white/5 rounded-lg p-2 text-sm text-white focus:border-indigo-500/50"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-zinc-300">Drawdown Protecție (%)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={equityProtectionConfig.drawdownProtectionPct}
-                  onChange={(e) => setEquityProtectionConfig({ drawdownProtectionPct: parseFloat(e.target.value) })}
-                  className="w-full bg-zinc-950/60 border border-white/5 rounded-lg p-2 text-sm text-white focus:border-indigo-500/50"
-                />
-              </div>
-            </div>
-          </div>`;
+const startStr = '      if (isArmed && equity < protectionThreshold && !config.isLocked && this.state.autoTradingActive) {';
+let startIdx = lines.findIndex(l => l.includes(startStr));
+let endIdx = -1;
+for (let i = startIdx + 1; i < lines.length; i++) {
+    if (lines[i].includes('      }')) {
+        endIdx = i;
+        break;
+    }
+}
 
-const replace = `          {/* Auto-Accumulation Vault Protection */}
-          <div className="bg-gradient-to-br from-zinc-900/90 via-zinc-900/50 to-amber-950/20 border border-amber-500/20 rounded-2xl p-6">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400">
-                <ShieldAlert className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-lg font-serif text-white">Conservare Profit (Vault Acumulare)</h3>
-                <p className="text-xs text-amber-400/90">
-                  Protejează profitul acumulat prin închiderea tuturor pozițiilor și mutarea profitului în Pușculiță la atingerea unei ținte.
-                </p>
-              </div>
-              <div className="ml-auto">
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input 
-                    type="checkbox" 
-                    checked={accumulationTargetEnabled} 
-                    onChange={(e) => toggleAccumulationTarget(e.target.checked)}
-                    className="sr-only peer" 
-                  />
-                  <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-600"></div>
-                </label>
-              </div>
-            </div>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-zinc-300">Țintă Profit Ciclu (%)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={accumulationTargetPercent}
-                  onChange={(e) => setAccumulationTargetPercent(parseFloat(e.target.value))}
-                  className="w-full bg-zinc-950/60 border border-white/5 rounded-lg p-2 text-sm text-white focus:border-amber-500/50"
-                />
-              </div>
-            </div>
-          </div>`;
+const replacement = `      if (isArmed && equity < protectionThreshold && !config.isLocked && this.state.autoTradingActive) {
+        // We do NOT lock or stop auto-trading. We restart a new cycle immediately.
+        const oldHwm = config.highWaterMark;
+        config.highWaterMark = equity; // Temporarily reset to avoid re-triggering while selling
+        
+        const reason = \`🛡️ [EQUITY TRAILING - CICLU COMPLETAT] Profit securizat! HWM: \${oldHwm.toFixed(2)} | Equity curent: \${equity.toFixed(2)}. Poziții închise, se relansează un nou ciclu automat.\`;
+        
+        this.addLog(reason, 'success', equity);
+        db.logEvent('EQUITY_TRAILING_AUTO_RESTART', { highWaterMark: oldHwm, equity, trailingPct, profitThresholdPct }, undefined, 'RiskEngine', 'SYSTEM');
+        
+        // Asynchronously close positions and restart
+        this.closeAllPositionsForProtection(false).then(() => {
+           const newEquity = this.calculateEquity();
+           this.state.initialBalance = newEquity > 0 ? newEquity : 250;
+           if (this.state.equityProtectionConfig) {
+               this.state.equityProtectionConfig.highWaterMark = this.state.initialBalance;
+           }
+           this.addLog(\`🔄 [REPORNIRE AUTOMATĂ] Capital re-ancorat la \${this.state.initialBalance.toFixed(2)} USDT. Noul ciclu de tranzacționare a început.\`, 'info', this.state.initialBalance);
+           
+           const telegramMsg = \`🛡️ 🔄 **[EQUITY TRAILING: PROFIT SECURIZAT & REPORNIRE AUTOMATĂ]**\\n\\n\` +
+             \`Sistemul a securizat profitul după atingerea pragului (+\${profitThresholdPct}%).\\n\\n\` +
+             \`• **Vârf atins (HWM):** \${oldHwm.toFixed(2)} USDT\\n\` +
+             \`• **Balanță NOUĂ (Securizată):** \${this.state.initialBalance.toFixed(2)} USDT\\n\\n\` +
+             \`✅ Toate pozițiile au fost închise cu succes.\\n\` +
+             \`🤖 **Auto-Trading continuă automat** cu noul capital de start de \${this.state.initialBalance.toFixed(2)} USDT.\`;
+           this.sendNotification(telegramMsg);
+           this.savePersistedState(true);
+        });
 
-content = content.replace(search, replace);
-fs.writeFileSync('src/components/Settings.tsx', content);
+        return true;
+      }`;
+
+if (startIdx !== -1 && endIdx !== -1) {
+    lines.splice(startIdx, endIdx - startIdx + 1, replacement);
+    fs.writeFileSync('server/bot.ts', lines.join('\n'));
+    console.log("Success");
+} else {
+    console.log("Could not find boundaries");
+}

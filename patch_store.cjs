@@ -1,23 +1,24 @@
 const fs = require('fs');
-let content = fs.readFileSync('src/store.ts', 'utf8');
+let code = fs.readFileSync('src/store.ts', 'utf8');
 
-const target = `  equityProtectionConfig: {
-    enabled: true,
-    profitThresholdPct: 0.8,
-    drawdownProtectionPct: 0.1
-  },`;
+// interface TradingStore {
+const interfaceTarget = `  autoTradingActive: boolean;`;
+const interfaceReplacement = `  autoTradingActive: boolean;
+  terminalActiveTab: 'matrix' | 'blotter' | 'intelligence' | 'audit';
+  setTerminalActiveTab: (tab: 'matrix' | 'blotter' | 'intelligence' | 'audit') => void;`;
+code = code.replace(interfaceTarget, interfaceReplacement);
 
-const replacement = `  equityProtectionConfig: {
-    enabled: true,
-    trailingDistancePct: 0.40,
-    highWaterMark: 0,
-    isLocked: false
-  },`;
+// const initialState = {
+const initialTarget = `  autoTradingActive: false,`;
+const initialReplacement = `  autoTradingActive: false,
+  terminalActiveTab: 'matrix' as const,`;
+code = code.replace(initialTarget, initialReplacement);
 
-if (content.includes(target)) {
-  content = content.replace(target, replacement);
-  fs.writeFileSync('src/store.ts', content);
-  console.log('Successfully patched store.ts');
-} else {
-  console.log('Target not found in store.ts');
-}
+// setAutoTradingActive: (active) => set({ autoTradingActive: active }),
+const actionTarget = `  setAutoTradingActive: (active) => set({ autoTradingActive: active }),`;
+const actionReplacement = `  setAutoTradingActive: (active) => set({ autoTradingActive: active }),
+  setTerminalActiveTab: (tab) => set({ terminalActiveTab: tab }),`;
+code = code.replace(actionTarget, actionReplacement);
+
+fs.writeFileSync('src/store.ts', code);
+console.log('store.ts patched');

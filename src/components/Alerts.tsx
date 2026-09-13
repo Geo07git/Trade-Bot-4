@@ -97,7 +97,7 @@ export function Alerts() {
                </div>
                <div className="flex flex-wrap items-center gap-2">
                  <span className="px-2 py-1 bg-blue-500/20 border border-blue-500/50 text-blue-400 rounded text-[10px] font-bold tracking-wider">TELEGRAM</span>
-                 <span className="px-2 py-1 bg-indigo-500/20 border border-indigo-500/50 text-indigo-400 rounded text-[10px] font-bold tracking-wider">DISCORD</span>
+                 
                  <span className="px-2 py-1 bg-emerald-500/20 border border-emerald-500/50 text-emerald-400 rounded text-[10px] font-bold tracking-wider">DESKTOP & ANDROID PUSH</span>
                </div>
             </div>
@@ -147,10 +147,7 @@ export function Alerts() {
                     <input type="checkbox" checked={reportConfig?.channels?.telegram ?? true} onChange={(e) => setReportConfig({ channels: { ...reportConfig.channels, telegram: e.target.checked } })} className="accent-blue-500 w-4 h-4 rounded border-white/10 bg-black" />
                     <span className="text-sm text-zinc-300 group-hover/chk:text-white transition-colors">Telegram</span>
                   </label>
-                  <label className="flex items-center gap-2 cursor-pointer group/chk">
-                    <input type="checkbox" checked={reportConfig?.channels?.discord ?? true} onChange={(e) => setReportConfig({ channels: { ...reportConfig.channels, discord: e.target.checked } })} className="accent-indigo-500 w-4 h-4 rounded border-white/10 bg-black" />
-                    <span className="text-sm text-zinc-300 group-hover/chk:text-white transition-colors">Discord Webhook</span>
-                  </label>
+
                   <label className="flex items-center gap-2 cursor-pointer group/chk">
                     <input type="checkbox" checked={reportConfig?.channels?.browser ?? true} onChange={(e) => setReportConfig({ channels: { ...reportConfig.channels, browser: e.target.checked } })} className="accent-emerald-500 w-4 h-4 rounded border-white/10 bg-black" />
                     <span className="text-sm text-zinc-300 group-hover/chk:text-white transition-colors">Desktop & Android Push (PWA)</span>

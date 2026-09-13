@@ -9,7 +9,7 @@ import { getAccountInfo, getMyTrades, getOpenOrders } from './server/services/Bi
 import { journalService } from './server/services/JournalService';
 import momentumBacktestRouter from './server/api/momentum-backtest';
 import momentumPaperRouter from './server/api/momentum-paper';
-import { paperTrader } from './server/services/momentum/PaperTrader';
+import { momentumExecutor } from './server/services/momentum/MomentumExecutor';
 import { requireAdminAuth } from './server/utils/auth';
 
 dotenv.config();
@@ -22,16 +22,16 @@ async function startServer() {
 
   // Cross-Engine Safety: Maximum 1 position / transaction per coin across all engines
   botEngine.setExternalPositionChecker((symbol: string) => {
-    return (paperTrader.getState().positions || []).some(p => p.symbol === symbol && p.status === 'OPEN');
+    return (momentumExecutor.getState().positions || []).some(p => p.symbol === symbol && p.status === 'OPEN');
   });
 
-  paperTrader.setExternalPositionChecker((symbol: string) => {
+  momentumExecutor.setExternalPositionChecker((symbol: string) => {
     return (botEngine.state.positions || []).some(p => p.symbol === symbol && p.amount > 0);
   });
 
   // Connect live positions equity provider so botEngine.calculateEquity() accounts for momentum paper positions
   botEngine.setExternalPositionsValueProvider(() => {
-    const paperPositions = paperTrader.getState().positions || [];
+    const paperPositions = momentumExecutor.getState().positions || [];
     return paperPositions
       .filter(p => p.status === 'OPEN')
       .reduce((acc, p) => {
@@ -43,21 +43,77 @@ async function startServer() {
   });
 
   // Connect live positions close provider so Equity Trailing Protection closes momentum paper positions and stops trading
-  botEngine.setExternalPositionsCloseProvider(async (reason: string) => {
+  botEngine.setOnRestartCallback(() => {
+    momentumExecutor.start();
+  });
+
+  botEngine.setExternalPositionsCloseProvider(async (reason: string, shouldStop: boolean = true) => {
     try {
-      await paperTrader.closeAllPositions(reason);
-      paperTrader.stop();
+      await momentumExecutor.closeAllPositions(reason);
+      if (shouldStop) {
+        momentumExecutor.stop();
+      }
     } catch (err) {
-      console.error('[server] Error closing paperTrader positions on protection trigger:', err);
+      console.error('[server] Error closing momentumExecutor positions on protection trigger:', err);
     }
   });
 
-  // Link execution engine mode (both / scalping / momentum) to paperTrader
-  paperTrader.setExecutionEngineChecker(() => botEngine.state.executionEngine || 'both');
+  // Link execution engine mode (both / scalping / momentum) to momentumExecutor
+  momentumExecutor.setExecutionEngineChecker(() => botEngine.state.executionEngine || 'both');
+  // Route Momentum signals directly to the live BotEngine
+  momentumExecutor.setExternalSignalCallback(async (symbol, side, score, meta) => {
+    try {
+      // Bypass strict autonomous trading check for paper signals if user wants live execution
+      // Allow execution regardless of engine mode filter if user triggers momentum signals
+      const currentEngine = botEngine.state.executionEngine || 'both';
+      
+      const currentPriceRes = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+      const currentPriceData = await currentPriceRes.json();
+      const currentPrice = parseFloat(currentPriceData.price);
 
-  // Connect virtual balance so PaperTrader reads and writes directly to botEngine.state.balance
-  // This unifies the capital pool and prevents profit from vanishing when PaperTrader stops
-  paperTrader.setExternalBalanceInterfaces(
+      const allocPct = botEngine.state.momentumConfig?.positionAllocationPct ?? 10;
+      const baseCapital = botEngine.state.initialBalance || 250;
+      const amountToBuyUSDT = baseCapital * (allocPct / 100);
+      const amountToBuy = parseFloat((amountToBuyUSDT / currentPrice).toFixed(4));
+      
+      if (amountToBuyUSDT < 5) {
+          console.warn(`[server] Not enough allocation for Momentum signal on ${symbol}`);
+          return false;
+      }
+
+      // Bypass botEngine internal checks (like scalping engine requirements) by inserting directly into botEngine positions or executing force trade
+      const targetAlloc = amountToBuyUSDT;
+      const fee = targetAlloc * 0.001;
+      botEngine.state.balance = Math.max(0, botEngine.state.balance - (targetAlloc + fee));
+      const newPos = {
+        id: `bot_${Date.now()}_${symbol}`,
+        symbol,
+        entryPrice: currentPrice,
+        amount: amountToBuy,
+        sizeUSDT: targetAlloc,
+        currentPrice: currentPrice,
+        leverage: 1,
+        strategy: 'momentum',
+        modelName: 'Momentum Breakout ML',
+        entryReason: `Momentum Breakout | Score: ${score.toFixed(1)} | RVOL: ${meta.rvol?.toFixed(2) || 0}`,
+        entryTimestamp: Date.now()
+      };
+      botEngine.state.positions.push(newPos);
+      botEngine.savePersistedState(true);
+      
+      console.log(`[Momentum Live Executed] Opened position on ${symbol} at ${currentPrice} for ${targetAlloc.toFixed(2)} USDT`);
+      
+      return true;
+    } catch (err) {
+      console.error('[server] Error passing signal from momentumExecutor to botEngine:', err);
+      return false;
+    }
+  });
+
+
+  // Connect virtual balance so MomentumExecutor reads and writes directly to botEngine.state.balance
+  // This unifies the capital pool and prevents profit from vanishing when MomentumExecutor stops
+  momentumExecutor.setExternalBalanceInterfaces(
     () => botEngine.state.balance,
     (newBal: number) => { botEngine.state.balance = newBal; },
     () => botEngine.state.initialBalance || 250
@@ -79,27 +135,24 @@ async function startServer() {
     }
   };
 
-  // Keep botEngine cash balance in sync when paperTrader deducts or refunds capital
-  paperTrader.setOnBalanceChange((newBalance: number) => {
+  // Keep botEngine cash balance in sync when momentumExecutor deducts or refunds capital
+  momentumExecutor.setOnBalanceChange((newBalance: number) => {
     botEngine.state.balance = newBalance;
     botEngine.savePersistedState(true);
     triggerReconciliation(false);
   });
 
   // Reconcile on position changes (open, close, manual close)
-  paperTrader.setOnPositionChange(() => {
+  momentumExecutor.setOnPositionChange(() => {
     triggerReconciliation(false);
   });
 
-  // Reconcile and synchronize state between botEngine and paperTrader on startup
+  // Reconcile and synchronize state between botEngine and momentumExecutor on startup
   try {
-    const paperState = paperTrader.getState();
+    const paperState = momentumExecutor.getState();
     const openPaperPositions = (paperState.positions || []).filter(p => p.status === 'OPEN');
     if (openPaperPositions.length > 0) {
-      console.log(`[Startup Sync] Sincronizare portofoliu: ${openPaperPositions.length} poziții deschise în Momentum Simulator. Balanță numerar: $${paperState.paperBalanceUSDT} USDT.`);
-      botEngine.state.balance = paperState.paperBalanceUSDT;
-      botEngine.state.initialBalance = paperState.startingBalanceUSDT || 1000;
-      botEngine.savePersistedState(true);
+      console.log(`[Startup Sync] Sincronizare portofoliu: ${openPaperPositions.length} poziții deschise în Momentum Simulator. Equity total unificat: ${botEngine.calculateEquity()} USDT.`);
     }
     triggerReconciliation(true);
   } catch (err) {
@@ -217,8 +270,8 @@ async function startServer() {
       }
     }
 
-    // Include open positions from Momentum PaperTrader
-    const paperState = paperTrader.getState();
+    // Include open positions from Momentum MomentumExecutor
+    const paperState = momentumExecutor.getState();
     const paperPositions = paperState.positions || [];
     const openMomentumPositions = paperPositions
       .filter(p => p.status === 'OPEN')
@@ -329,7 +382,7 @@ async function startServer() {
     const { balance } = req.body;
     const newBalance = balance ? Number(balance) : 1000;
     botEngine.resetPortfolio(newBalance);
-    paperTrader.resetState(newBalance);
+    momentumExecutor.resetState(newBalance);
     res.json({ success: true, state: getSanitizedBotState() });
   });
 
@@ -400,9 +453,9 @@ async function startServer() {
 
       let closedSomething = false;
 
-      // 1. Try closing in Momentum PaperTrader
+      // 1. Try closing in Momentum MomentumExecutor
       try {
-        const paperResult = await paperTrader.closePositionManual(symbol);
+        const paperResult = await momentumExecutor.closePositionManual(symbol);
         if (paperResult) {
           closedSomething = true;
         }
@@ -449,7 +502,7 @@ async function startServer() {
       let closedCount = 0;
       // 1. Close all paper positions
       try {
-        closedCount += await paperTrader.closeAllPositions('MANUAL_CLOSE_ALL');
+        closedCount += await momentumExecutor.closeAllPositions('MANUAL_CLOSE_ALL');
       } catch (e) {
         console.warn('[API /api/bot/close-all-positions] Paper trader close warning:', e);
       }

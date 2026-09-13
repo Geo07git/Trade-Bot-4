@@ -159,8 +159,9 @@ export function SuperDashboard({ onSwitchToFullDashboard }: SuperDashboardProps)
     return acc + ((cp - pos.entryPrice) * pos.amount);
   }, 0);
   const equity = balance + positionsMargin + unrealizedPnL;
-  const totalPnL = equity - initialBalance;
-  const totalPnLPercent = initialBalance > 0 ? (totalPnL / initialBalance) * 100 : 0;
+  const effectiveBase = (initialBalance && initialBalance > 0) ? initialBalance : (equity - unrealizedPnL);
+  const totalPnL = equity - effectiveBase;
+  const totalPnLPercent = effectiveBase > 0 ? (totalPnL / effectiveBase) * 100 : 0;
 
   const handleSync = async () => {
     setIsSyncing(true);

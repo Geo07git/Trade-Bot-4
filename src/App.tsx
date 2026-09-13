@@ -14,6 +14,7 @@ import { Dashboard } from './components/Dashboard';
 import { ScalpingBot } from './components/ScalpingBot';
 import { AuditTrailView } from './components/AuditTrailView';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
+import { ShortcutBar } from './components/ShortcutBar';
 import { MomentumPaperView } from './components/MomentumPaperView';
 import { TradeLogs } from './components/TradeLogs';
 import { TradingJournal } from './components/TradingJournal';
@@ -243,6 +244,20 @@ export default function App() {
     'settings'
   ];
   const activeView: ViewState = validViews.includes(currentView) ? currentView : 'dashboard';
+  const { terminalActiveTab, setTerminalActiveTab } = useTradingStore();
+  const [isReconciling, setIsReconciling] = useState(false);
+
+  const handleManualReconcile = async () => {
+    setIsReconciling(true);
+    try {
+      const res = await fetch('/api/bot/reconcile', { method: 'POST' });
+      const data = await res.json();
+    } catch (err) {
+      console.error('Reconcile error', err);
+    } finally {
+      setIsReconciling(false);
+    }
+  };
 
   useEffect(() => {
     console.log(`[TradeBot App.tsx] Content Mounting - Active View: "${activeView}" (raw store view: "${currentView}")`);
@@ -323,6 +338,14 @@ export default function App() {
       />
       
       <main className="flex-1 h-full overflow-hidden relative flex flex-col">
+        <ShortcutBar 
+          currentView={activeView}
+          setCurrentView={setCurrentView}
+          activeTab={terminalActiveTab}
+          setActiveTab={setTerminalActiveTab}
+          isReconciling={isReconciling}
+          handleManualReconcile={handleManualReconcile}
+        />
         {/* Real-Time Engine Parity & Desync Status Bar */}
         <EngineStatusBanner />
 

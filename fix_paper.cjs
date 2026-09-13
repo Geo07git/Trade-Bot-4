@@ -1,73 +1,51 @@
 const fs = require('fs');
-let code = fs.readFileSync('server/services/momentum/PaperTrader.ts', 'utf8');
+let code = fs.readFileSync('server/services/momentum/MomentumExecutor.ts', 'utf8');
 
-code = code.replace(`    this.timer = setInterval(() => {
-      this.runCycle();
-    }, intervalMinutes * 60 * 1000);
-  }`, `    this.timer = setInterval(() => {
-      this.runCycle();
-    }, intervalMinutes * 60 * 1000);
+if (!code.includes('externalSignalCallback')) {
+  // Add property
+  code = code.replace(
+    'private executionEngineChecker?: () => string;',
+    `private executionEngineChecker?: () => string;\n  private externalSignalCallback?: (symbol: string, side: 'BUY' | 'SELL', score: number, meta: any) => Promise<boolean>;`
+  );
 
-    // Fast loop for MFE/MAE and current price updates
-    this.updatePositionsFast();
-    this.positionTimer = setInterval(() => {
-      this.updatePositionsFast();
-    }, 15000); // 15 seconds
-  }`);
+  // Add setter
+  code = code.replace(
+    'public setExecutionEngineChecker(checker: () => string) {',
+    `public setExternalSignalCallback(cb: (symbol: string, side: 'BUY' | 'SELL', score: number, meta: any) => Promise<boolean>) {\n    this.externalSignalCallback = cb;\n  }\n\n  public setExecutionEngineChecker(checker: () => string) {`
+  );
 
-code = code.replace(`  public stop() {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-    this.state.active = false;
-    this.log('Paper trading stopped.');
-    this.saveState();
-  }`, `  public stop() {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-    if (this.positionTimer) {
-      clearInterval(this.positionTimer);
-      this.positionTimer = null;
-    }
-    this.state.active = false;
-    this.log('Paper trading stopped.');
-    this.saveState();
-  }
+  const entryLogicTarget = `const feePaid = sizeUSDT * (this.config.entryFeePct / 100);
+          this.deductCapital(sizeUSDT + feePaid);
+          this.state.totalFeesPaid = (this.state.totalFeesPaid || 0) + feePaid;
 
-  private async updatePositionsFast() {
-    if (!this.state.active || this.state.positions.length === 0) return;
-    try {
-      const res = await fetch('https://api.binance.com/api/v3/ticker/price');
-      const tickers = await res.json();
-      const priceMap = new Map<string, number>();
-      for (const t of tickers) {
-        priceMap.set(t.symbol, parseFloat(t.price));
-      }
-      
-      let stateChanged = false;
-      for (const pos of this.state.positions) {
-        if (pos.status === 'OPEN') {
-           const currentPrice = priceMap.get(pos.symbol);
-           if (currentPrice) {
-             const pctMove = ((currentPrice / pos.entryPrice) - 1) * 100;
-             pos.currentPrice = currentPrice;
-             pos.currentPnLPct = pctMove;
-             
-             if (pctMove > pos.maxFavorableExcursion || pctMove < pos.maxAdverseExcursion) {
-                pos.maxFavorableExcursion = Math.max(pos.maxFavorableExcursion, pctMove);
-                pos.maxAdverseExcursion = Math.min(pos.maxAdverseExcursion, pctMove);
+          const newPos: PaperPosition = {`;
+          
+  const entryLogicReplacement = `
+          if (this.externalSignalCallback) {
+             const executed = await this.externalSignalCallback(symbol, 'BUY', scores.momentumScore, {
+                momentum_15m: scores.momentum_15m,
+                momentum_1h: scores.momentum_1h,
+                momentum_4h: scores.momentum_4h,
+                rvol: scores.rvol_current,
+                volumeAcceleration: scores.volumeAcceleration,
+                breakoutStrength: scores.breakoutStrength,
+                atrExpansion: scores.atrExpansion,
+                pullbackQuality: scores.pullbackQuality
+             });
+             if (executed) {
+                 this.log(\`[ENTRY LIVE 🟢] Semnal trimis spre Bot Engine pentru \${symbol} cu Scor Momentum \${scores.momentumScore.toFixed(1)}\`);
              }
-             stateChanged = true;
-           }
-        }
-      }
-      if (stateChanged) this.saveState();
-    } catch (err) {
-      this.log('Eroare la actualizarea rapida a preturilor: ' + String(err));
-    }
-  }`);
+             continue; // Skip the internal paper simulation if we sent it to the live flow
+          }
 
-fs.writeFileSync('server/services/momentum/PaperTrader.ts', code);
+          const feePaid = sizeUSDT * (this.config.entryFeePct / 100);
+          this.deductCapital(sizeUSDT + feePaid);
+          this.state.totalFeesPaid = (this.state.totalFeesPaid || 0) + feePaid;
+
+          const newPos: PaperPosition = {`;
+          
+  code = code.replace(entryLogicTarget, entryLogicReplacement);
+  
+  fs.writeFileSync('server/services/momentum/MomentumExecutor.ts', code);
+  console.log('MomentumExecutor patched');
+}

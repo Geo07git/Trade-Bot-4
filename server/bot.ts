@@ -980,7 +980,8 @@ class ServerBotEngine {
   private consecutiveApiErrors = 0;
   private externalPositionChecker: ((symbol: string) => boolean) | null = null;
   private externalPositionsValueProvider: (() => number) | null = null;
-  private externalPositionsCloseProvider: ((reason: string) => Promise<void>) | null = null;
+  private externalPositionsCloseProvider: ((reason: string, shouldStop?: boolean) => Promise<void>) | null = null;
+  private onRestartCallback: (() => void) | null = null;
 
   public setExternalPositionChecker(checker: (symbol: string) => boolean) {
     this.externalPositionChecker = checker;
@@ -990,8 +991,11 @@ class ServerBotEngine {
     this.externalPositionsValueProvider = provider;
   }
 
-  public setExternalPositionsCloseProvider(provider: (reason: string) => Promise<void>) {
+  public setExternalPositionsCloseProvider(provider: (reason: string, shouldStop?: boolean) => Promise<void>) {
     this.externalPositionsCloseProvider = provider;
+  }
+  public setOnRestartCallback(cb: () => void) {
+    this.onRestartCallback = cb;
   }
 
   constructor() {
@@ -1348,7 +1352,7 @@ class ServerBotEngine {
     this.savePersistedState(true);
   }
 
-  public async closeAllPositionsForProtection() {
+  public async closeAllPositionsForProtection(shouldStopExternal = true) {
     const positions = [...(this.state.positions || [])];
     for (const pos of positions) {
       if (pos.amount > 0) {
@@ -1363,10 +1367,10 @@ class ServerBotEngine {
       }
     }
 
-    // Also close external positions (e.g. Momentum PaperTrader)
+    // Also close external positions (e.g. Momentum MomentumExecutor)
     if (this.externalPositionsCloseProvider) {
       try {
-        await this.externalPositionsCloseProvider('Equity Trailing Protection');
+        await this.externalPositionsCloseProvider('Equity Trailing Protection', shouldStopExternal);
       } catch (err) {
         console.error('[closeAllPositionsForProtection external Error]', err);
       }
@@ -1374,6 +1378,10 @@ class ServerBotEngine {
   }
 
   public checkCircuitBreaker(): boolean {
+    if (this.state.equityProtectionConfig?.isLocked) {
+      return true; // Bypass all checks while in the middle of closing positions for Trailing Reset
+    }
+
     const equity = this.calculateEquity();
     const initBal = (this.state.initialBalance && this.state.initialBalance > 0) ? this.state.initialBalance : 250;
 
@@ -1404,26 +1412,37 @@ class ServerBotEngine {
 
       // Trigger ONLY when armed (profit reached) and equity retreats below protectionThreshold
       if (isArmed && equity < protectionThreshold && !config.isLocked && this.state.autoTradingActive) {
-        config.isLocked = true;
-        this.state.autoTradingActive = false;
-        this.state.circuitBreakerTriggered = true;
-        const reason = `🛡️ [EQUITY TRAILING PROTECTION] HWM: ${config.highWaterMark.toFixed(2)} | Equity: ${equity.toFixed(2)} (Scădere > ${trailingPct}% după profit > ${profitThresholdPct}%). Poziții închise și auto-trading oprit.`;
-        this.state.circuitBreakerReason = reason;
+        // We do NOT lock or stop auto-trading. We restart a new cycle immediately.
+        config.isLocked = true; // Lock execution during the restart process
+        const oldHwm = config.highWaterMark;
+        config.highWaterMark = equity; // Temporarily reset to avoid re-triggering while selling
+        
+        const reason = `🛡️ [EQUITY TRAILING - CICLU COMPLETAT] Profit securizat! HWM: ${oldHwm.toFixed(2)} | Equity curent: ${equity.toFixed(2)}. Poziții închise, se relansează un nou ciclu automat.`;
+        
+        this.addLog(reason, 'success', equity);
+        db.logEvent('EQUITY_TRAILING_AUTO_RESTART', { highWaterMark: oldHwm, equity, trailingPct, profitThresholdPct }, undefined, 'RiskEngine', 'SYSTEM');
+        
+        // Asynchronously close positions and restart
+        this.closeAllPositionsForProtection(false).then(() => {
+           const newEquity = this.calculateEquity();
+           this.state.initialBalance = newEquity > 0 ? newEquity : 250;
+           if (this.state.equityProtectionConfig) {
+               this.state.equityProtectionConfig.highWaterMark = this.state.initialBalance;
+               this.state.equityProtectionConfig.isLocked = false; // Unlock for the new cycle
+           }
+           this.addLog(`🔄 [REPORNIRE AUTOMATĂ] Capital re-ancorat la ${this.state.initialBalance.toFixed(2)} USDT. Noul ciclu de tranzacționare a început.`, 'info', this.state.initialBalance);
+           
+           this.onRestartCallback?.();
+           const telegramMsg = `🛡️ 🔄 **[EQUITY TRAILING: PROFIT SECURIZAT & REPORNIRE AUTOMATĂ]**\n\n` +
+             `Sistemul a securizat profitul după atingerea pragului (+${profitThresholdPct}%).\n\n` +
+             `• **Vârf atins (HWM):** ${oldHwm.toFixed(2)} USDT\n` +
+             `• **Balanță NOUĂ (Securizată):** ${this.state.initialBalance.toFixed(2)} USDT\n\n` +
+             `✅ Toate pozițiile au fost închise cu succes.\n` +
+             `🤖 **Auto-Trading continuă automat** cu noul capital de start de ${this.state.initialBalance.toFixed(2)} USDT.`;
+           this.sendNotification(telegramMsg);
+           this.savePersistedState(true);
+        });
 
-        this.addLog(`[EQUITY TRAILING PROTECTION] Prag trailing atins! HWM: ${config.highWaterMark.toFixed(2)}, Curent: ${equity.toFixed(2)} (Drop > ${trailingPct}% după profit > ${profitThresholdPct}%). Auto-trading blocat și poziții închise pentru protecția câștigurilor.`, 'warning', equity);
-        db.logEvent('EQUITY_TRAILING_ACTIVATED', { highWaterMark: config.highWaterMark, equity, trailingPct, profitThresholdPct, threshold: protectionThreshold }, undefined, 'RiskEngine', 'EMERGENCY');
-
-        this.closeAllPositionsForProtection();
-
-        const telegramMsg = `🛡️ **[EQUITY TRAILING PROTECTION ACTIVAT]**\n\n` +
-          `Sistemul a securizat profitul după atingerea pragului de activare (+${profitThresholdPct}%).\n\n` +
-          `• **High-Water Mark (Vârf):** ${config.highWaterMark.toFixed(2)} USDT\n` +
-          `• **Equity Curent:** ${equity.toFixed(2)} USDT\n` +
-          `• **Trailing Prag:** ${trailingPct}%\n` +
-          `• **Prag Minim Profit:** +${profitThresholdPct}%\n` +
-          `• **Acțiune:** Toate pozițiile au fost închise la piață și profitul net a fost securizat în balanță.`;
-        this.sendNotification(telegramMsg);
-        this.savePersistedState();
         return true;
       }
     }
@@ -2865,6 +2884,7 @@ class ServerBotEngine {
 
   public calculateEquity(): number {
     const positionsValue = this.state.positions.reduce((acc, pos) => {
+      if (pos.status === 'CLOSED') return acc;
       const lev = pos.leverage || 1;
       const margin = pos.margin || ((pos.entryPrice * pos.amount) / lev);
       const pnl = ((pos.currentPrice || pos.entryPrice) - pos.entryPrice) * pos.amount;
